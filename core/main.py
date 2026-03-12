@@ -6,6 +6,7 @@ Usage: python -m core.main [--config config.yml] [--log data/test.txt]
 import argparse
 import signal
 import sys
+import time
 from collections import deque
 from pathlib import Path
 
@@ -22,7 +23,6 @@ C_TYPE = {
     "思考": "\033[36m",    # cyan
     "意图": "\033[33m",    # yellow
     "反应": "\033[32m",    # green
-    "反思": "\033[35m",    # magenta
 }
 
 _log_file = None
@@ -41,6 +41,10 @@ def main() -> None:
     identity = config["bootstrap"]["identity"]
     model_config = config["models"]["primary"]
     context_window = config["short_term_memory"]["context_window_size"]
+    runtime_config = config.get("runtime", {})
+    retry_delay = float(runtime_config.get("error_retry_delay_seconds", 1.0))
+    max_retry_delay = float(runtime_config.get("max_error_retry_delay_seconds", 10.0))
+    current_retry_delay = retry_delay
 
     thoughts: deque[Thought] = deque(maxlen=context_window * 3)
     cycle_id = 0
@@ -60,13 +64,16 @@ def main() -> None:
         except KeyboardInterrupt:
             raise
         except Exception as e:
-            _print_error(cycle_id, e)
+            _print_error(cycle_id, e, current_retry_delay)
+            time.sleep(current_retry_delay)
+            current_retry_delay = _next_retry_delay(current_retry_delay, max_retry_delay)
             continue
 
         for t in new_thoughts:
             thoughts.append(t)
 
         _print_cycle(cycle_id, new_thoughts)
+        current_retry_delay = retry_delay
 
 
 def _print_cycle(cycle_id: int, thoughts: list[Thought]) -> None:
@@ -94,8 +101,10 @@ def _output(text: str) -> None:
         _log_file.flush()
 
 
-def _print_error(cycle_id: int, error: Exception) -> None:
+def _print_error(cycle_id: int, error: Exception, retry_delay: float | None = None) -> None:
     msg = f"── C{cycle_id} ERROR: {error}"
+    if retry_delay is not None:
+        msg = f"{msg} (retry in {retry_delay:.1f}s)"
     print(f"\n\033[31m{msg}\033[0m", file=sys.stderr)
     if _log_file:
         _log_file.write(f"\n{msg}\n")
@@ -107,7 +116,7 @@ def _load_config(path: str) -> dict:
     if not config_path.exists():
         print(f"配置文件不存在: {path}", file=sys.stderr)
         sys.exit(1)
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -118,6 +127,10 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _next_retry_delay(current_retry_delay: float, max_retry_delay: float) -> float:
+    return min(current_retry_delay * 2, max_retry_delay)
+
+
 def _install_signal_handler() -> None:
     def handler(sig, frame):
         print(f"\n\n{C_DIM}心相续止息。{C_RESET}")
@@ -125,6 +138,7 @@ def _install_signal_handler() -> None:
             _log_file.close()
         sys.exit(0)
     signal.signal(signal.SIGINT, handler)
+    signal.signal(signal.SIGTERM, handler)
 
 
 if __name__ == "__main__":

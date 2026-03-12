@@ -5,7 +5,7 @@ import os
 from ollama import Client
 
 from core.prompt_builder import build_prompt
-from core.thought_parser import Thought, parse_thoughts
+from core.thought_parser import Thought, fallback_thought, parse_thoughts
 
 _client: Client | None = None
 
@@ -41,14 +41,7 @@ def run_cycle(
     thoughts = parse_thoughts(raw_output, cycle_id)
 
     if not thoughts:
-        # Fallback: treat entire output as a single thought
-        thoughts = [Thought(
-            thought_id=f"C{cycle_id}-1",
-            cycle_id=cycle_id,
-            index=1,
-            type="思考",
-            content=raw_output.strip()[:500],
-        )]
+        thoughts = [fallback_thought(raw_output, cycle_id)]
 
     return thoughts
 

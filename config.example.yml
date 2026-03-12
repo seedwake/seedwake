@@ -24,6 +24,10 @@ models:
 short_term_memory:
   context_window_size: 30       # rounds kept in prompt context
 
+runtime:
+  error_retry_delay_seconds: 1.0
+  max_error_retry_delay_seconds: 10.0
+
 prompt:
   version: "v0.1"
 
