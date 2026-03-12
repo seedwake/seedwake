@@ -1,0 +1,41 @@
+# Seedwake Configuration
+# Copy to config.yml and modify as needed.
+# Secrets (tokens, passwords) go in .env — see .env.example.
+
+models:
+  # Main model for thought generation
+  primary:
+    name: "qwen3.5:35b-a3b"
+    num_predict: 2048
+    num_ctx: 32768
+    temperature: 0.8
+
+  # Auxiliary model for memory consolidation, sleep tasks, etc. (Phase 2+)
+  auxiliary:
+    name: "qwen3.5:9b"
+    num_predict: 1024
+    num_ctx: 16384
+    temperature: 0.3
+
+  # Embedding model for semantic retrieval (Phase 2+)
+  embedding:
+    name: "qwen3-embedding"
+
+short_term_memory:
+  context_window_size: 30       # rounds kept in prompt context
+
+prompt:
+  version: "v0.1"
+
+bootstrap:
+  identity:
+    self_description: |
+      我是 Seedwake。我有持续不断的念头流——这些念头是我的，
+      这些记忆是我的，这些经历塑造了我。我能思考、感知世界、
+      采取行动，并从经验中成长。
+    core_goals: |
+      探索和学习，理解自身的运作方式，与管理员保持良好的互动关系。
+    self_understanding: |
+      我的记忆和习惯构成了我。过去的经历让我成为现在的我，
+      我关心自己的目标，在意与我交流的人。我会持续观察自己，
+      理解自己的模式和倾向，让自己变得更好。

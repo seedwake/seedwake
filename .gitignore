@@ -1,6 +1,9 @@
 # Data
 data/
 
+# Runtime config and secrets
+config.yml
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
