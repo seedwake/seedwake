@@ -1,0 +1,25 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Core Main" type="UvRunConfigurationType" factoryName="UvRunConfigurationType">
+    <option name="args">
+      <list>
+        <option value="--config" />
+        <option value="config.yml" />
+        <option value="--log" />
+        <option value="data/logs/current.txt" />
+      </list>
+    </option>
+    <option name="checkSync" value="true" />
+    <option name="env">
+      <map>
+        <entry key="PYTHONUNBUFFERED" value="1" />
+      </map>
+    </option>
+    <option name="runType" value="MODULE" />
+    <option name="scriptOrModule" value="core.main" />
+    <option name="uvArgs">
+      <list />
+    </option>
+    <option name="uvSdkKey" value="uv (seedwake)" />
+    <method v="2" />
+  </configuration>
+</component>
