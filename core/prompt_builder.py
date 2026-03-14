@@ -46,11 +46,16 @@ def build_prompt(
     identity: dict[str, str],
     recent_thoughts: list[Thought],
     context_window: int,
+    long_term_context: list[str] | None = None,
 ) -> str:
     """Build a single prompt string for Ollama generate API."""
     parts = [_build_system(identity)]
 
-    # Append thought history
+    # Long-term memory associations (Phase 2)
+    if long_term_context:
+        parts.append(_format_long_term(long_term_context))
+
+    # Short-term thought history
     window = recent_thoughts[-context_window * 3:]
     if window:
         parts.append(_format_thought_history(window))
@@ -61,10 +66,17 @@ def build_prompt(
 
 
 def _build_system(identity: dict[str, str]) -> str:
-    parts = [SYSTEM_PROMPT, "\n## “我”是谁\n"]
+    parts = [SYSTEM_PROMPT, '\n## \u201c我\u201d是谁\n']
     for section, content in identity.items():
         parts.append(content.strip())
     return "\n".join(parts)
+
+
+def _format_long_term(memories: list[str]) -> str:
+    lines = ["\n## 相关记忆\n"]
+    for mem in memories:
+        lines.append(f"- {mem}")
+    return "\n".join(lines)
 
 
 def _format_thought_history(thoughts: list[Thought]) -> str:

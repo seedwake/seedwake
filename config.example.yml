@@ -23,6 +23,10 @@ models:
 
 short_term_memory:
   context_window_size: 30       # rounds kept in prompt context
+  buffer_size: 500              # total rounds in Redis buffer
+
+long_term_memory:
+  retrieval_top_k: 5            # vector search results per cycle
 
 runtime:
   error_retry_delay_seconds: 1.0

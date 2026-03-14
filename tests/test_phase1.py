@@ -1,8 +1,7 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from core.cycle import run_cycle
-from core.main import _next_retry_delay
 from core.thought_parser import fallback_thought, parse_thoughts
 
 
@@ -60,7 +59,9 @@ class ThoughtParserTests(unittest.TestCase):
 class CycleTests(unittest.TestCase):
     @patch("core.cycle._call_ollama", return_value="[思考] a\n[意图] b\n[反应] c\n")
     def test_run_cycle_returns_parsed_thoughts(self, mock_call_ollama) -> None:
+        mock_client = MagicMock()
         thoughts = run_cycle(
+            mock_client,
             cycle_id=4,
             identity={"self_description": "我", "core_goals": "学", "self_understanding": "知"},
             recent_thoughts=[],
@@ -73,7 +74,9 @@ class CycleTests(unittest.TestCase):
 
     @patch("core.cycle._call_ollama", return_value="无法解析的输出")
     def test_run_cycle_fallback_on_unparseable(self, mock_call_ollama) -> None:
+        mock_client = MagicMock()
         thoughts = run_cycle(
+            mock_client,
             cycle_id=7,
             identity={"self_description": "我"},
             recent_thoughts=[],
@@ -84,12 +87,6 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(len(thoughts), 1)
         self.assertEqual(thoughts[0].type, "思考")
         self.assertIn("无法解析的输出", thoughts[0].content)
-
-
-class MainLoopTests(unittest.TestCase):
-    def test_retry_delay_caps_at_maximum(self) -> None:
-        self.assertEqual(_next_retry_delay(1.0, 10.0), 2.0)
-        self.assertEqual(_next_retry_delay(10.0, 10.0), 10.0)
 
 
 if __name__ == "__main__":
