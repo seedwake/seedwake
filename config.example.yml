@@ -5,7 +5,7 @@
 models:
   # Main model for thought generation
   primary:
-    name: "qwen3.5:35b-a3b"
+    name: "qwen3.5:27b"
     num_predict: 2048
     num_ctx: 32768
     temperature: 0.8

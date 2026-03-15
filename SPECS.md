@@ -687,10 +687,10 @@ CREATE INDEX idx_audit_time ON audit_log (timestamp);
 
 ### 13.1 生成模型（主力）
 
-**Qwen3.5-35B-A3B**（通过 Ollama 运行）
+**Qwen3.5-27B**（通过 Ollama 运行）
 - 用途：念头生成、对话回应、规划
-- 原因：MoE 架构，35B 总参数但仅激活 3B，推理速度快，262K 原生上下文，中文能力强
-- 显存占用：Q4 量化约 20GB
+- 原因：密集架构，27.8B 参数，262K 原生上下文，中文能力强
+- 显存占用：Q4 量化约 18GB
 
 ### 13.2 辅助模型
 
@@ -712,7 +712,7 @@ CREATE INDEX idx_audit_time ON audit_log (timestamp);
 ```python
 # 念头生成
 response = ollama.chat(
-    model='qwen3.5:35b-a3b',
+    model='qwen3.5:27b',
     messages=[...],
     options={
         'num_predict': 2048,    # 控制最大输出 token
@@ -791,7 +791,7 @@ response = ollama.chat(
 # 模型配置
 models:
   primary:
-    name: "qwen3.5:35b-a3b"
+    name: "qwen3.5:27b"
     num_predict: 2048
     num_ctx: 32768
     temperature: 0.8
