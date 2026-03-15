@@ -249,7 +249,7 @@ CREATE TABLE long_term_memory (
     id              BIGSERIAL PRIMARY KEY,
     content         TEXT NOT NULL,              -- 记忆内容（自然语言）
     memory_type     TEXT NOT NULL,              -- episodic（情节）/ semantic（语义/事实）/ action_result（行动结果）
-    embedding       vector(1024),               -- 向量表示（用于语义检索）
+    embedding       vector(4096),               -- 向量表示（须匹配 embedding 模型输出维度）
     entity_tags     TEXT[] DEFAULT '{}',         -- 实体标签，如 {'person:alice', 'project:seedwake'}
     source_cycle_id INTEGER,                    -- 来源循环编号
     emotion_context JSONB,                      -- 当时的情绪基调快照
@@ -261,8 +261,8 @@ CREATE TABLE long_term_memory (
     is_active       BOOLEAN DEFAULT TRUE        -- 是否仍有效（遗忘/合并后标记为 FALSE）
 );
 
-CREATE INDEX idx_ltm_embedding ON long_term_memory
-    USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+-- 向量索引暂不建立：embedding 模型输出 4096 维，超出 pgvector 索引 2000 维限制
+-- 当前数据规模下全表扫描可接受，后续可通过 Ollama dimensions 参数截断或 PCA 降维解决
 CREATE INDEX idx_ltm_entity_tags ON long_term_memory USING GIN (entity_tags);
 CREATE INDEX idx_ltm_type ON long_term_memory (memory_type);
 CREATE INDEX idx_ltm_created ON long_term_memory (created_at);
@@ -902,6 +902,8 @@ admins:
 - Docker Compose 编排
 - 注：长期记忆检索暂用纯向量距离排序；§4.2 要求的 `相似度 × importance × time_decay_factor` 加权排序延迟到第四阶段实现（依赖睡眠机制对 importance 的调整和足够的运行时间跨度）
 - 注：Embedding 服务故障时直接跳过长期记忆注入；§14.2 要求的"按时间倒序取最近几条"降级路径延迟实现（早期 LTM 数据与短期记忆高度重叠，该降级路径无实际收益）
+- 注：当前每轮直写 long_term_memory 作为阶段性简化，用于验证向量检索链路；§4.1/§9.2 要求的"短期记忆经浅睡筛选归档"写入路径延迟到第四阶段实现（依赖睡眠机制）
+- 注：向量索引暂不建立；qwen3-embedding 输出 4096 维，超出 pgvector 索引 2000 维限制，当前数据规模下全表扫描可接受
 - 注：审计系统（§11）表结构已建，写入接口未实现；各组件降级事件的审计记录（§14.2）待审计模块整体实现后统一接入
 
 ### 第三阶段：行动与感知

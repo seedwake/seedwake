@@ -8,7 +8,7 @@ CREATE TABLE long_term_memory (
     id              BIGSERIAL PRIMARY KEY,
     content         TEXT NOT NULL,
     memory_type     TEXT NOT NULL,          -- episodic / semantic / action_result
-    embedding       vector(1024),           -- dimension must match embedding model
+    embedding       vector(4096),           -- must match qwen3-embedding output dimension
     entity_tags     TEXT[] DEFAULT '{}',
     source_cycle_id INTEGER,
     emotion_context JSONB,
@@ -20,8 +20,10 @@ CREATE TABLE long_term_memory (
     is_active       BOOLEAN DEFAULT TRUE
 );
 
-CREATE INDEX idx_ltm_embedding ON long_term_memory
-    USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+-- Vector index omitted: qwen3-embedding outputs 4096 dimensions,
+-- exceeding pgvector's 2000-dim limit for ivfflat/hnsw indexes.
+-- Full-table scan is acceptable at current data scale.
+-- Options when data grows: truncate dimensions via Ollama API, or use PCA.
 CREATE INDEX idx_ltm_entity_tags ON long_term_memory USING GIN (entity_tags);
 CREATE INDEX idx_ltm_type ON long_term_memory (memory_type);
 CREATE INDEX idx_ltm_created ON long_term_memory (created_at);
