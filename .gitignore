@@ -1,6 +1,9 @@
 # Data
 data/
 
+# Claude
+.claude/
+
 # Runtime config and secrets
 config.yml
 

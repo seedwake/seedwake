@@ -128,6 +128,13 @@ core 通过 `localhost:5432` 连接 PostgreSQL，通过 `localhost:6379` 连接 
 - `data/redis/` — Redis 持久化文件
 - `data/logs/` — 应用日志
 
+## 当前工程假设（Current Assumptions）
+
+- 当前尚无正式部署环境，PostgreSQL / Redis 数据默认视为可重建的开发数据
+- 在出现不可随意重建的真实环境前，不引入正式 migration 体系；schema 变更直接更新 `schema.sql`
+- 若未来进入真实部署阶段，再引入独立 migration 工具，并停止依赖手动重建数据库
+- migration 工具倾向选择轻量、SQL-first 的方案（如 `dbmate`），避免在当前无 ORM 的架构里引入过重依赖
+
 ---
 
 ## 3. 核心循环（心相续引擎）
@@ -239,6 +246,7 @@ Redis 中的短期记忆是一个三层结构：
 ### 4.2 长期记忆（PostgreSQL + pgvector）
 
 长期记忆存储在 PostgreSQL 中，启用 pgvector 扩展以支持向量检索。
+当前 Phase 2 的工程落点是：同一张 `long_term_memory` 表暂时同时承担 raw episodic trace store 和未来长期记忆容器两种职责。现阶段主要写入 `memory_type='episodic'` 的原始经历，用于验证 embedding 检索链路；浅睡/深睡引入后，再由 `memory_type` 区分整理后的 semantic / impression / action_result 等记忆类型。
 
 表结构：
 

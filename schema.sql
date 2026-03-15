@@ -3,7 +3,10 @@
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- Long-term memory with vector search
+-- Long-term memory with vector search.
+-- In Phase 2, this table also acts as the raw episodic trace store.
+-- Later phases will keep both raw and consolidated memories here,
+-- distinguished by memory_type.
 CREATE TABLE long_term_memory (
     id              BIGSERIAL PRIMARY KEY,
     content         TEXT NOT NULL,
