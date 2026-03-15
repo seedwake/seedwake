@@ -8,7 +8,7 @@ Three-layer structure per SPECS §4.1:
 
 import json
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime
 
 from core.thought_parser import Thought
 

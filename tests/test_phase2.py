@@ -1,11 +1,11 @@
-import json
 import unittest
-from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+# noinspection PyProtectedMember
 from core.main import _maybe_reconnect_pg, _maybe_reconnect_redis
 from core.memory.identity import load_identity
 from core.memory.long_term import LongTermMemory
+# noinspection PyProtectedMember
 from core.memory.short_term import ShortTermMemory, _thought_to_dict, _dict_to_thought
 from core.thought_parser import Thought
 

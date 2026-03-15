@@ -4,7 +4,7 @@ Handles semantic vector retrieval and memory lifecycle.
 Gracefully degrades when PostgreSQL is unavailable.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime
 from dataclasses import dataclass
 
 
