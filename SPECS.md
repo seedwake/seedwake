@@ -25,7 +25,7 @@
 
 ### 2.1 组件划分
 
-项目由三个主要组件构成，各自位于独立文件夹中。基础设施（PostgreSQL、Redis）和 Web 服务（backend、frontend）通过 `docker-compose.yml` 编排；核心引擎直接运行在宿主机上，以便自由访问 Ollama、OpenClaw 和本地文件系统。
+项目由三个主要组件构成，各自位于独立文件夹中。基础设施（PostgreSQL、Redis）和 Web 服务（backend、frontend）通过 `docker-compose.yml` 编排；核心引擎直接运行在宿主机上，以便自由访问 Ollama、行动执行器（包括 OpenClaw）和本地文件系统。
 
 ```
 seedwake/
@@ -50,7 +50,7 @@ seedwake/
 │   ├── prefrontal.py           # 前额叶功能（执行控制、抑制、规划）
 │   ├── metacognition.py        # 元认知反思
 │   ├── sleep.py                # 睡眠机制（浅睡、深睡）
-│   ├── action.py               # OpenClaw 行动管理
+│   ├── action.py               # 统一行动层（工具决策与执行调度）
 │   ├── stimulus.py             # 外部刺激队列
 │   ├── audit.py                # 审计日志
 │   └── embedding.py            # Embedding 服务封装
@@ -115,7 +115,7 @@ services:
 **架构说明**：core 引擎直接运行在宿主机上（`cd core && python main.py`），不在 Docker 容器中。原因：
 
 - core 需要直接调用宿主机上的 Ollama（本地 GPU 推理）
-- core 需要直接调用宿主机上的 OpenClaw（可能涉及系统命令、文件操作）
+- core 需要直接调用宿主机上的行动执行器（包括 OpenClaw，可能涉及系统命令、文件操作）
 - 容器化 core 会增加不必要的网络复杂度，且无法方便地访问宿主机资源
 
 core 通过 `localhost:5432` 连接 PostgreSQL，通过 `localhost:6379` 连接 Redis，通过 `localhost:11434` 连接 Ollama。64GB 显卡足以同时加载生成模型和 embedding 模型。
@@ -155,7 +155,7 @@ core 通过 `localhost:5432` 连接 PostgreSQL，通过 `localhost:6379` 连接 
 9. 更新情绪基调
 10. 写入 Redis 短期记忆
 11. 异步写入审计日志
-12. 若有行动请求，经前额叶抑制检查后提交给 OpenClaw
+12. 若有行动请求，经前额叶抑制检查后提交给统一行动层；行动层再通过独立的 `chat + tools` 调用确认工具和参数，并分发给 native tools 或 OpenClaw
 13. 将新念头通过 Redis Pub/Sub 发布（供 backend SSE 推送）
 14. 立即开始下一轮
 ```
@@ -168,7 +168,7 @@ core 通过 `localhost:5432` 连接 PostgreSQL，通过 `localhost:6379` 连接 
 
 ```
 [思考] 也许应该先了解用户最近的需求变化，这样才能更好地调整策略。
-[意图] 我想通过 OpenClaw 搜索最近的用户反馈数据。 {action:search, query:"用户反馈 近一周"}
+[意图] 我想搜索最近的用户反馈数据。 {action:search, query:"用户反馈 近一周"}
 [反应] 上次搜索结果显示系统响应变慢了，这让我有些担忧。 (← C140-2)
 ```
 
@@ -186,7 +186,7 @@ core 通过 `localhost:5432` 连接 PostgreSQL，通过 `localhost:6379` 连接 
 | attention_weight | 注意力权重              | 注意力模块计算  |
 | timestamp        | 时间戳                | 系统生成     |
 
-模型只需在输出中自然地使用类型标签前缀和触发源引用，其余字段由程序后处理解析填充。
+模型只需在输出中自然地使用类型标签前缀和触发源引用，其余字段由程序后处理解析填充。`action_request` 在这一阶段只是行动候选；正式的工具选择与参数结构化由后续独立的 `chat + tools` 调用完成。
 
 ### 3.3 Prompt 组装
 
@@ -443,9 +443,9 @@ CREATE TABLE identity (
 | 类型            | 来源                   | 频率    | 说明                         |
 |---------------|----------------------|-------|----------------------------|
 | conversation  | 用户通过 API 发送          | 不定    | 最高优先级，相当于"有人对我说话"          |
-| action_result | OpenClaw 行动完成回调      | 不定    | 包含行动ID和执行结果                |
+| action_result | 行动执行层完成回调         | 不定    | 包含行动ID和执行结果                |
 | time          | 系统定时注入               | 每 N 轮 | 当前时间、日期、运行时长               |
-| news          | 定时通过 OpenClaw 抓取 RSS | 可配置间隔 | 新闻摘要，模拟"无意中看到新闻"           |
+| news          | 定时通过行动执行层抓取 RSS/搜索 | 可配置间隔 | 新闻摘要，模拟"无意中看到新闻"           |
 | system_status | 系统监控                 | 定时    | CPU/内存/磁盘/GPU 使用率，模拟"身体感觉" |
 | weather       | 天气 API               | 每小时   | 与物理世界的锚点                   |
 | reading       | 定时注入                 | 可配置间隔 | 佛学或哲学片段，模拟"阅读"             |
@@ -505,7 +505,13 @@ admins:
 
 ---
 
-## 8. 行动系统（OpenClaw 集成）
+## 8. 行动系统（统一 Action 层）
+
+Phase 3 采用双 API 分离：
+
+- 念头生成继续使用 Ollama `generate` API，保持非对话式的意识流
+- 若解析出 `action_request`，再发起一次独立的 Ollama `chat + tools` 调用，对行动类型、参数和超时进行结构化确认
+- 对模型暴露的是统一工具集合；底层可直接调用 native tools，也可委托 OpenClaw 处理需要浏览器、命令行、文件修改或多步外部探索的任务
 
 ### 8.1 行动生命周期
 
@@ -522,6 +528,7 @@ pending → running → succeeded / failed / timeout
   "action_id": "act_20260311_001",
   "type": "search | system_change | web_fetch | custom",
   "request": { "query": "用户反馈 近一周" },
+  "executor": "native | openclaw",
   "status": "pending | running | succeeded | failed | timeout",
   "source_thought_id": "C142-2",
   "submitted_at": "2026-03-11T14:30:00Z",
@@ -534,7 +541,12 @@ pending → running → succeeded / failed / timeout
 
 ### 8.2 异步处理
 
-行动通过 OpenClaw 异步执行。在等待结果期间，心相续循环继续运转。后续念头的 Prompt 中会包含"有一个行动正在进行中"的状态信息。结果返回时，作为 action_result 类型的刺激推入 StimulusQueue。
+行动通过统一执行层异步执行。在等待结果期间，心相续循环继续运转。后续念头的 Prompt 中会包含"有一个行动正在进行中"的状态信息。结果返回时，作为 `action_result` 类型的刺激推入 StimulusQueue。
+
+执行层的后端分工：
+
+- native tools：一次结构化调用即可完成的本地能力或已封装 API
+- OpenClaw：需要浏览器、命令行、文件修改、权限控制或多步探索的任务
 
 超时处理：超时后生成一个"行动超时"刺激，系统可以决定重试或放弃。超时时间可在配置文件中按行动类型设置。
 
@@ -760,7 +772,7 @@ response = ollama.chat(
 | PostgreSQL 不可用  | 跳过长期记忆检索和写入，仅靠上下文中的短期记忆运行      | "失忆但意识还在" |
 | Redis 不可用       | 短期记忆退化为进程内 Python deque，前端推送暂停 | 无法与外部交互   |
 | Embedding 服务不可用 | 跳过向量检索，长期记忆改为按时间倒序取最近几条        | 联想能力下降    |
-| OpenClaw 不可用    | 行动请求排队等待，念头循环继续                | 无法执行行动    |
+| OpenClaw 不可用    | 需要 OpenClaw 的行动排队等待，念头循环继续；native tools 仍可执行 | 无法执行环境依赖行动 |
 
 所有降级事件写入审计日志，组件恢复后自动回到正常模式。
 
@@ -915,7 +927,8 @@ admins:
 - 注：审计系统（§11）表结构已建，写入接口未实现；各组件降级事件的审计记录（§14.2）待审计模块整体实现后统一接入
 
 ### 第三阶段：行动与感知
-- OpenClaw 集成
+- 统一 Action 层（`generate` 念头 + `chat + tools` 行动决策）
+- native tools / OpenClaw 多后端执行
 - StimulusQueue
 - 对话 API（backend）
 - SSE 推送
