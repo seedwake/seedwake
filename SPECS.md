@@ -513,6 +513,16 @@ Phase 3 采用双 API 分离：
 - 若解析出 `action_request`，再发起一次独立的 Ollama `chat + tools` 调用，对行动类型、参数和超时进行结构化确认
 - 对模型暴露的是统一工具集合；底层可直接调用 native tools，也可委托 OpenClaw 处理需要浏览器、命令行、文件修改或多步外部探索的任务
 
+OpenClaw 的默认接入策略：
+
+- 生产集成默认走 Gateway WebSocket/RPC 控制面：`agent` 发起任务，`agent.wait` 等待最终状态
+- 每个需要委托给 OpenClaw 的 action 默认使用独立 `sessionKey`，命名空间绑定 `action_id`，避免跨任务上下文污染
+- `idempotencyKey` 绑定 `action_id` 或稳定重试键，保证网络重试不会重复触发有副作用的动作
+- Seedwake 只通过 Gateway 读写会话与结果；不直接读写 OpenClaw 的 session / transcript 文件
+- `/v1/responses` 仅作为原型、调试或显式无副作用任务的备用入口，不作为主 delegation 总线
+- 不使用 `/tools/invoke` 作为主任务接口；不使用 `openclaw agent` CLI 作为生产集成接口
+- OpenClaw 侧应配置专用 agent（如 `seedwake-worker`），单独的 workspace、工具 allowlist 和权限边界
+
 ### 8.1 行动生命周期
 
 行动遵循完整的状态机：
@@ -547,6 +557,8 @@ pending → running → succeeded / failed / timeout
 
 - native tools：一次结构化调用即可完成的本地能力或已封装 API
 - OpenClaw：需要浏览器、命令行、文件修改、权限控制或多步探索的任务
+
+OpenClaw 任务默认通过 `agent` 立即拿到 `accepted/runId`，再由后台 worker 使用 `agent.wait` 等待最终完成；后续如需显式取消，可在同一控制面上补接 `sessions.abort`。
 
 超时处理：超时后生成一个"行动超时"刺激，系统可以决定重试或放弃。超时时间可在配置文件中按行动类型设置。
 
