@@ -1,0 +1,5 @@
+fastapi>=0.122.0
+uvicorn>=0.38.0
+python-dotenv>=1.2.2
+pyyaml>=6.0.3
+redis>=7.3.0

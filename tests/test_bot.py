@@ -1,0 +1,247 @@
+import os
+import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+from bot.main import (
+    _dispatch_event,
+    _ensure_redis_client,
+    _extract_telegram_chat_id,
+    _format_action_event,
+    _handle_actions,
+    _handle_approve,
+    _handle_text_message,
+    _load_allowed_user_ids,
+)
+from core.action import ACTION_CONTROL_KEY
+from core.stimulus import CONVERSATION_HISTORY_KEY, REDIS_KEY as STIMULUS_REDIS_KEY
+
+
+class FakeRedis:
+    def __init__(self):
+        self.lists = {}
+        self.hashes = {}
+
+    def rpush(self, key, value):
+        self.lists.setdefault(key, []).append(value)
+
+    def ltrim(self, key, start, end):
+        items = self.lists.get(key, [])
+        if start < 0:
+            start = max(len(items) + start, 0)
+        if end < 0:
+            end = len(items) + end
+        self.lists[key] = items[start:end + 1]
+
+    def hset(self, key, field, value):
+        self.hashes.setdefault(key, {})[field] = value
+
+    def hvals(self, key):
+        return list(self.hashes.get(key, {}).values())
+
+
+def _make_update(
+    *,
+    user_id: int = 1,
+    chat_id: int = 1,
+    text: str = "你好",
+    username: str = "alice",
+):
+    message = SimpleNamespace(
+        text=text,
+        reply_text=AsyncMock(),
+    )
+    return SimpleNamespace(
+        effective_user=SimpleNamespace(
+            id=user_id,
+            username=username,
+            full_name=username,
+        ),
+        effective_chat=SimpleNamespace(id=chat_id),
+        effective_message=message,
+        callback_query=None,
+    )
+
+
+def _make_context(redis_client=None, *, allowed_user_ids=None, args=None):
+    application = SimpleNamespace(
+        bot_data={
+            "redis": redis_client,
+            "allowed_user_ids": set(allowed_user_ids or {1}),
+            "notification_user_ids": list(allowed_user_ids or {1}),
+        },
+        bot=SimpleNamespace(send_message=AsyncMock()),
+    )
+    return SimpleNamespace(application=application, args=args or [])
+
+
+class TelegramBotHelpersTests(unittest.TestCase):
+    def test_load_allowed_user_ids(self) -> None:
+        config = {"telegram": {"allowed_user_ids": [123, "456", "bad", 123]}}
+        self.assertEqual(_load_allowed_user_ids(config), [123, 456])
+
+    def test_extract_telegram_chat_id(self) -> None:
+        self.assertEqual(_extract_telegram_chat_id("telegram:12345"), 12345)
+        self.assertIsNone(_extract_telegram_chat_id("user:alice"))
+
+    def test_format_action_event(self) -> None:
+        text = _format_action_event({
+            "action_id": "act_1",
+            "type": "system_change",
+            "executor": "openclaw",
+            "status": "pending",
+            "summary": "需要管理员确认",
+            "awaiting_confirmation": True,
+        })
+        self.assertIn("需要确认的行动", text)
+        self.assertIn("act_1", text)
+
+
+class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_handle_text_message_pushes_stimulus(self) -> None:
+        redis_client = FakeRedis()
+        update = _make_update()
+        context = _make_context(redis_client, allowed_user_ids={1})
+
+        await _handle_text_message(update, context)
+
+        stored = redis_client.lists[STIMULUS_REDIS_KEY][0]
+        self.assertIn('"type": "conversation"', stored)
+        self.assertIn('"source": "telegram:1"', stored)
+        history = redis_client.lists[CONVERSATION_HISTORY_KEY][0]
+        self.assertIn('"role": "user"', history)
+        self.assertIn('"content": "你好"', history)
+        update.effective_message.reply_text.assert_awaited_once()
+
+    async def test_handle_text_message_rejects_unauthorized_user(self) -> None:
+        redis_client = FakeRedis()
+        update = _make_update(user_id=2)
+        context = _make_context(redis_client, allowed_user_ids={1})
+
+        await _handle_text_message(update, context)
+
+        self.assertNotIn(STIMULUS_REDIS_KEY, redis_client.lists)
+        update.effective_message.reply_text.assert_awaited_once()
+        self.assertIn("无权限", update.effective_message.reply_text.await_args.args[0])
+
+    async def test_dispatch_reply_event_sends_to_source_chat(self) -> None:
+        context = _make_context(FakeRedis(), allowed_user_ids={1})
+
+        await _dispatch_event(
+            context.application,
+            {"type": "reply", "payload": {"source": "telegram:99", "message": "你好"}},
+        )
+
+        context.application.bot.send_message.assert_awaited_once_with(
+            chat_id=99,
+            text="你好",
+            reply_markup=None,
+        )
+
+    async def test_dispatch_action_event_broadcasts_confirmation(self) -> None:
+        context = _make_context(FakeRedis(), allowed_user_ids={1, 2})
+
+        await _dispatch_event(
+            context.application,
+            {
+                "type": "action",
+                "payload": {
+                    "action_id": "act_1",
+                    "type": "system_change",
+                    "executor": "openclaw",
+                    "status": "pending",
+                    "summary": "需要管理员确认",
+                    "awaiting_confirmation": True,
+                },
+            },
+        )
+
+        self.assertEqual(context.application.bot.send_message.await_count, 2)
+        first_kwargs = context.application.bot.send_message.await_args_list[0].kwargs
+        self.assertEqual(first_kwargs["chat_id"], 1)
+        self.assertIsNotNone(first_kwargs["reply_markup"])
+
+    async def test_dispatch_action_event_continues_after_send_failure(self) -> None:
+        context = _make_context(FakeRedis(), allowed_user_ids={1, 2})
+        context.application.bot.send_message = AsyncMock(side_effect=[RuntimeError("boom"), None])
+
+        await _dispatch_event(
+            context.application,
+            {
+                "type": "action",
+                "payload": {
+                    "action_id": "act_1",
+                    "type": "system_change",
+                    "executor": "openclaw",
+                    "status": "pending",
+                    "summary": "需要管理员确认",
+                    "awaiting_confirmation": True,
+                },
+            },
+        )
+
+        self.assertEqual(context.application.bot.send_message.await_count, 2)
+
+    async def test_handle_approve_pushes_action_control(self) -> None:
+        redis_client = FakeRedis()
+        update = _make_update()
+        context = _make_context(redis_client, allowed_user_ids={1}, args=["act_1", "ok"])
+
+        await _handle_approve(update, context)
+
+        stored = redis_client.lists[ACTION_CONTROL_KEY][0]
+        self.assertIn('"action_id": "act_1"', stored)
+        update.effective_message.reply_text.assert_awaited_once()
+
+    async def test_handle_actions_reads_live_actions(self) -> None:
+        redis_client = FakeRedis()
+        redis_client.hset(
+            "seedwake:actions",
+            "act_1",
+            '{"action_id":"act_1","type":"search","executor":"openclaw","status":"running","submitted_at":"2026-03-27T00:00:00+00:00"}',
+        )
+        update = _make_update()
+        context = _make_context(redis_client, allowed_user_ids={1})
+
+        await _handle_actions(update, context)
+
+        update.effective_message.reply_text.assert_awaited_once()
+        self.assertIn("act_1", update.effective_message.reply_text.await_args.args[0])
+
+    async def test_handle_actions_marks_redis_unavailable_on_read_error(self) -> None:
+        class FailingRedis(FakeRedis):
+            def hvals(self, key):
+                raise RuntimeError("boom")
+
+        update = _make_update()
+        context = _make_context(FailingRedis(), allowed_user_ids={1})
+
+        await _handle_actions(update, context)
+
+        self.assertIsNone(context.application.bot_data["redis"])
+        self.assertIn("Redis 不可用", update.effective_message.reply_text.await_args.args[0])
+
+    async def test_handle_text_message_reports_redis_write_failure(self) -> None:
+        class FailingRedis(FakeRedis):
+            def rpush(self, key, value):
+                raise RuntimeError("boom")
+
+        update = _make_update()
+        context = _make_context(FailingRedis(), allowed_user_ids={1})
+
+        await _handle_text_message(update, context)
+
+        self.assertIsNone(context.application.bot_data["redis"])
+        self.assertIn("Redis 不可用", update.effective_message.reply_text.await_args.args[0])
+
+
+class TelegramBotRedisRecoveryTests(unittest.TestCase):
+    def test_ensure_redis_client_reconnects_when_missing(self) -> None:
+        redis_client = FakeRedis()
+        application = SimpleNamespace(bot_data={"redis": None})
+
+        with patch("bot.main._connect_redis", return_value=redis_client):
+            recovered = _ensure_redis_client(application)
+
+        self.assertIs(recovered, redis_client)
+        self.assertIs(application.bot_data["redis"], redis_client)

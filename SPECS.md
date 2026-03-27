@@ -25,7 +25,7 @@
 
 ### 2.1 组件划分
 
-项目由三个主要组件构成，各自位于独立文件夹中。基础设施（PostgreSQL、Redis）和 Web 服务（backend、frontend）通过 `docker-compose.yml` 编排；核心引擎直接运行在宿主机上，以便自由访问 Ollama、行动执行器（包括 OpenClaw）和本地文件系统。
+项目由四个主要组件构成，各自位于独立文件夹中。基础设施（PostgreSQL、Redis）和外围服务（backend、bot、frontend）通过 `docker-compose.yml` 编排；核心引擎直接运行在宿主机上，以便自由访问 Ollama、行动执行器（包括 OpenClaw）和本地文件系统。
 
 ```
 seedwake/
@@ -63,6 +63,10 @@ seedwake/
 │   │   ├── stream.py           # SSE 意识流推送
 │   │   └── query.py            # 历史查询接口
 │   └── auth.py                 # 管理员鉴权
+├── bot/                        # Telegram 对话桥接
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── main.py                 # python-telegram-bot 入口
 ├── frontend/                   # 前端（意识流展示）
 │   ├── Dockerfile
 │   ├── package.json
@@ -102,6 +106,12 @@ services:
     depends_on: [postgresql, redis]
     ports:
       - "8000:8000"
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+
+  bot:
+    build: ./bot
+    depends_on: [redis]
     volumes:
       - ./config.yml:/app/config.yml:ro
 
@@ -156,7 +166,7 @@ core 通过 `localhost:5432` 连接 PostgreSQL，通过 `localhost:6379` 连接 
 10. 写入 Redis 短期记忆
 11. 异步写入审计日志
 12. 若有行动请求，经前额叶抑制检查后提交给统一行动层；行动层再通过独立的 `chat + tools` 调用确认工具和参数，并分发给 native tools 或 OpenClaw
-13. 将新念头通过 Redis Pub/Sub 发布（供 backend SSE 推送）
+13. 将新念头通过 Redis Pub/Sub 发布（供 backend SSE、Telegram 桥接等订阅）
 14. 立即开始下一轮
 ```
 
@@ -240,8 +250,8 @@ Redis 中的短期记忆是一个三层结构：
 数据结构：Redis Sorted Set，score 为时间戳。每个条目的 value 是 JSON 序列化的念头数据。
 
 额外使用：
-- Redis Pub/Sub：核心进程发布新念头，backend 订阅后通过 SSE 推送前端
-- Redis List/Stream：StimulusQueue，外部刺激的缓冲队列
+- Redis Pub/Sub：核心进程发布新念头和事件，backend 订阅后通过 SSE 推送前端，bot 订阅后向管理员推送回复/行动状态
+- Redis List/Stream：StimulusQueue，外部刺激的缓冲队列（对话类刺激由 Telegram Bot 写入）
 
 ### 4.2 长期记忆（PostgreSQL + pgvector）
 
@@ -442,7 +452,7 @@ CREATE TABLE identity (
 
 | 类型            | 来源                   | 频率    | 说明                         |
 |---------------|----------------------|-------|----------------------------|
-| conversation  | 用户通过 API 发送          | 不定    | 最高优先级，相当于"有人对我说话"          |
+| conversation  | 用户通过 Telegram 发送      | 不定    | 最高优先级，相当于"有人对我说话"          |
 | action_result | 行动执行层完成回调         | 不定    | 包含行动ID和执行结果                |
 | time          | 系统定时注入               | 每 N 轮 | 当前时间、日期、运行时长               |
 | news          | 定时通过行动执行层抓取 RSS/搜索 | 可配置间隔 | 新闻摘要，模拟"无意中看到新闻"           |
@@ -454,22 +464,44 @@ CREATE TABLE identity (
 
 ## 7. 对话接口
 
-### 7.1 API 设计
+### 7.1 Telegram 主通道
 
-用户通过 backend 的 REST API 与系统对话：
+人与 Seedwake 的主对话入口是 Telegram Bot。Bot token 放在 `.env`，允许对话的 Telegram 用户 ID 列表放在 `config.yml`：
+
+```env
+TELEGRAM_BOT_TOKEN=<telegram-bot-token>
+```
+
+```yaml
+telegram:
+  allowed_user_ids: [123456789, 987654321]
+```
+
+被允许的用户向 Bot 发送私聊消息后，消息会被写入 StimulusQueue，标记为最高优先级。系统的直接回复、行动确认请求、行动状态更新也优先通过 Telegram 返回。
+
+### 7.2 Backend 辅助接口
+
+backend 的 REST API 与 SSE 保留，用于管理、调试、前端展示、历史查询和行动确认；它不是主对话通道，不能用于向 Seedwake 发送新消息：
 
 ```
-POST /api/conversation
+GET /api/conversation?limit=100
+Headers:
+  Authorization: Bearer <token>
+```
+
+返回最近的对话历史，供前端查看人与 Seedwake 的往来消息。行动确认接口仍保留：
+
+```
+POST /api/action/confirm
 Headers:
   Authorization: Bearer <token>
 Body:
   {
-    "username": "alice",
-    "message": "你好，最近在忙什么？"
+    "action_id": "act_20260311_001",
+    "approved": true,
+    "note": "允许执行"
   }
 ```
-
-消息被推入 StimulusQueue，标记为最高优先级。
 
 系统的回复通过 SSE 推送：
 
@@ -483,9 +515,14 @@ SSE 事件类型：
 - `action`：行动发起/完成通知
 - `status`：系统状态变更（进入浅睡等）
 
-### 7.2 鉴权
+### 7.3 鉴权
 
-仅指定管理员可对话。每个管理员分配一个 API token，映射到 username。配置文件中维护管理员列表：
+Telegram 与 backend 使用两套并存的权限边界：
+
+- Telegram：仅 `telegram.allowed_user_ids` 中的用户可直接对话和确认行动
+- backend：仅指定管理员可访问 REST/SSE/查询接口
+
+backend 侧每个管理员分配一个 API token，映射到 username。配置文件中维护管理员列表：
 
 ```yaml
 admins:
@@ -495,11 +532,11 @@ admins:
     token: "token_bob_xxxxx"
 ```
 
-### 7.3 多人同时对话
+### 7.4 多人同时对话
 
-如果 Alice 和 Bob 同时发来消息，StimulusQueue 中会有两条。按时间顺序逐条处理，每条消息作为一轮的外部刺激，不合并。这更接近人的体验——不会同时听两个人说话。
+如果 Alice 和 Bob 同时通过 Telegram 发来消息，StimulusQueue 中会有两条。按时间顺序逐条处理，每条消息作为一轮的外部刺激，不合并。这更接近人的体验——不会同时听两个人说话。
 
-### 7.4 对"人"的记忆
+### 7.5 对"人"的记忆
 
 对每个对话过的人维护印象摘要（见 4.2.1 节）。对话时自动检索该人的印象摘要注入上下文，使系统能"记住"这个人的特征和历史互动。印象摘要在浅睡阶段或对话结束后更新。
 
@@ -782,7 +819,7 @@ response = ollama.chat(
 | 故障组件            | 降级行为                           | 影响        |
 |-----------------|--------------------------------|-----------|
 | PostgreSQL 不可用  | 跳过长期记忆检索和写入，仅靠上下文中的短期记忆运行      | "失忆但意识还在" |
-| Redis 不可用       | 短期记忆退化为进程内 Python deque，前端推送暂停 | 无法与外部交互   |
+| Redis 不可用       | 短期记忆退化为进程内 Python deque，前端推送和 Telegram 事件桥接暂停 | 无法与外部交互   |
 | Embedding 服务不可用 | 跳过向量检索，长期记忆改为按时间倒序取最近几条        | 联想能力下降    |
 | OpenClaw 不可用    | 需要 OpenClaw 的行动排队等待，念头循环继续；native tools 仍可执行 | 无法执行环境依赖行动 |
 
@@ -804,7 +841,7 @@ response = ollama.chat(
 - **行动状态指示**：进行中的行动显示状态标签
 - **情绪基调可视化**：侧边栏显示当前情绪状态
 - **系统状态**：精力值、运行时长、循环计数、当前模式（清醒/浅睡/深睡）
-- **对话输入框**：管理员可在前端直接发送对话消息
+- **对话历史面板**：展示 Telegram 往来消息与系统回复
 - **历史回溯**：可向上滚动查看历史念头
 
 ### 15.3 技术栈
@@ -942,8 +979,8 @@ admins:
 - 统一 Action 层（`generate` 念头 + `chat + tools` 行动决策）
 - native tools / OpenClaw 多后端执行
 - StimulusQueue
-- 对话 API（backend）
-- SSE 推送
+- Telegram Bot 对话桥接
+- backend 历史 / 查询 / SSE 服务
 
 ### 第四阶段：高级机制
 - 注意力评估

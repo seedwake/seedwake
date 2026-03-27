@@ -17,3 +17,30 @@ services:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
       - ./data/redis:/data
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    depends_on:
+      - redis
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+
+  bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    depends_on:
+      - redis
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    volumes:
+      - ./config.yml:/app/config.yml:ro

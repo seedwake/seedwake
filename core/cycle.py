@@ -1,8 +1,10 @@
 """Single thought-generation cycle: build prompt, call LLM, parse output."""
 
+from core.action import ActionRecord
 from ollama import Client
 
 from core.prompt_builder import build_prompt
+from core.stimulus import Stimulus
 from core.thought_parser import Thought, fallback_thought, parse_thoughts
 
 
@@ -22,11 +24,15 @@ def run_cycle(
     context_window: int,
     model_config: dict,
     long_term_context: list[str] | None = None,
+    stimuli: list[Stimulus] | None = None,
+    running_actions: list[ActionRecord] | None = None,
 ) -> list[Thought]:
     """Execute one cycle and return parsed thoughts."""
     prompt = build_prompt(
         cycle_id, identity, recent_thoughts, context_window,
         long_term_context=long_term_context,
+        stimuli=stimuli,
+        running_actions=running_actions,
     )
     raw_output = _call_ollama(client, prompt, model_config)
     thoughts = parse_thoughts(raw_output, cycle_id)

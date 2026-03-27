@@ -1,0 +1,1 @@
+"""Seedwake Telegram bot package."""

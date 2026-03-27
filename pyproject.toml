@@ -4,9 +4,14 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.14"
 dependencies = [
+    "cryptography>=45.0.0",
+    "fastapi>=0.122.0",
     "ollama>=0.6.1",
     "psycopg[binary]>=3.3.3",
+    "python-telegram-bot>=22.6",
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0.3",
     "redis>=7.3.0",
+    "uvicorn>=0.38.0",
+    "websockets>=15.0.1",
 ]

@@ -1,5 +1,7 @@
 """Assemble the prompt for each thought-generation cycle."""
 
+from core.action import ActionRecord
+from core.stimulus import Stimulus
 from core.thought_parser import Thought
 
 SYSTEM_PROMPT = """\
@@ -47,6 +49,8 @@ def build_prompt(
     recent_thoughts: list[Thought],
     context_window: int,
     long_term_context: list[str] | None = None,
+    stimuli: list[Stimulus] | None = None,
+    running_actions: list[ActionRecord] | None = None,
 ) -> str:
     """Build a single prompt string for Ollama generate API."""
     parts = [_build_system(identity)]
@@ -59,6 +63,12 @@ def build_prompt(
     window = recent_thoughts[-context_window * 3:]
     if window:
         parts.append(_format_thought_history(window))
+
+    if stimuli:
+        parts.append(_format_stimuli(stimuli))
+
+    if running_actions:
+        parts.append(_format_running_actions(running_actions))
 
     # Trailing separator to cue the next cycle
     parts.append(f"\n--- 第 {cycle_id} 轮 ---")
@@ -88,4 +98,23 @@ def _format_thought_history(thoughts: list[Thought]) -> str:
             lines.append(f"\n--- 第 {t.cycle_id} 轮 ---")
         trigger = f" (← {t.trigger_ref})" if t.trigger_ref else ""
         lines.append(f"[{t.type}-{t.thought_id}] {t.content}{trigger}")
+    return "\n".join(lines)
+
+
+def _format_stimuli(stimuli: list[Stimulus]) -> str:
+    lines = ["\n## 当前外部刺激\n"]
+    for stimulus in stimuli:
+        lines.append(
+            f"- [{stimulus.type}] 来自 {stimulus.source}: {stimulus.content}"
+        )
+    return "\n".join(lines)
+
+
+def _format_running_actions(actions: list[ActionRecord]) -> str:
+    lines = ["\n## 正在进行的行动\n"]
+    for action in actions:
+        task = str(action.request.get("task") or action.source_content)
+        lines.append(
+            f"- {action.action_id} [{action.type}/{action.executor}] {action.status}: {task}"
+        )
     return "\n".join(lines)

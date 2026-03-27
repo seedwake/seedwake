@@ -62,6 +62,10 @@ class ShortTermMemory:
     def redis_available(self) -> bool:
         return self._redis is not None
 
+    @property
+    def redis_client(self):
+        return self._redis
+
     def attach_redis(self, redis_client) -> bool:
         """Reattach Redis and repopulate it from the in-memory shadow copy."""
         self._redis = redis_client

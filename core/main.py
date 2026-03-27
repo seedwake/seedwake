@@ -4,6 +4,7 @@ Usage: python -m core.main [--config config.yml] [--log data/test.txt]
 """
 
 import argparse
+import json
 import os
 import signal
 import sys
@@ -15,11 +16,13 @@ import redis as redis_lib
 import yaml
 from dotenv import load_dotenv
 
+from core.action import create_action_manager, pop_action_controls
 from core.cycle import create_client, run_cycle
 from core.embedding import embed_text
 from core.memory.identity import load_identity
 from core.memory.long_term import LongTermMemory
 from core.memory.short_term import ShortTermMemory
+from core.stimulus import Stimulus, StimulusQueue, append_conversation_history
 from core.thought_parser import Thought
 
 # Terminal colors
@@ -30,6 +33,7 @@ C_TYPE = {
     "意图": "\033[33m",    # yellow
     "反应": "\033[32m",    # green
 }
+EVENT_CHANNEL = "seedwake:events"
 
 
 def main() -> None:
@@ -65,14 +69,25 @@ def main() -> None:
     # Memory stores
     stm = ShortTermMemory(redis_client, context_window, buffer_size)
     ltm = LongTermMemory(pg_conn, retrieval_top_k)
+    stimulus_queue = StimulusQueue(redis_client)
+    action_manager = create_action_manager(
+        redis_client,
+        stimulus_queue,
+        ollama_client,
+        model_config,
+        config.get("actions", {}),
+        log_callback=lambda text: _output(log_file, text),
+        event_callback=lambda event_type, payload: _publish_event(stm.redis_client, event_type, payload),
+    )
 
-    _install_signal_handler(log_file)
+    _install_signal_handler(log_file, action_manager)
 
     _output(log_file, "Seedwake v0.2 — 心相续引擎启动")
     _output(log_file, f"模型: {model_config['name']}  上下文窗口: {context_window} 轮")
     _output(log_file, f"Redis: {'已连接' if redis_client else '未连接（使用内存）'}")
     _output(log_file, f"PostgreSQL: {'已连接' if pg_conn else '未连接（跳过长期记忆）'}")
     _output(log_file, "─" * 60)
+    _publish_event(redis_client, "status", {"message": "core_started"})
 
     cycle_id = 0
     current_retry_delay = retry_delay
@@ -82,13 +97,29 @@ def main() -> None:
     while True:
         cycle_id += 1
         now = time.monotonic()
+        had_redis = stm.redis_available
+        had_pg = ltm.available
         last_redis_reconnect = _maybe_reconnect_redis(
             log_file, stm, now, last_redis_reconnect, reconnect_interval,
         )
+        if stm.redis_available and stm.redis_client is not None and (
+            not had_redis
+            or not stimulus_queue.redis_available
+            or not action_manager.redis_available
+        ):
+            stimulus_queue.attach_redis(stm.redis_client)
+            action_manager.attach_redis(stm.redis_client)
+            _publish_event(stm.redis_client, "status", {"message": "redis_recovered"})
         identity, last_pg_reconnect = _maybe_reconnect_pg(
             log_file, ltm, identity, bootstrap_identity,
             now, last_pg_reconnect, reconnect_interval,
         )
+        if not had_pg and ltm.available:
+            _publish_event(stm.redis_client, "status", {"message": "postgres_recovered"})
+
+        controls = pop_action_controls(stm.redis_client)
+        action_manager.apply_controls(controls)
+        stimuli = stimulus_queue.pop_many(limit=2)
         try:
             # Retrieve long-term associations via embedding
             ltm_context = _retrieve_associations(
@@ -99,18 +130,24 @@ def main() -> None:
                 ollama_client, cycle_id, identity,
                 stm.get_context(), context_window, model_config,
                 long_term_context=ltm_context,
+                stimuli=stimuli,
+                running_actions=action_manager.running_actions(),
             )
             stm.append(new_thoughts)
             _store_to_ltm(ltm, ollama_client, new_thoughts, embedding_model, cycle_id)
+            action_manager.submit_from_thoughts(new_thoughts)
         except KeyboardInterrupt:
             raise
         except Exception as e:
+            stimulus_queue.requeue_front(stimuli)
             _print_error(log_file, cycle_id, e, current_retry_delay)
             time.sleep(current_retry_delay)
             current_retry_delay = min(current_retry_delay * 2, max_retry_delay)
             continue
 
+        _print_stimuli(log_file, stimuli)
         _print_cycle(log_file, cycle_id, new_thoughts)
+        _publish_reply_event(stm.redis_client, stimuli, new_thoughts)
         current_retry_delay = retry_delay
 
 
@@ -259,6 +296,42 @@ def _print_cycle(log_file, cycle_id: int, thoughts: list[Thought]) -> None:
         log_file.flush()
 
 
+def _print_stimuli(log_file, stimuli: list[Stimulus]) -> None:
+    if not stimuli:
+        return
+
+    print(f"{C_DIM}刺激{C_RESET}")
+    for stimulus in stimuli:
+        print(f"  {C_DIM}[{stimulus.type}]{C_RESET} {stimulus.content}")
+
+    if log_file:
+        log_file.write("刺激\n")
+        for stimulus in stimuli:
+            log_file.write(f"  [{stimulus.type}] {stimulus.content}\n")
+        log_file.flush()
+
+
+def _publish_reply_event(redis_client, stimuli: list[Stimulus], thoughts: list[Thought]) -> None:
+    conversation = next((stimulus for stimulus in stimuli if stimulus.type == "conversation"), None)
+    if conversation is None:
+        return
+    reply = _select_reply_text(thoughts)
+    if not reply:
+        return
+    append_conversation_history(
+        redis_client,
+        role="assistant",
+        source=conversation.source,
+        content=reply,
+        stimulus_id=conversation.stimulus_id,
+    )
+    _publish_event(redis_client, "reply", {
+        "source": conversation.source,
+        "message": reply,
+        "stimulus_id": conversation.stimulus_id,
+    })
+
+
 def _output(log_file, text: str) -> None:
     print(text)
     if log_file:
@@ -272,6 +345,27 @@ def _print_error(log_file, cycle_id: int, error: Exception, retry_delay: float) 
     if log_file:
         log_file.write(f"\n{msg}\n")
         log_file.flush()
+
+
+def _publish_event(redis_client, event_type: str, payload: dict[str, object]) -> None:
+    if redis_client is None:
+        return
+    try:
+        redis_client.publish(EVENT_CHANNEL, json.dumps({
+            "type": event_type,
+            "payload": payload,
+        }, ensure_ascii=False))
+    except Exception:
+        return
+
+
+def _select_reply_text(thoughts: list[Thought]) -> str | None:
+    reactive = next((thought for thought in thoughts if thought.type == "反应"), None)
+    if reactive:
+        return reactive.content
+    if thoughts:
+        return thoughts[0].content
+    return None
 
 
 # -- Utilities -------------------------------------------------------------
@@ -299,9 +393,10 @@ def _open_log(path: str | None):
     return open(path, "w", encoding="utf-8")
 
 
-def _install_signal_handler(log_file) -> None:
+def _install_signal_handler(log_file, action_manager) -> None:
     def handler(sig, frame):
         print(f"\n\n{C_DIM}心相续止息。{C_RESET}")
+        action_manager.shutdown()
         if log_file:
             log_file.close()
         sys.exit(0)
