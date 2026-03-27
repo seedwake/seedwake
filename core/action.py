@@ -1,17 +1,22 @@
 """Phase 3 action planning and execution."""
 
+import hashlib
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
 
+from core.perception import collect_system_status_snapshot
 from core.stimulus import StimulusQueue
 from core.thought_parser import Thought
 
 ACTION_REDIS_KEY = "seedwake:actions"
 ACTION_CONTROL_KEY = "seedwake:action_control"
-OPENCLAW_ACTION_TYPES = {"search", "web_fetch", "system_change", "custom"}
+NEWS_SEEN_REDIS_KEY = "seedwake:news_seen"
+OPENCLAW_ACTION_TYPES = {"search", "web_fetch", "system_change", "custom", "news", "weather", "reading"}
+PERCEPTION_AUTO_EXECUTE_TYPES = {"news", "weather", "reading"}
 
 
 @dataclass
@@ -53,6 +58,8 @@ class ActionManager:
         auto_execute: list[str],
         require_confirmation: list[str],
         forbidden: list[str],
+        news_seen_ttl_hours: int = 720,
+        news_seen_max_items: int = 5000,
         log_callback=None,
         event_callback=None,
     ):
@@ -63,11 +70,15 @@ class ActionManager:
         self._auto_execute = set(auto_execute)
         self._require_confirmation = set(require_confirmation)
         self._forbidden = set(forbidden)
+        self._news_seen_ttl_hours = max(1, news_seen_ttl_hours)
+        self._news_seen_max_items = max(1, news_seen_max_items)
         self._log_callback = log_callback
         self._event_callback = event_callback
         self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="seedwake-action")
         self._lock = Lock()
         self._actions: dict[str, ActionRecord] = {}
+        self._news_seen_shadow: dict[str, float] = {}
+        self._perception_observations: list[str] = []
 
     def submit_from_thoughts(self, thoughts: list[Thought]) -> list[ActionRecord]:
         created: list[ActionRecord] = []
@@ -182,6 +193,12 @@ class ActionManager:
             ]
         return sorted(actions, key=lambda action: action.submitted_at)
 
+    def pop_perception_observations(self) -> list[str]:
+        with self._lock:
+            observations = list(self._perception_observations)
+            self._perception_observations.clear()
+        return observations
+
     def attach_redis(self, redis_client) -> bool:
         self._redis = redis_client
         try:
@@ -243,7 +260,9 @@ class ActionManager:
         self._finalize_action(action_id, status=status, result=result)
 
     def _finalize_action(self, action_id: str, *, status: str, result: dict[str, object]) -> None:
-        result = _normalize_action_result(result, self._get_action(action_id))
+        action = self._get_action(action_id)
+        result = _normalize_action_result(result, action)
+        status, result, should_emit_stimulus = self._prepare_result_for_stimulus(action, status, result)
         action = self._update_action(action_id, status=status, result=result)
         if isinstance(result.get("run_id"), str):
             action.run_id = str(result["run_id"])
@@ -254,17 +273,17 @@ class ActionManager:
         summary = str(result.get("summary") or "行动完成")
         self._emit(f"行动结束 {action.action_id} [{status}] {summary}")
         self._publish_action_event(action, status, summary)
+        self._record_perception_observation(action, status, result)
+        if not should_emit_stimulus:
+            return
+        stimulus = _build_result_stimulus(action, status, result)
         self._stimulus_queue.push(
-            "action_result",
-            2,
-            f"action:{action.action_id}",
-            f"{action.type} {status}: {summary}",
+            stimulus["type"],
+            stimulus["priority"],
+            stimulus["source"],
+            stimulus["content"],
             action_id=action.action_id,
-            metadata={
-                "status": status,
-                "executor": action.executor,
-                "result": result,
-            },
+            metadata=stimulus["metadata"],
         )
 
     def _classify_policy(self, action: ActionRecord) -> str:
@@ -273,6 +292,8 @@ class ActionManager:
         if action.type in self._require_confirmation:
             return "confirmation"
         if action.executor == "native":
+            return "auto"
+        if action.type in PERCEPTION_AUTO_EXECUTE_TYPES:
             return "auto"
         if self._auto_execute and action.type not in self._auto_execute:
             return "rejected"
@@ -296,6 +317,155 @@ class ActionManager:
             "session_key": action.session_key,
             "awaiting_confirmation": action.awaiting_confirmation,
         })
+
+    def _record_perception_observation(
+        self,
+        action: ActionRecord,
+        status: str,
+        result: dict[str, object],
+    ) -> None:
+        stimulus_type = _infer_stimulus_type(action, status, result)
+        if stimulus_type not in {"time", "system_status", "news", "weather", "reading"}:
+            return
+        with self._lock:
+            self._perception_observations.append(stimulus_type)
+
+    def _prepare_result_for_stimulus(
+        self,
+        action: ActionRecord,
+        status: str,
+        result: dict[str, object],
+    ) -> tuple[str, dict[str, object], bool]:
+        if status != "succeeded" or action.type != "news" or not bool(result.get("ok", True)):
+            return status, result, True
+        if not _is_structured_news_result(result):
+            malformed = dict(result)
+            malformed["ok"] = False
+            malformed["summary"] = "新闻结果缺少结构化 RSS 条目"
+            malformed["error"] = "malformed_news_result"
+            return "failed", malformed, True
+        deduped_result, should_emit = self._dedupe_news_result(result)
+        if not bool(deduped_result.get("ok", True)):
+            return "failed", deduped_result, True
+        return status, deduped_result, should_emit
+
+    def _dedupe_news_result(self, result: dict[str, object]) -> tuple[dict[str, object], bool]:
+        data = result.get("data")
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return result, True
+
+        self._prune_news_seen_index()
+        new_items = []
+        total_items = 0
+        invalid_items = 0
+        for item in items:
+            if not isinstance(item, dict):
+                invalid_items += 1
+                continue
+            normalized_item = _normalize_news_item(item)
+            if not normalized_item:
+                invalid_items += 1
+                continue
+            total_items += 1
+            item_key = _news_item_key(normalized_item)
+            if not item_key:
+                invalid_items += 1
+                continue
+            if not self._reserve_news_item(item_key):
+                continue
+            new_items.append(normalized_item)
+
+        deduped_data = dict(data)
+        deduped_data["items"] = new_items
+        deduped_data["deduped"] = {
+            "total_items": total_items,
+            "new_items": len(new_items),
+            "dropped_items": max(total_items - len(new_items), 0),
+            "invalid_items": invalid_items,
+        }
+        deduped_result = dict(result)
+        deduped_result["data"] = deduped_data
+        if invalid_items and not new_items:
+            deduped_result["ok"] = False
+            deduped_result["summary"] = "新闻条目缺少可识别字段"
+            deduped_result["error"] = "malformed_news_items"
+            return deduped_result, True
+        deduped_result["summary"] = _summarize_news_items(new_items)
+        if not new_items:
+            return deduped_result, False
+        return deduped_result, True
+
+    def _reserve_news_item(self, item_key: str) -> bool:
+        now_ts = datetime.now(timezone.utc).timestamp()
+        expires_at = now_ts + self._news_seen_ttl_hours * 3600
+        with self._lock:
+            self._prune_news_seen_shadow_locked(now_ts)
+            shadow_expires_at = self._news_seen_shadow.get(item_key)
+            if shadow_expires_at and shadow_expires_at > now_ts:
+                return False
+            if self._redis:
+                try:
+                    self._redis.zremrangebyscore(NEWS_SEEN_REDIS_KEY, "-inf", now_ts)
+                    added = self._redis.zadd(
+                        NEWS_SEEN_REDIS_KEY,
+                        {item_key: expires_at},
+                        nx=True,
+                    )
+                    if not added:
+                        score = self._redis.zscore(NEWS_SEEN_REDIS_KEY, item_key)
+                        if score is not None and float(score) > now_ts:
+                            self._news_seen_shadow[item_key] = float(score)
+                            self._trim_news_seen_shadow_locked()
+                            self._prune_news_seen_redis(now_ts)
+                            return False
+                    self._news_seen_shadow[item_key] = expires_at
+                    self._trim_news_seen_shadow_locked()
+                    self._prune_news_seen_redis(now_ts)
+                    return True
+                except Exception:
+                    self._redis = None
+            self._news_seen_shadow[item_key] = expires_at
+            self._trim_news_seen_shadow_locked()
+            return True
+
+    def _prune_news_seen_index(self) -> None:
+        now_ts = datetime.now(timezone.utc).timestamp()
+        with self._lock:
+            self._prune_news_seen_shadow_locked(now_ts)
+            self._trim_news_seen_shadow_locked()
+        if self._redis:
+            try:
+                self._prune_news_seen_redis(now_ts)
+            except Exception:
+                self._redis = None
+
+    def _prune_news_seen_shadow_locked(self, now_ts: float) -> None:
+        expired_keys = [
+            item_key
+            for item_key, expires_at in self._news_seen_shadow.items()
+            if expires_at <= now_ts
+        ]
+        for item_key in expired_keys:
+            self._news_seen_shadow.pop(item_key, None)
+
+    def _trim_news_seen_shadow_locked(self) -> None:
+        if len(self._news_seen_shadow) <= self._news_seen_max_items:
+            return
+        ranked = sorted(
+            self._news_seen_shadow.items(),
+            key=lambda pair: (pair[1], pair[0]),
+        )
+        extra = len(self._news_seen_shadow) - self._news_seen_max_items
+        for item_key, _ in ranked[:extra]:
+            self._news_seen_shadow.pop(item_key, None)
+
+    def _prune_news_seen_redis(self, now_ts: float) -> None:
+        self._redis.zremrangebyscore(NEWS_SEEN_REDIS_KEY, "-inf", now_ts)
+        total = int(self._redis.zcard(NEWS_SEEN_REDIS_KEY) or 0)
+        extra = total - self._news_seen_max_items
+        if extra > 0:
+            self._redis.zremrangebyrank(NEWS_SEEN_REDIS_KEY, 0, extra - 1)
 
     def _get_action(self, action_id: str) -> ActionRecord:
         with self._lock:
@@ -326,18 +496,43 @@ class ActionManager:
     def _sync_to_redis(self) -> None:
         with self._lock:
             actions = list(self._actions.values())
+            seen_items = dict(self._news_seen_shadow)
         for action in actions:
             payload = json.dumps(_action_to_dict(action), ensure_ascii=False)
             self._redis.hset(ACTION_REDIS_KEY, action.action_id, payload)
+        self._sync_news_seen_to_redis(seen_items)
+
+    def _sync_news_seen_to_redis(self, seen_items: dict[str, float]) -> None:
+        if not seen_items:
+            return
+        now_ts = datetime.now(timezone.utc).timestamp()
+        valid_items = {
+            item_key: expires_at
+            for item_key, expires_at in seen_items.items()
+            if expires_at > now_ts
+        }
+        if not valid_items:
+            return
+        self._redis.zadd(NEWS_SEEN_REDIS_KEY, valid_items)
+        self._prune_news_seen_redis(now_ts)
 
 
 class OllamaActionPlanner:
     """Second-pass planner using Ollama chat+tools."""
 
-    def __init__(self, client, model_config: dict, default_timeout_seconds: int):
+    def __init__(
+        self,
+        client,
+        model_config: dict,
+        default_timeout_seconds: int,
+        default_weather_location: str,
+        news_feed_urls: list[str],
+    ):
         self._client = client
         self._model_name = model_config["name"]
         self._default_timeout_seconds = default_timeout_seconds
+        self._default_weather_location = default_weather_location.strip()
+        self._news_feed_urls = [item.strip() for item in news_feed_urls if item.strip()]
         self._options = {
             "num_ctx": model_config.get("num_ctx", 32768),
             "temperature": 0.1,
@@ -359,11 +554,15 @@ class OllamaActionPlanner:
                 tool_calls[0]["function"]["arguments"],
                 thought,
                 self._default_timeout_seconds,
+                self._default_weather_location,
+                self._news_feed_urls,
             )
         return _fallback_plan(
             raw_action_type=str(action_request.get("type") or "custom"),
             thought=thought,
             default_timeout_seconds=self._default_timeout_seconds,
+            default_weather_location=self._default_weather_location,
+            news_feed_urls=self._news_feed_urls,
         )
 
 
@@ -374,6 +573,9 @@ def create_action_manager(
     model_config: dict,
     action_config: dict,
     *,
+    news_feed_urls: list[str] | None = None,
+    news_seen_ttl_hours: int = 720,
+    news_seen_max_items: int = 5000,
     log_callback=None,
     event_callback=None,
 ) -> ActionManager:
@@ -381,6 +583,8 @@ def create_action_manager(
         ollama_client,
         model_config,
         int(action_config.get("default_timeout_seconds", 300)),
+        str(action_config.get("default_weather_location", "")),
+        list(news_feed_urls or []),
     )
     from core.openclaw_gateway import OpenClawGatewayExecutor
 
@@ -400,6 +604,8 @@ def create_action_manager(
         auto_execute=list(action_config.get("auto_execute", [])),
         require_confirmation=list(action_config.get("require_confirmation", [])),
         forbidden=list(action_config.get("forbidden", [])),
+        news_seen_ttl_hours=news_seen_ttl_hours,
+        news_seen_max_items=news_seen_max_items,
         log_callback=log_callback,
         event_callback=event_callback,
     )
@@ -420,8 +626,12 @@ def _planner_messages(thought: Thought) -> list[dict[str, str]]:
             "content": (
                 "你是 Seedwake 的前额叶行动规划器。"
                 "不要执行动作，只能通过一个 tool call 返回结构化决定。"
-                "纯本地、无副作用、一次函数调用即可完成的时间读取可选 native。"
-                "网页搜索、网页抓取、系统变更、浏览器/命令行/文件修改或多步探索一律委托 OpenClaw。"
+                "纯本地、无副作用、一次函数调用即可完成的时间读取和系统状态读取可选 native。"
+                "新闻、天气、阅读、网页搜索、网页抓取、系统变更、浏览器/命令行/文件修改或多步探索一律委托 OpenClaw。"
+                "news 只读取配置里的固定 RSS feed 列表，不需要 topic。"
+                "reading 的阅读方向由 Seedwake 自己决定；如果原始 action 带了 query/topic/keywords，就保留它。"
+                "如果 reading 没带参数，也应围绕原始念头内容组织任务，不要把阅读主题交给 OpenClaw 自己决定。"
+                "weather 不写 location 时使用配置中的默认位置；只有想查特定地点时才带 location。"
             ),
         },
         {"role": "user", "content": user_prompt},
@@ -464,6 +674,20 @@ def _planner_tools() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "native_system_status",
+                "description": "Read local CPU, memory, and disk status without side effects.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reason": {"type": "string"},
+                        "timeout_seconds": {"type": "integer"},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "ignore_action",
                 "description": "Do not execute any action for this thought.",
                 "parameters": {
@@ -482,6 +706,8 @@ def _plan_from_tool_call(
     arguments: dict,
     thought: Thought,
     default_timeout_seconds: int,
+    default_weather_location: str,
+    news_feed_urls: list[str],
 ) -> ActionPlan | None:
     if tool_name == "ignore_action":
         return None
@@ -496,13 +722,28 @@ def _plan_from_tool_call(
             timeout_seconds=timeout_seconds,
             reason=reason,
         )
+    if tool_name == "native_system_status":
+        return ActionPlan(
+            action_type="get_system_status",
+            executor="native",
+            task="读取当前系统状态",
+            timeout_seconds=timeout_seconds,
+            reason=reason,
+        )
     if tool_name == "delegate_openclaw":
         action_type = str(
             arguments.get("action_type")
             or (thought.action_request or {}).get("type")
             or "custom"
         )
-        task = str(arguments.get("task") or thought.content)
+        explicit_task = str(arguments.get("task") or "").strip()
+        task = _build_openclaw_task(
+            action_type=action_type,
+            explicit_task=explicit_task,
+            thought=thought,
+            default_weather_location=default_weather_location,
+            news_feed_urls=news_feed_urls,
+        )
         return ActionPlan(
             action_type=action_type,
             executor="openclaw",
@@ -518,6 +759,8 @@ def _fallback_plan(
     raw_action_type: str,
     thought: Thought,
     default_timeout_seconds: int,
+    default_weather_location: str,
+    news_feed_urls: list[str],
 ) -> ActionPlan | None:
     action_type = raw_action_type or "custom"
     if action_type == "time":
@@ -528,11 +771,25 @@ def _fallback_plan(
             timeout_seconds=default_timeout_seconds,
             reason="fallback",
         )
+    if action_type == "system_status":
+        return ActionPlan(
+            action_type="get_system_status",
+            executor="native",
+            task="读取当前系统状态",
+            timeout_seconds=default_timeout_seconds,
+            reason="fallback",
+        )
     if action_type in OPENCLAW_ACTION_TYPES or action_type:
         return ActionPlan(
             action_type=action_type,
             executor="openclaw",
-            task=thought.content,
+            task=_build_openclaw_task(
+                action_type=action_type,
+                explicit_task="",
+                thought=thought,
+                default_weather_location=default_weather_location,
+                news_feed_urls=news_feed_urls,
+            ),
             timeout_seconds=default_timeout_seconds,
             reason="fallback",
         )
@@ -540,28 +797,98 @@ def _fallback_plan(
 
 
 def _run_native_action(action: ActionRecord) -> dict[str, object]:
-    if action.type != "get_time":
-        raise RuntimeError(f"不支持的 native action: {action.type}")
-
-    now = datetime.now().astimezone()
-    return {
-        "ok": True,
-        "summary": now.strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "data": {
-            "local_iso": now.isoformat(),
-            "utc_iso": datetime.now(timezone.utc).isoformat(),
-        },
-        "error": None,
-        "run_id": None,
-        "session_key": None,
-        "transport": "native",
-    }
+    if action.type == "get_time":
+        now = datetime.now().astimezone()
+        return {
+            "ok": True,
+            "summary": now.strftime("%Y-%m-%d %H:%M:%S %Z"),
+            "data": {
+                "local_iso": now.isoformat(),
+                "utc_iso": datetime.now(timezone.utc).isoformat(),
+            },
+            "error": None,
+            "run_id": None,
+            "session_key": None,
+            "transport": "native",
+        }
+    if action.type == "get_system_status":
+        snapshot = collect_system_status_snapshot()
+        return {
+            "ok": True,
+            "summary": str(snapshot.get("summary") or "系统状态已更新"),
+            "data": snapshot,
+            "error": None,
+            "run_id": None,
+            "session_key": None,
+            "transport": "native",
+        }
+    raise RuntimeError(f"不支持的 native action: {action.type}")
 
 
 def _clamp_timeout(raw_value, default_timeout_seconds: int) -> int:
     if isinstance(raw_value, int):
         return max(1, raw_value)
     return max(1, default_timeout_seconds)
+
+
+def _build_openclaw_task(
+    *,
+    action_type: str,
+    explicit_task: str,
+    thought: Thought,
+    default_weather_location: str,
+    news_feed_urls: list[str],
+) -> str:
+    raw_params = str((thought.action_request or {}).get("params") or "")
+    search_query = (
+        _extract_action_param(raw_params, "query")
+        or _extract_action_param(raw_params, "keywords")
+        or _extract_action_param(raw_params, "topic")
+    )
+    reading_query = (
+        _extract_action_param(raw_params, "query")
+        or _extract_action_param(raw_params, "topic")
+        or _extract_action_param(raw_params, "keywords")
+    )
+    if action_type == "search":
+        if search_query:
+            return f"围绕“{search_query}”进行搜索，返回按相关性整理的简洁结果。"
+        if explicit_task:
+            return explicit_task
+        return thought.content
+    if action_type == "news":
+        if news_feed_urls:
+            joined = "\n".join(f"- {url}" for url in news_feed_urls)
+            return (
+                "读取以下固定 RSS feed 列表，按时间顺序提取最新几条内容。"
+                "返回 JSON，其中 data.items 是列表；每项尽量包含 feed_url、guid、link、title、published_at、summary，"
+                "并保证同一条 RSS 项目在同次结果里只出现一次：\n"
+                f"{joined}"
+            )
+        return "固定 RSS feed 列表未配置，请明确说明当前无法获取新闻。"
+    if action_type == "reading":
+        if reading_query:
+            return f"围绕“{reading_query}”寻找一小段值得阅读的外部材料，返回原文片段和简短说明。"
+        if explicit_task:
+            return explicit_task
+        return f"围绕这条念头当前真正想读的方向寻找一小段外部材料：{thought.content}"
+    if action_type == "weather":
+        location = _extract_action_param(raw_params, "location") or default_weather_location
+        if location:
+            return f"查询 {location} 的当前天气，返回简洁概况。"
+        return "查询默认位置的当前天气；如果缺少默认位置，请明确说明无法确定位置。"
+    if explicit_task:
+        return explicit_task
+    return thought.content
+
+
+def _extract_action_param(raw_params: str, key: str) -> str | None:
+    pattern = re.compile(rf"{re.escape(key)}\s*:\s*\"([^\"]+)\"")
+    match = pattern.search(raw_params)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    return value or None
 
 
 def _read_env(name: str) -> str:
@@ -593,6 +920,115 @@ def _normalize_action_result(result: dict[str, object], action: ActionRecord) ->
         "transport": str(result.get("transport") or action.executor),
         "raw_text": result.get("raw_text"),
     }
+
+
+def _is_structured_news_result(result: dict[str, object]) -> bool:
+    data = result.get("data")
+    return isinstance(data, dict) and isinstance(data.get("items"), list)
+
+
+def _normalize_news_item(item: dict[str, object]) -> dict[str, object]:
+    normalized = dict(item)
+    for key in ("feed_url", "guid", "link", "title", "published_at", "summary"):
+        value = normalized.get(key)
+        normalized[key] = str(value).strip() if value is not None else ""
+    return normalized
+
+
+def _news_item_key(item: dict[str, object]) -> str | None:
+    feed_url = str(item.get("feed_url") or "").strip()
+    guid = str(item.get("guid") or "").strip()
+    link = str(item.get("link") or "").strip()
+    title = str(item.get("title") or "").strip()
+    published_at = str(item.get("published_at") or "").strip()
+    if feed_url and guid:
+        return f"{feed_url}::{guid}"
+    if feed_url and link:
+        return f"{feed_url}::{link}"
+    if link:
+        return f"link::{link}"
+    fingerprint_source = "\n".join([feed_url, title, published_at, str(item.get("summary") or "").strip()])
+    if not fingerprint_source.strip():
+        return None
+    digest = hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()
+    return f"hash::{digest}"
+
+
+def _summarize_news_items(items: list[dict[str, object]]) -> str:
+    if not items:
+        return "RSS 没有新的条目"
+    labels = []
+    for item in items[:3]:
+        title = str(item.get("title") or "").strip()
+        feed_url = str(item.get("feed_url") or "").strip()
+        if title and feed_url:
+            labels.append(f"{title} ({feed_url})")
+            continue
+        if title:
+            labels.append(title)
+            continue
+        summary = str(item.get("summary") or "").strip()
+        if summary:
+            labels.append(summary)
+    if not labels:
+        return f"RSS 新条目 {len(items)} 条"
+    return f"RSS 新条目 {len(items)} 条：{'；'.join(labels)}"
+
+
+def _build_result_stimulus(
+    action: ActionRecord,
+    status: str,
+    result: dict[str, object],
+) -> dict[str, object]:
+    stimulus_type = _infer_stimulus_type(action, status, result)
+    return {
+        "type": stimulus_type,
+        "priority": _stimulus_priority(stimulus_type, result),
+        "source": f"action:{action.action_id}",
+        "content": _stimulus_content(stimulus_type, action, status, result),
+        "metadata": {
+            "status": status,
+            "executor": action.executor,
+            "result": result,
+        },
+    }
+
+
+def _infer_stimulus_type(
+    action: ActionRecord,
+    status: str,
+    result: dict[str, object],
+) -> str:
+    if status != "succeeded" or not bool(result.get("ok", True)):
+        return "action_result"
+    if action.type == "get_time":
+        return "time"
+    if action.type == "get_system_status":
+        return "system_status"
+    if action.type in {"news", "weather", "reading"}:
+        return action.type
+    return "action_result"
+
+
+def _stimulus_priority(stimulus_type: str, result: dict[str, object]) -> int:
+    if stimulus_type == "action_result":
+        return 2
+    if stimulus_type == "system_status":
+        warnings = result.get("data", {}).get("warnings")
+        return 3 if warnings else 4
+    return 4
+
+
+def _stimulus_content(
+    stimulus_type: str,
+    action: ActionRecord,
+    status: str,
+    result: dict[str, object],
+) -> str:
+    summary = str(result.get("summary") or "行动完成")
+    if stimulus_type == "action_result":
+        return f"{action.type} {status}: {summary}"
+    return summary
 
 
 def push_action_control(

@@ -11,6 +11,12 @@ from core.action import ACTION_CONTROL_KEY
 from core.stimulus import CONVERSATION_HISTORY_KEY
 
 
+async def _read_first_stream_chunk(iterator) -> str | bytes:
+    first_chunk = await iterator.__anext__()
+    await iterator.aclose()
+    return first_chunk
+
+
 class FakePubSub:
     def __init__(self, messages):
         self._messages = messages
@@ -101,6 +107,9 @@ class BackendTests(unittest.TestCase):
         )
         self.client = TestClient(self.app)
 
+    def tearDown(self) -> None:
+        self.client.close()
+
     def test_conversation_history_is_read_only(self) -> None:
         response = self.client.post(
             "/api/conversation",
@@ -168,13 +177,12 @@ class BackendTests(unittest.TestCase):
             config={"admins": [{"username": "alice", "token": "token_alice"}]},
             redis_client=FailingRedis(),
         )
-        client = TestClient(app)
-
-        response = client.post(
-            "/api/action/confirm",
-            headers={"Authorization": "Bearer token_alice"},
-            json={"action_id": "act_1", "approved": True},
-        )
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/action/confirm",
+                headers={"Authorization": "Bearer token_alice"},
+                json={"action_id": "act_1", "approved": True},
+            )
 
         self.assertEqual(response.status_code, 503)
 
@@ -194,7 +202,7 @@ class BackendTests(unittest.TestCase):
         )
 
         response = stream_events(request=request, admin_username="alice")
-        first_chunk = asyncio.run(response.body_iterator.__anext__())
+        first_chunk = asyncio.run(_read_first_stream_chunk(response.body_iterator))
         if isinstance(first_chunk, bytes):
             first_chunk = first_chunk.decode("utf-8")
 

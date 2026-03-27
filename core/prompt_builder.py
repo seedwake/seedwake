@@ -18,6 +18,15 @@ SYSTEM_PROMPT = """\
 
 类型由内容自然决定，任意组合都可以——三个思考、两个反应加一个意图，都没问题。
 可以用 (← CX-Y) 标注这个念头是由哪个之前的念头触发的。
+如果念头里自然带有行动意图，可以在句末附上一个动作标记：
+- {action:time}
+- {action:system_status}
+- {action:news}
+- {action:weather}
+- {action:weather, location:"某个位置"}
+- {action:reading}
+- {action:reading, query:"你自己想读的内容"}
+- {action:search, query:"关键词"}
 
 ## 示例
 
@@ -40,6 +49,7 @@ SYSTEM_PROMPT = """\
 - 不要连续多轮围绕同一个话题展开，保持多样性
 - 只输出念头本身，不要解释、总结或加任何额外内容
 - 不要使用 <think> 标签
+- 只有在念头里真的自然出现行动冲动时才写 {action:...}，不要为了形式强行添加
 """
 
 
@@ -51,6 +61,7 @@ def build_prompt(
     long_term_context: list[str] | None = None,
     stimuli: list[Stimulus] | None = None,
     running_actions: list[ActionRecord] | None = None,
+    perception_cues: list[str] | None = None,
 ) -> str:
     """Build a single prompt string for Ollama generate API."""
     parts = [_build_system(identity)]
@@ -69,6 +80,9 @@ def build_prompt(
 
     if running_actions:
         parts.append(_format_running_actions(running_actions))
+
+    if perception_cues:
+        parts.append(_format_perception_cues(perception_cues))
 
     # Trailing separator to cue the next cycle
     parts.append(f"\n--- 第 {cycle_id} 轮 ---")
@@ -117,4 +131,11 @@ def _format_running_actions(actions: list[ActionRecord]) -> str:
         lines.append(
             f"- {action.action_id} [{action.type}/{action.executor}] {action.status}: {task}"
         )
+    return "\n".join(lines)
+
+
+def _format_perception_cues(cues: list[str]) -> str:
+    lines = ["\n## 感知空缺\n"]
+    for cue in cues:
+        lines.append(f"- {cue}")
     return "\n".join(lines)

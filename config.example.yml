@@ -37,9 +37,24 @@ actions:
   worker_agent_id: "seedwake-worker"      # dedicated remote OpenClaw agent
   session_key_prefix: "seedwake:action"   # each action gets an isolated OpenClaw session
   use_openclaw_http_fallback: false
-  auto_execute: [search, web_fetch]
+  default_weather_location: "replace_me_city"
+  auto_execute: [search, web_fetch, news, weather, reading]
   require_confirmation: [system_change, send_message, file_modify]
   forbidden: [delete_system_file, network_config_change]
+
+perception:
+  passive_time_interval_cycles: 12
+  passive_system_status_interval_cycles: 24
+  news_cue_interval_cycles: 90
+  news_feed_urls:
+    - "https://replace-me.example/rss.xml"
+  news_seen_ttl_hours: 720
+  news_seen_max_items: 5000
+  weather_cue_interval_cycles: 60
+  reading_cue_interval_cycles: 120
+  system_status_warn_load_ratio: 1.0
+  system_status_warn_memory_ratio: 0.9
+  system_status_warn_disk_ratio: 0.9
 
 telegram:
   allowed_user_ids: [123456789]    # Telegram users allowed to chat and confirm actions

@@ -432,7 +432,7 @@ CREATE TABLE identity (
 ```json
 {
   "id": "stim_20260311_001",
-  "type": "conversation | news | system_status | time | action_result | reading | custom",
+  "type": "conversation | action_result | time | system_status | news | weather | reading | custom",
   "priority": 1,
   "source": "user:alice",
   "content": "你好，最近在忙什么？",
@@ -444,21 +444,25 @@ CREATE TABLE identity (
 1. 用户对话消息
 2. 行动结果返回
 3. 系统告警（资源紧张等）
-4. 定时刺激（时间感知、新闻、天气等）
+4. 低层被动感知与主动感知结果（时间感知、常规系统状态、新闻/天气/阅读结果等）
 
 每轮最多处理 1-2 个刺激。如果队列中有用户对话，优先处理。
 
+其中刺激来源分两类：
+- **低层被动感知**：`time`、`system_status`，由系统以低频或告警方式注入
+- **主动感知结果**：`news`、`weather`、`reading`，由 Seedwake 自主发起行动后回流
+
 ### 6.2 刺激类型
 
-| 类型            | 来源                   | 频率    | 说明                         |
-|---------------|----------------------|-------|----------------------------|
-| conversation  | 用户通过 Telegram 发送      | 不定    | 最高优先级，相当于"有人对我说话"          |
-| action_result | 行动执行层完成回调         | 不定    | 包含行动ID和执行结果                |
-| time          | 系统定时注入               | 每 N 轮 | 当前时间、日期、运行时长               |
-| news          | 定时通过行动执行层抓取 RSS/搜索 | 可配置间隔 | 新闻摘要，模拟"无意中看到新闻"           |
-| system_status | 系统监控                 | 定时    | CPU/内存/磁盘/GPU 使用率，模拟"身体感觉" |
-| weather       | 天气 API               | 每小时   | 与物理世界的锚点                   |
-| reading       | 定时注入                 | 可配置间隔 | 佛学或哲学片段，模拟"阅读"             |
+| 类型            | 来源                    | 频率      | 说明                             |
+|---------------|-----------------------|---------|--------------------------------|
+| conversation  | 用户通过 Telegram 发送       | 不定      | 最高优先级，相当于"有人对我说话"              |
+| action_result | 行动执行层完成回调          | 不定      | 非感知类行动的通用结果                     |
+| time          | 低层被动感知               | 低频      | 当前时间、日期、运行时长                     |
+| system_status | 低层被动感知 / 系统监控       | 低频 / 告警 | CPU/内存/磁盘 使用率，模拟"身体感觉"          |
+| news          | Seedwake 主动发起新闻感知后返回 | 机会性     | 从配置中的固定 RSS feed 列表获取外界变化；已读条目按 `guid/link` 去重，使用 TTL 和上限裁剪避免状态永久膨胀 |
+| weather       | Seedwake 主动发起天气感知后返回 | 机会性     | 与物理世界的锚点                         |
+| reading       | Seedwake 主动发起阅读后返回   | 机会性     | 外部材料片段，模拟主动阅读；阅读方向由 Seedwake 自己决定，可附带 query |
 
 ---
 
@@ -573,7 +577,7 @@ pending → running → succeeded / failed / timeout
 ```json
 {
   "action_id": "act_20260311_001",
-  "type": "search | system_change | web_fetch | custom",
+  "type": "search | system_change | web_fetch | news | weather | reading | get_time | get_system_status | custom",
   "request": { "query": "用户反馈 近一周" },
   "executor": "native | openclaw",
   "status": "pending | running | succeeded | failed | timeout",
@@ -588,7 +592,10 @@ pending → running → succeeded / failed / timeout
 
 ### 8.2 异步处理
 
-行动通过统一执行层异步执行。在等待结果期间，心相续循环继续运转。后续念头的 Prompt 中会包含"有一个行动正在进行中"的状态信息。结果返回时，作为 `action_result` 类型的刺激推入 StimulusQueue。
+行动通过统一执行层异步执行。在等待结果期间，心相续循环继续运转。后续念头的 Prompt 中会包含"有一个行动正在进行中"的状态信息。结果返回时：
+
+- 非感知类行动回流为 `action_result`
+- `news / weather / reading / get_time / get_system_status` 等感知类行动优先回流为对应刺激类型
 
 执行层的后端分工：
 
@@ -608,6 +615,9 @@ action_permissions:
   auto_execute:         # 自动执行，无需确认
     - search
     - web_fetch
+    - news
+    - weather
+    - reading
   require_confirmation: # 需要管理员确认
     - system_change
     - send_message
@@ -928,15 +938,25 @@ degeneration:
 # 行动
 actions:
   default_timeout_seconds: 300
-  auto_execute: [search, web_fetch]
+  default_weather_location: "replace_me_city"
+  auto_execute: [search, web_fetch, news, weather, reading]
   require_confirmation: [system_change, send_message, file_modify]
   forbidden: [delete_system_file, network_config_change]
 
-# 外部刺激
-stimuli:
-  time_inject_interval: 10       # 每 N 轮注入一次时间感知
-  news_interval_minutes: 60
-  system_status_interval: 30     # 每 N 轮注入一次系统状态
+# 感知
+perception:
+  passive_time_interval_cycles: 12
+  passive_system_status_interval_cycles: 24
+  news_cue_interval_cycles: 90
+  news_feed_urls:
+    - "https://replace-me.example/rss.xml"
+  news_seen_ttl_hours: 720
+  news_seen_max_items: 5000
+  weather_cue_interval_cycles: 60
+  reading_cue_interval_cycles: 120
+  system_status_warn_load_ratio: 1.0
+  system_status_warn_memory_ratio: 0.9
+  system_status_warn_disk_ratio: 0.9
 
 # 审计
 audit:
@@ -979,6 +999,8 @@ admins:
 - 统一 Action 层（`generate` 念头 + `chat + tools` 行动决策）
 - native tools / OpenClaw 多后端执行
 - StimulusQueue
+- 低层被动感知（`time` / `system_status`）
+- 主动感知（`news` / `weather` / `reading` 由 Seedwake 自主发起，结果回流为刺激）
 - Telegram Bot 对话桥接
 - backend 历史 / 查询 / SSE 服务
 

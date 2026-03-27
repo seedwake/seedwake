@@ -22,6 +22,7 @@ from core.embedding import embed_text
 from core.memory.identity import load_identity
 from core.memory.long_term import LongTermMemory
 from core.memory.short_term import ShortTermMemory
+from core.perception import PerceptionManager
 from core.stimulus import Stimulus, StimulusQueue, append_conversation_history
 from core.thought_parser import Thought
 
@@ -70,12 +71,21 @@ def main() -> None:
     stm = ShortTermMemory(redis_client, context_window, buffer_size)
     ltm = LongTermMemory(pg_conn, retrieval_top_k)
     stimulus_queue = StimulusQueue(redis_client)
+    perception_config = dict(config.get("perception") or {})
+    if not perception_config.get("default_weather_location"):
+        perception_config["default_weather_location"] = str(
+            (config.get("actions") or {}).get("default_weather_location", "")
+        ).strip()
+    perception = PerceptionManager.from_config(perception_config)
     action_manager = create_action_manager(
         redis_client,
         stimulus_queue,
         ollama_client,
         model_config,
         config.get("actions", {}),
+        news_feed_urls=list((config.get("perception", {}) or {}).get("news_feed_urls", [])),
+        news_seen_ttl_hours=int((config.get("perception", {}) or {}).get("news_seen_ttl_hours", 720)),
+        news_seen_max_items=int((config.get("perception", {}) or {}).get("news_seen_max_items", 5000)),
         log_callback=lambda text: _output(log_file, text),
         event_callback=lambda event_type, payload: _publish_event(stm.redis_client, event_type, payload),
     )
@@ -117,9 +127,14 @@ def main() -> None:
         if not had_pg and ltm.available:
             _publish_event(stm.redis_client, "status", {"message": "postgres_recovered"})
 
+        _push_passive_stimuli(stimulus_queue, perception.collect_passive_stimuli(cycle_id))
         controls = pop_action_controls(stm.redis_client)
         action_manager.apply_controls(controls)
         stimuli = stimulus_queue.pop_many(limit=2)
+        perception.observe_stimuli(cycle_id, stimuli)
+        perception.observe_types(cycle_id, action_manager.pop_perception_observations())
+        running_actions = action_manager.running_actions()
+        perception_cues = perception.build_prompt_cues(cycle_id, running_actions)
         try:
             # Retrieve long-term associations via embedding
             ltm_context = _retrieve_associations(
@@ -131,7 +146,8 @@ def main() -> None:
                 stm.get_context(), context_window, model_config,
                 long_term_context=ltm_context,
                 stimuli=stimuli,
-                running_actions=action_manager.running_actions(),
+                running_actions=running_actions,
+                perception_cues=perception_cues,
             )
             stm.append(new_thoughts)
             _store_to_ltm(ltm, ollama_client, new_thoughts, embedding_model, cycle_id)
@@ -254,7 +270,13 @@ def _connect_redis():
     host = os.environ.get("REDIS_HOST", "localhost")
     port = int(os.environ.get("REDIS_PORT", "6379"))
     try:
-        client = redis_lib.Redis(host=host, port=port, decode_responses=True)
+        client = redis_lib.Redis(
+            host=host,
+            port=port,
+            decode_responses=True,
+            socket_connect_timeout=1.0,
+            socket_timeout=1.0,
+        )
         client.ping()
         return client
     except Exception:
@@ -330,6 +352,17 @@ def _publish_reply_event(redis_client, stimuli: list[Stimulus], thoughts: list[T
         "message": reply,
         "stimulus_id": conversation.stimulus_id,
     })
+
+
+def _push_passive_stimuli(stimulus_queue: StimulusQueue, stimuli: list[dict[str, object]]) -> None:
+    for stimulus in stimuli:
+        stimulus_queue.push(
+            str(stimulus["type"]),
+            int(stimulus["priority"]),
+            str(stimulus["source"]),
+            str(stimulus["content"]),
+            metadata=dict(stimulus.get("metadata") or {}),
+        )
 
 
 def _output(log_file, text: str) -> None:

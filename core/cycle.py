@@ -26,6 +26,7 @@ def run_cycle(
     long_term_context: list[str] | None = None,
     stimuli: list[Stimulus] | None = None,
     running_actions: list[ActionRecord] | None = None,
+    perception_cues: list[str] | None = None,
 ) -> list[Thought]:
     """Execute one cycle and return parsed thoughts."""
     prompt = build_prompt(
@@ -33,6 +34,7 @@ def run_cycle(
         long_term_context=long_term_context,
         stimuli=stimuli,
         running_actions=running_actions,
+        perception_cues=perception_cues,
     )
     raw_output = _call_ollama(client, prompt, model_config)
     thoughts = parse_thoughts(raw_output, cycle_id)
