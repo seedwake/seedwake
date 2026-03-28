@@ -214,7 +214,6 @@ async def _handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if not queue.redis_available:
         _mark_redis_unavailable(context.application)
         await _reply_text(update, "Redis 不可用，当前无法与 Seedwake 对话。")
-        return
 
 
 async def _handle_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

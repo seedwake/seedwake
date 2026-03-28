@@ -86,7 +86,7 @@ def _load_recent_thoughts(redis_client, limit: int) -> list[JsonObject]:
     for raw in raw_items:
         try:
             item = json.loads(raw)
-        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        except (TypeError, ValueError) as exc:
             logger.warning("skipping malformed thought record: %s", exc)
             continue
         if not isinstance(item, dict):

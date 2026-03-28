@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,7 @@ from core.types import (
 ACTION_REDIS_KEY = "seedwake:actions"
 ACTION_CONTROL_KEY = "seedwake:action_control"
 NEWS_SEEN_REDIS_KEY = "seedwake:news_seen"
+TELEGRAM_SOURCE_PREFIX = "telegram:"
 OPENCLAW_ACTION_TYPES = {"search", "web_fetch", "system_change", "custom", "weather", "reading", "file_modify"}
 PERCEPTION_AUTO_EXECUTE_TYPES = {"news", "weather", "reading"}
 OPS_ACTION_TYPES = {"system_change", "file_modify"}
@@ -108,6 +110,12 @@ class ActionRecord:
     dispatch_started_at: datetime | None = None
 
 
+@dataclass
+class ActionCallbacks:
+    log: Callable[[str], None] | None = None
+    event: Callable[[str, JsonObject], None] | None = None
+
+
 class ActionManager:
     """Owns action planning, execution, state, and result stimuli."""
 
@@ -126,8 +134,7 @@ class ActionManager:
         news_reader=read_news_result,
         contact_resolver=None,
         openclaw_retry_delay_seconds: float = 5.0,
-        log_callback=None,
-        event_callback=None,
+        callbacks: ActionCallbacks | None = None,
     ):
         self._redis = redis_client
         self._stimulus_queue = stimulus_queue
@@ -141,8 +148,9 @@ class ActionManager:
         self._news_reader = news_reader
         self._contact_resolver = contact_resolver
         self._openclaw_retry_delay_seconds = max(0.0, openclaw_retry_delay_seconds)
-        self._log_callback = log_callback
-        self._event_callback = event_callback
+        callbacks = callbacks or ActionCallbacks()
+        self._log_callback = callbacks.log
+        self._event_callback = callbacks.event
         self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="seedwake-action")
         self._lock = Lock()
         self._actions: dict[str, ActionRecord] = {}
@@ -164,69 +172,38 @@ class ActionManager:
         created: list[ActionRecord] = []
         conversation_source = _latest_conversation_source(stimuli or [])
         for thought in thoughts:
-            if not thought.action_request:
-                continue
-
-            try:
-                plan = self._planner.plan(thought, conversation_source=conversation_source)
-            except PLANNER_EXCEPTIONS as exc:
-                self._emit(f"行动规划失败 {thought.thought_id}: {exc}")
-                continue
-            if not plan:
-                continue
-            target_source = plan.target_source
-            target_entity = plan.target_entity
-            if plan.action_type == "send_message" and not target_source and not target_entity:
-                target_source = conversation_source or ""
-
-            action = ActionRecord(
-                action_id=f"act_{thought.thought_id}",
-                type=plan.action_type,
-                request=_build_action_request_payload(
-                    task=plan.task,
-                    reason=plan.reason,
-                    raw_action=thought.action_request,
-                    news_feed_urls=plan.news_feed_urls,
-                    worker_agent_id=plan.worker_agent_id,
-                    target_source=target_source,
-                    target_entity=target_entity,
-                    message_text=plan.message_text,
-                ),
-                executor=plan.executor,
-                status="pending",
-                source_thought_id=thought.thought_id,
-                source_content=thought.content,
-                timeout_seconds=plan.timeout_seconds,
+            action = self._plan_submitted_action(
+                thought,
+                conversation_source=conversation_source,
             )
+            if action is None:
+                continue
             self._upsert_action(action)
             created.append(action)
-
-            policy = self._classify_policy(action)
-            if policy == "forbidden":
-                blocked_reason = "行动类型被安全策略禁止"
-                self._finalize_action(
-                    action.action_id,
-                    status="failed",
-                    result=_failure_result(blocked_reason, blocked_reason, transport=action.executor),
-                )
-                continue
-            if policy == "confirmation":
-                action = self._update_action(action.action_id, awaiting_confirmation=True)
-                self._emit(f"行动等待确认 {action.action_id} [{action.type}/{action.executor}]")
-                self._publish_action_event(action, "pending", "需要管理员确认")
-                continue
-            if policy == "rejected":
-                blocked_reason = "行动未进入自动执行白名单"
-                self._finalize_action(
-                    action.action_id,
-                    status="failed",
-                    result=_failure_result(blocked_reason, blocked_reason, transport=action.executor),
-                )
-                continue
-
-            self._start_action(action.action_id)
+            self._dispatch_submitted_action(action)
 
         return created
+
+    def _plan_submitted_action(
+        self,
+        thought: Thought,
+        *,
+        conversation_source: str | None,
+    ) -> ActionRecord | None:
+        if not thought.action_request:
+            return None
+        try:
+            plan = self._planner.plan(thought, conversation_source=conversation_source)
+        except PLANNER_EXCEPTIONS as exc:
+            self._emit(f"行动规划失败 {thought.thought_id}: {exc}")
+            return None
+        if not plan:
+            return None
+        return _action_from_plan(
+            thought=thought,
+            plan=plan,
+            conversation_source=conversation_source,
+        )
 
     def apply_controls(self, controls: list[ActionControl]) -> None:
         for control in controls:
@@ -440,6 +417,31 @@ class ActionManager:
             stimulus["content"],
             action_id=action.action_id,
             metadata=stimulus["metadata"],
+        )
+
+    def _dispatch_submitted_action(self, action: ActionRecord) -> None:
+        policy = self._classify_policy(action)
+        if policy == "auto":
+            self._start_action(action.action_id)
+            return
+        if policy == "confirmation":
+            action = self._update_action(action.action_id, awaiting_confirmation=True)
+            self._emit(f"行动等待确认 {action.action_id}")
+            self._publish_action_event(action, "pending", "等待确认")
+            return
+        if policy == "forbidden":
+            self._emit(f"行动被禁止 {action.action_id}")
+            self._finalize_action(
+                action.action_id,
+                status="failed",
+                result=_failure_result("行动被禁止", "forbidden", transport=action.executor),
+            )
+            return
+        self._emit(f"行动未获自动执行许可 {action.action_id}")
+        self._finalize_action(
+            action.action_id,
+            status="failed",
+            result=_failure_result("行动需要人工批准", "not_auto_execute", transport=action.executor),
         )
 
     def _classify_policy(self, action: ActionRecord) -> str:
@@ -910,8 +912,7 @@ def create_action_manager(
         news_reader=read_news_result,
         contact_resolver=contact_resolver,
         openclaw_retry_delay_seconds=float(action_config.get("openclaw_retry_delay_seconds", 5.0)),
-        log_callback=log_callback,
-        event_callback=event_callback,
+        callbacks=ActionCallbacks(log=log_callback, event=event_callback),
     )
 
 
@@ -1060,77 +1061,30 @@ def _plan_from_tool_call(
 
     timeout_seconds = _clamp_timeout(arguments.get("timeout_seconds"), default_timeout_seconds)
     reason = str(arguments.get("reason") or thought.content)
-    if tool_name == "native_get_time":
-        return ActionPlan(
-            action_type="get_time",
-            executor="native",
-            task="读取当前时间",
-            timeout_seconds=timeout_seconds,
-            reason=reason,
-        )
-    if tool_name == "native_system_status":
-        return ActionPlan(
-            action_type="get_system_status",
-            executor="native",
-            task="读取当前系统状态",
-            timeout_seconds=timeout_seconds,
-            reason=reason,
-        )
-    if tool_name == "native_read_news":
-        return _native_news_plan(
-            timeout_seconds=timeout_seconds,
-            reason=reason,
-            news_feed_urls=news_feed_urls,
-        )
-    if tool_name == "native_send_message":
-        return _native_send_message_plan(
-            raw_params=str((thought.action_request or {}).get("params") or ""),
-            thought=thought,
-            timeout_seconds=timeout_seconds,
-            reason=reason,
-            conversation_source=conversation_source,
-            explicit_message=str(arguments.get("message") or "").strip(),
-            explicit_target=str(arguments.get("target") or "").strip(),
-            explicit_target_entity=str(arguments.get("target_entity") or "").strip(),
-        )
-    if tool_name == "delegate_openclaw":
-        explicit_task = str(arguments.get("task") or "").strip()
-        action_type = str(
-            arguments.get("action_type")
-            or (thought.action_request or {}).get("type")
-            or "custom"
-        )
-        if action_type == "news":
-            return _native_news_plan(
-                timeout_seconds=timeout_seconds,
-                reason=reason,
-                news_feed_urls=news_feed_urls,
-            )
-        if action_type == "send_message":
-            return _native_send_message_plan(
-                raw_params=str((thought.action_request or {}).get("params") or ""),
-                thought=thought,
-                timeout_seconds=timeout_seconds,
-                reason=reason,
-                conversation_source=conversation_source,
-                explicit_message=explicit_task,
-                explicit_target_entity=str(arguments.get("target_entity") or "").strip(),
-            )
-        task = _build_openclaw_task(
-            action_type=action_type,
-            explicit_task=explicit_task,
-            thought=thought,
-            default_weather_location=default_weather_location,
-        )
-        return ActionPlan(
-            action_type=action_type,
-            executor="openclaw",
-            task=task,
-            timeout_seconds=timeout_seconds,
-            reason=reason,
-            worker_agent_id=_resolve_worker_agent_id(action_type, worker_agent_id, ops_worker_agent_id),
-        )
-    return None
+    native_plan = _plan_native_tool_call(
+        tool_name=tool_name,
+        arguments=arguments,
+        thought=thought,
+        timeout_seconds=timeout_seconds,
+        reason=reason,
+        news_feed_urls=news_feed_urls,
+        conversation_source=conversation_source,
+    )
+    if native_plan is not None:
+        return native_plan
+    if tool_name != "delegate_openclaw":
+        return None
+    return _plan_delegate_tool_call(
+        arguments=arguments,
+        thought=thought,
+        timeout_seconds=timeout_seconds,
+        reason=reason,
+        default_weather_location=default_weather_location,
+        news_feed_urls=news_feed_urls,
+        worker_agent_id=worker_agent_id,
+        ops_worker_agent_id=ops_worker_agent_id,
+        conversation_source=conversation_source,
+    )
 
 
 def _fallback_plan(
@@ -1504,6 +1458,34 @@ def _build_action_request_payload(
     return payload
 
 
+def _action_from_plan(
+    *,
+    thought: Thought,
+    plan: ActionPlan,
+    conversation_source: str | None,
+) -> ActionRecord:
+    request_payload = _build_action_request_payload(
+        task=plan.task,
+        reason=plan.reason,
+        raw_action=_coerce_raw_action_request(thought.action_request or {}),
+        news_feed_urls=plan.news_feed_urls,
+        worker_agent_id=plan.worker_agent_id,
+        target_source=plan.target_source or str(conversation_source or "").strip(),
+        target_entity=plan.target_entity,
+        message_text=plan.message_text,
+    )
+    return ActionRecord(
+        action_id=f"act_{thought.thought_id}",
+        type=plan.action_type,
+        request=request_payload,
+        executor=plan.executor,
+        status="pending",
+        source_thought_id=thought.thought_id,
+        source_content=thought.content,
+        timeout_seconds=plan.timeout_seconds,
+    )
+
+
 def _native_news_plan(
     *,
     timeout_seconds: int,
@@ -1557,13 +1539,124 @@ def _native_send_message_plan(
     )
 
 
+def _plan_native_tool_call(
+    *,
+    tool_name: str,
+    arguments: dict,
+    thought: Thought,
+    timeout_seconds: int,
+    reason: str,
+    news_feed_urls: list[str],
+    conversation_source: str | None,
+) -> ActionPlan | None:
+    if tool_name == "native_get_time":
+        return _native_time_plan(timeout_seconds=timeout_seconds, reason=reason)
+    if tool_name == "native_system_status":
+        return _native_system_status_plan(timeout_seconds=timeout_seconds, reason=reason)
+    if tool_name == "native_read_news":
+        return _native_news_plan(
+            timeout_seconds=timeout_seconds,
+            reason=reason,
+            news_feed_urls=news_feed_urls,
+        )
+    if tool_name != "native_send_message":
+        return None
+    return _native_send_message_plan(
+        raw_params=_raw_action_params(thought),
+        thought=thought,
+        timeout_seconds=timeout_seconds,
+        reason=reason,
+        conversation_source=conversation_source,
+        explicit_message=str(arguments.get("message") or "").strip(),
+        explicit_target=str(arguments.get("target") or "").strip(),
+        explicit_target_entity=str(arguments.get("target_entity") or "").strip(),
+    )
+
+
+def _plan_delegate_tool_call(
+    *,
+    arguments: dict,
+    thought: Thought,
+    timeout_seconds: int,
+    reason: str,
+    default_weather_location: str,
+    news_feed_urls: list[str],
+    worker_agent_id: str,
+    ops_worker_agent_id: str,
+    conversation_source: str | None,
+) -> ActionPlan:
+    explicit_task = str(arguments.get("task") or "").strip()
+    action_type = _delegated_action_type(arguments, thought)
+    if action_type == "news":
+        return _native_news_plan(
+            timeout_seconds=timeout_seconds,
+            reason=reason,
+            news_feed_urls=news_feed_urls,
+        )
+    if action_type == "send_message":
+        return _native_send_message_plan(
+            raw_params=_raw_action_params(thought),
+            thought=thought,
+            timeout_seconds=timeout_seconds,
+            reason=reason,
+            conversation_source=conversation_source,
+            explicit_message=explicit_task,
+            explicit_target_entity=str(arguments.get("target_entity") or "").strip(),
+        )
+    return ActionPlan(
+        action_type=action_type,
+        executor="openclaw",
+        task=_build_openclaw_task(
+            action_type=action_type,
+            explicit_task=explicit_task,
+            thought=thought,
+            default_weather_location=default_weather_location,
+        ),
+        timeout_seconds=timeout_seconds,
+        reason=reason,
+        worker_agent_id=_resolve_worker_agent_id(action_type, worker_agent_id, ops_worker_agent_id),
+    )
+
+
+def _native_time_plan(*, timeout_seconds: int, reason: str) -> ActionPlan:
+    return ActionPlan(
+        action_type="get_time",
+        executor="native",
+        task="读取当前时间",
+        timeout_seconds=timeout_seconds,
+        reason=reason,
+    )
+
+
+def _native_system_status_plan(*, timeout_seconds: int, reason: str) -> ActionPlan:
+    return ActionPlan(
+        action_type="get_system_status",
+        executor="native",
+        task="读取当前系统状态",
+        timeout_seconds=timeout_seconds,
+        reason=reason,
+    )
+
+
+def _delegated_action_type(arguments: dict, thought: Thought) -> str:
+    return str(
+        arguments.get("action_type")
+        or (thought.action_request or {}).get("type")
+        or "custom"
+    )
+
+
+def _raw_action_params(thought: Thought) -> str:
+    return str((thought.action_request or {}).get("params") or "")
+
+
 def _build_send_message_target(raw_params: str) -> str:
     target = _extract_action_first_param(raw_params, "target", "source", "chat_id", "chat")
     if target:
-        if target.startswith("telegram:"):
+        if target.startswith(TELEGRAM_SOURCE_PREFIX):
             return target
         if target.isdigit() or (target.startswith("-") and target[1:].isdigit()):
-            return f"telegram:{target}"
+            return f"{TELEGRAM_SOURCE_PREFIX}{target}"
     return ""
 
 
@@ -1615,9 +1708,9 @@ def _send_telegram_message(target_source: str, message_text: str, *, timeout_sec
 
 
 def _telegram_chat_id_from_source(source: str) -> str | None:
-    if not source.startswith("telegram:"):
+    if not source.startswith(TELEGRAM_SOURCE_PREFIX):
         return None
-    chat_id = source.removeprefix("telegram:").strip()
+    chat_id = source.removeprefix(TELEGRAM_SOURCE_PREFIX).strip()
     if chat_id.isdigit() or (chat_id.startswith("-") and chat_id[1:].isdigit()):
         return chat_id
     return None
@@ -1645,7 +1738,7 @@ def _prepare_send_message(
             "missing_target",
             transport="native",
         )
-    if not target_source.startswith("telegram:"):
+    if not target_source.startswith(TELEGRAM_SOURCE_PREFIX):
         return target_source, target_entity, message_text, _failure_result(
             "仅支持 Telegram 原生发送",
             "unsupported_target",
@@ -1779,7 +1872,7 @@ def load_action_items(redis_client) -> list[JsonObject]:
     for raw in raw_items:
         try:
             item = json.loads(raw)
-        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        except (TypeError, ValueError) as exc:
             logger.warning("skipping malformed action record: %s", exc)
             continue
         if not isinstance(item, dict):
@@ -1803,7 +1896,7 @@ def pop_action_controls(redis_client, limit: int = 20) -> list[ActionControl]:
         raw = raw_items[0]
         try:
             control = json.loads(raw)
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except (TypeError, ValueError):
             try:
                 redis_client.ltrim(ACTION_CONTROL_KEY, 1, -1)
             except ACTION_REDIS_EXCEPTIONS:
@@ -1818,6 +1911,53 @@ def pop_action_controls(redis_client, limit: int = 20) -> list[ActionControl]:
 
 
 def _action_from_json_object(item: JsonObject, *, now: datetime) -> ActionRecord | None:
+    header = _parse_action_record_header(item)
+    if header is None:
+        return None
+    if _should_skip_restored_action(header.status, header.awaiting_confirmation):
+        return None
+    request_payload = _coerce_action_request_payload(header.raw_request, header.source_content)
+    restored_status, restored_result, dispatch_started_at = _restore_action_state(
+        item,
+        action_type=header.action_type,
+        executor=header.executor,
+    )
+    action = ActionRecord(
+        action_id=header.action_id,
+        type=header.action_type,
+        request=request_payload,
+        executor=header.executor,
+        status=restored_status,
+        source_thought_id=header.source_thought_id,
+        source_content=header.source_content,
+        submitted_at=_parse_action_datetime(item.get("submitted_at")) or now,
+        timeout_seconds=_clamp_timeout(item.get("timeout_seconds"), 300),
+        run_id=_stringify_json_field(item.get("run_id")) or None,
+        session_key=_stringify_json_field(item.get("session_key")) or None,
+        awaiting_confirmation=header.awaiting_confirmation,
+        retry_after=_parse_action_datetime(item.get("retry_after")),
+        dispatch_started_at=dispatch_started_at,
+    )
+    if restored_result is not None:
+        action.result = _normalize_action_result(restored_result, action)
+    if action.status == "pending" and not action.awaiting_confirmation and action.executor == "openclaw":
+        action.retry_after = action.retry_after or now
+    return action
+
+
+@dataclass
+class _RestoredActionHeader:
+    action_id: str
+    action_type: str
+    executor: str
+    source_thought_id: str
+    source_content: str
+    status: str
+    raw_request: JsonObject
+    awaiting_confirmation: bool
+
+
+def _parse_action_record_header(item: JsonObject) -> _RestoredActionHeader | None:
     action_id = _stringify_json_field(item.get("action_id"))
     action_type = _stringify_json_field(item.get("type"))
     executor = _stringify_json_field(item.get("executor"))
@@ -1835,43 +1975,43 @@ def _action_from_json_object(item: JsonObject, *, now: datetime) -> ActionRecord
     ):
         logger.warning("skipping incomplete action record: %s", action_id or "<unknown>")
         return None
-    awaiting_confirmation = bool(item.get("awaiting_confirmation"))
-    if status not in {"pending", "running"} and not awaiting_confirmation:
-        return None
-
-    request_payload = _coerce_action_request_payload(raw_request, source_content)
-    submitted_at = _parse_action_datetime(item.get("submitted_at")) or now
-    dispatch_started_at = _parse_action_datetime(item.get("dispatch_started_at"))
-    restored_status = "pending" if status == "running" else status
-    restored_result = _coerce_restored_action_result(item.get("result"))
-    if status == "running" and action_type == "send_message" and dispatch_started_at is not None:
-        restored_status = "failed"
-        restored_result = _failure_result(
-            "消息发送状态未知，为避免重复发送，未自动重试",
-            "delivery_status_unknown",
-            transport=executor,
-        )
-    action = ActionRecord(
+    return _RestoredActionHeader(
         action_id=action_id,
-        type=action_type,
-        request=request_payload,
+        action_type=action_type,
         executor=executor,
-        status=restored_status,
         source_thought_id=source_thought_id,
         source_content=source_content,
-        submitted_at=submitted_at,
-        timeout_seconds=_clamp_timeout(item.get("timeout_seconds"), 300),
-        run_id=_stringify_json_field(item.get("run_id")) or None,
-        session_key=_stringify_json_field(item.get("session_key")) or None,
-        awaiting_confirmation=awaiting_confirmation,
-        retry_after=_parse_action_datetime(item.get("retry_after")),
-        dispatch_started_at=dispatch_started_at,
+        status=status,
+        raw_request=raw_request,
+        awaiting_confirmation=bool(item.get("awaiting_confirmation")),
     )
-    if restored_result is not None:
-        action.result = _normalize_action_result(restored_result, action)
-    if action.status == "pending" and not action.awaiting_confirmation and action.executor == "openclaw":
-        action.retry_after = action.retry_after or now
-    return action
+
+
+def _should_skip_restored_action(status: str, awaiting_confirmation: bool) -> bool:
+    return status not in {"pending", "running"} and not awaiting_confirmation
+
+
+def _restore_action_state(
+    item: JsonObject,
+    *,
+    action_type: str,
+    executor: str,
+) -> tuple[str, ActionResultEnvelope | None, datetime | None]:
+    dispatch_started_at = _parse_action_datetime(item.get("dispatch_started_at"))
+    status = _stringify_json_field(item.get("status")) or "pending"
+    if status == "running" and action_type == "send_message" and dispatch_started_at is not None:
+        return (
+            "failed",
+            _failure_result(
+                "消息发送状态未知，为避免重复发送，未自动重试",
+                "delivery_status_unknown",
+                transport=executor,
+            ),
+            dispatch_started_at,
+        )
+    restored_status = "pending" if status == "running" else status
+    restored_result = _coerce_restored_action_result(item.get("result"))
+    return restored_status, restored_result, dispatch_started_at
 
 
 def _coerce_action_request_payload(value: JsonObject, source_content: str) -> ActionRequestPayload:

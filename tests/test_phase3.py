@@ -8,6 +8,7 @@ from urllib import error
 # noinspection PyProtectedMember
 from core.action import (
     ACTION_REDIS_KEY,
+    ActionCallbacks,
     ActionManager,
     ActionPlan,
     NEWS_SEEN_REDIS_KEY,
@@ -223,7 +224,7 @@ def _build_action_manager(
         news_seen_max_items=news_seen_max_items,
         news_reader=news_reader,
         contact_resolver=contact_resolver,
-        event_callback=event_callback,
+        callbacks=ActionCallbacks(event=event_callback),
     )
 
 
@@ -878,7 +879,7 @@ class ActionManagerTests(unittest.TestCase):
             auto_execute=["send_message"],
             require_confirmation=[],
             forbidden=[],
-            event_callback=lambda event_type, payload: events.append((event_type, payload)),
+            callbacks=ActionCallbacks(event=lambda event_type, payload: events.append((event_type, payload))),
         )
 
         created = _submit_and_shutdown_with_stimuli(

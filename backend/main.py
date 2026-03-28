@@ -2,6 +2,7 @@
 
 import logging
 import os
+from typing import Annotated
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI
@@ -15,6 +16,7 @@ from core.runtime import connect_redis_from_env, load_yaml_config
 from core.types import HealthResponse
 
 logger = logging.getLogger(__name__)
+ApiClient = Annotated[str, Depends(resolve_api_client)]
 
 
 def create_app(config: dict | None = None, redis_client=None) -> FastAPI:
@@ -32,7 +34,7 @@ def create_app(config: dict | None = None, redis_client=None) -> FastAPI:
     app.include_router(stream_router)
 
     @app.get("/health")
-    def health(api_client: str = Depends(resolve_api_client)) -> HealthResponse:
+    def health(api_client: ApiClient) -> HealthResponse:
         _ = api_client
         return {
             "ok": True,
