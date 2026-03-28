@@ -8,16 +8,15 @@ from telegram.error import TelegramError
 from telegram import Update
 from telegram.ext import Application, ContextTypes
 
+# noinspection PyProtectedMember
 from bot.main import (
     _dispatch_event,
     _ensure_redis_client,
-    _extract_telegram_chat_id,
-    _format_action_event,
     _handle_actions,
     _handle_approve,
     _handle_text_message,
-    _load_allowed_user_ids,
 )
+from bot.helpers import extract_telegram_chat_id, format_action_event, load_allowed_user_ids
 from core.action import ACTION_CONTROL_KEY
 from core.stimulus import CONVERSATION_HISTORY_KEY, REDIS_KEY as STIMULUS_REDIS_KEY
 from core.types import ActionEventPayload, EventEnvelope, ReplyEventPayload
@@ -142,11 +141,11 @@ def _action_envelope() -> EventEnvelope:
 class TelegramBotHelpersTests(unittest.TestCase):
     def test_load_allowed_user_ids(self) -> None:
         config = {"telegram": {"allowed_user_ids": [123, "456", "bad", 123]}}
-        self.assertEqual(_load_allowed_user_ids(config), [123, 456])
+        self.assertEqual(load_allowed_user_ids(config), [123, 456])
 
     def test_extract_telegram_chat_id(self) -> None:
-        self.assertEqual(_extract_telegram_chat_id("telegram:12345"), 12345)
-        self.assertIsNone(_extract_telegram_chat_id("user:alice"))
+        self.assertEqual(extract_telegram_chat_id("telegram:12345"), 12345)
+        self.assertIsNone(extract_telegram_chat_id("user:alice"))
 
     def test_format_action_event(self) -> None:
         payload: ActionEventPayload = {
@@ -159,7 +158,7 @@ class TelegramBotHelpersTests(unittest.TestCase):
             "session_key": None,
             "awaiting_confirmation": True,
         }
-        text = _format_action_event(payload)
+        text = format_action_event(payload)
         self.assertIn("需要确认的行动", text)
         self.assertIn("act_1", text)
 

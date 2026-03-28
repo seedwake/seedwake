@@ -2,7 +2,9 @@ import unittest
 from threading import Barrier
 from unittest.mock import MagicMock
 
+# noinspection PyProtectedMember
 from core.main import _publish_reply_event
+# noinspection PyProtectedMember
 from core.action import (
     ActionManager,
     ActionPlan,

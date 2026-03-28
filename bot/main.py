@@ -19,6 +19,12 @@ from telegram.ext import (
     filters,
 )
 
+from bot.helpers import (
+    extract_telegram_chat_id,
+    format_action_event,
+    format_status_event,
+    load_allowed_user_ids,
+)
 from core.action import ACTION_REDIS_KEY, push_action_control
 from core.logging import setup_logging
 from core.runtime import connect_redis_from_env, load_yaml_config
@@ -65,7 +71,7 @@ def create_application(config: dict | None = None, redis_client=None) -> Applica
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN 未配置")
 
-    allowed_user_ids = _load_allowed_user_ids(cfg)
+    allowed_user_ids = load_allowed_user_ids(cfg)
     if not allowed_user_ids:
         raise RuntimeError("config.yml 缺少 telegram.allowed_user_ids")
 
@@ -280,7 +286,7 @@ async def _dispatch_event(application: Application, envelope: EventEnvelope) -> 
         reply_payload = _coerce_reply_payload(payload)
         if reply_payload is None:
             return
-        chat_id = _extract_telegram_chat_id(reply_payload["source"])
+        chat_id = extract_telegram_chat_id(reply_payload["source"])
         text = reply_payload["message"].strip()
         if chat_id is None or not text:
             return
@@ -296,14 +302,14 @@ async def _dispatch_event(application: Application, envelope: EventEnvelope) -> 
         status_payload = _coerce_status_payload(payload)
         if status_payload is None:
             return
-        text = _format_status_event(status_payload)
+        text = format_status_event(status_payload)
         if not text:
             return
         await _broadcast_text(application, text)
 
 
 async def _broadcast_action_event(application: Application, payload: ActionEventPayload) -> None:
-    text = _format_action_event(payload)
+    text = format_action_event(payload)
     if not text:
         return
     reply_markup = None
@@ -401,31 +407,10 @@ def _read_env(name: str) -> str:
     return os.environ.get(name, "")
 
 
-def _load_allowed_user_ids(config: dict) -> list[int]:
-    raw_ids = config.get("telegram", {}).get("allowed_user_ids", [])
-    allowed = []
-    for raw in raw_ids:
-        try:
-            allowed.append(int(raw))
-        except (TypeError, ValueError):
-            continue
-    return sorted(set(allowed))
-
-
 def _decode_pubsub_value(value) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8")
     return str(value or "")
-
-
-def _extract_telegram_chat_id(source: str) -> int | None:
-    prefix = "telegram:"
-    if not source.startswith(prefix):
-        return None
-    try:
-        return int(source[len(prefix):])
-    except ValueError:
-        return None
 
 
 def _load_actions(redis_client) -> list[JsonObject]:
@@ -456,29 +441,6 @@ async def _safe_send_message(
         logger.exception("unexpected telegram send failure for chat %s: %s", chat_id, exc)
         return False
     return True
-
-
-def _format_action_event(payload: ActionEventPayload) -> str:
-    action_id = str(payload.get("action_id") or "").strip()
-    action_type = str(payload.get("type") or "").strip()
-    executor = str(payload.get("executor") or "").strip()
-    status = str(payload.get("status") or "").strip()
-    summary = str(payload.get("summary") or "").strip()
-    if not action_id:
-        return ""
-    prefix = "需要确认的行动" if bool(payload.get("awaiting_confirmation")) else "行动更新"
-    return (
-        f"{prefix}\n"
-        f"{action_id} [{action_type}/{executor}] {status}\n"
-        f"{summary}"
-    ).strip()
-
-
-def _format_status_event(payload: StatusEventPayload) -> str:
-    message = str(payload.get("message") or "").strip()
-    if not message:
-        return ""
-    return f"系统状态：{message}"
 
 
 def _coerce_reply_payload(payload: JsonObject) -> ReplyEventPayload | None:
