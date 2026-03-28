@@ -261,8 +261,8 @@ async def _forward_events(application: Application) -> None:
             _mark_redis_unavailable(application)
             await asyncio.sleep(REDIS_RECONNECT_DELAY_SECONDS)
         # noinspection PyBroadException
-        except Exception:
-            logger.exception("unexpected telegram event forwarder failure")
+        except Exception as exc:
+            logger.exception("unexpected telegram event forwarder failure: %s", exc)
             await asyncio.sleep(REDIS_RECONNECT_DELAY_SECONDS)
         finally:
             if pubsub is not None:
@@ -441,8 +441,8 @@ async def _safe_send_message(
     except BOT_SEND_EXCEPTIONS:
         return False
     # noinspection PyBroadException
-    except Exception:
-        logger.exception("unexpected telegram send failure for chat %s", chat_id)
+    except Exception as exc:
+        logger.exception("unexpected telegram send failure for chat %s: %s", chat_id, exc)
         return False
     return True
 

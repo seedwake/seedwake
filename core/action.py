@@ -370,8 +370,8 @@ class ActionManager:
             self._finalize_action(action_id, status="failed", result=fallback_result)
             return
         # noinspection PyBroadException
-        except Exception:
-            logger.exception("failed to finalize forced action failure: %s", action_id)
+        except Exception as exc:
+            logger.exception("failed to finalize forced action failure: %s (%s)", action_id, exc)
 
         with self._lock:
             action = self._actions.get(action_id)
@@ -383,8 +383,8 @@ class ActionManager:
         try:
             self._upsert_action(action)
         # noinspection PyBroadException
-        except Exception:
-            logger.exception("failed to persist forced action failure: %s", action_id)
+        except Exception as exc:
+            logger.exception("failed to persist forced action failure: %s (%s)", action_id, exc)
 
     def _emit(self, text: str) -> None:
         if self._log_callback:

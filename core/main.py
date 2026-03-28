@@ -204,10 +204,10 @@ def main() -> None:
             current_retry_delay = min(current_retry_delay * 2, max_retry_delay)
             continue
         # noinspection PyBroadException
-        except Exception:
+        except Exception as exc:
             stimulus_queue.requeue_front(stimuli)
-            logger.exception("unexpected main loop failure at cycle %s", cycle_id)
-            _print_error(log_file, cycle_id, RuntimeError("unexpected main loop failure"), current_retry_delay)
+            logger.exception("unexpected main loop failure at cycle %s: %s", cycle_id, exc)
+            _print_error(log_file, cycle_id, exc, current_retry_delay)
             time.sleep(current_retry_delay)
             current_retry_delay = min(current_retry_delay * 2, max_retry_delay)
             continue

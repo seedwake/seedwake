@@ -57,8 +57,8 @@ def stream_events(
                     logger.exception("malformed SSE event payload")
                     continue
         # noinspection PyBroadException
-        except Exception:
-            logger.exception("unexpected SSE stream failure")
+        except Exception as exc:
+            logger.exception("unexpected SSE stream failure: %s", exc)
             yield _format_sse("status", {"message": "stream_error"})
         finally:
             pubsub.close()
