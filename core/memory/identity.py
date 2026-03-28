@@ -33,7 +33,7 @@ def _read_from_db(conn) -> dict[str, str]:
         with conn.cursor() as cur:
             cur.execute("SELECT section, content FROM identity ORDER BY id")
             rows = cur.fetchall()
-        return {section: content for section, content in rows} if rows else {}
+        return dict(rows) if rows else {}
     except psycopg.Error:
         conn.rollback()
         return {}

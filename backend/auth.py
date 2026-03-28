@@ -1,14 +1,19 @@
 """Backend authentication helpers."""
 
+from typing import Annotated
+
 from fastapi import Header, HTTPException, Query
 
+AuthorizationHeader = Annotated[str | None, Header()]
+QueryToken = Annotated[str | None, Query()]
 
-def resolve_admin_from_header(config: dict, authorization: str | None = Header(default=None)) -> str:
+
+def resolve_admin_from_header(config: dict, authorization: AuthorizationHeader = None) -> str:
     token = _extract_bearer_token(authorization)
     return _resolve_admin(config, token)
 
 
-def resolve_admin_from_query(config: dict, token: str | None = Query(default=None)) -> str:
+def resolve_admin_from_query(config: dict, token: QueryToken = None) -> str:
     if not token:
         raise HTTPException(status_code=401, detail="missing token")
     return _resolve_admin(config, token)

@@ -10,14 +10,15 @@ import os
 import signal
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
-from ollama import RequestError as OllamaRequestError, ResponseError as OllamaResponseError
+from ollama import Client, RequestError as OllamaRequestError, ResponseError as OllamaResponseError
 import psycopg
 import redis as redis_lib
 from dotenv import load_dotenv
 
-from core.action import create_action_manager, pop_action_controls
+from core.action import ActionManager, ActionRecord, create_action_manager, pop_action_controls
 from core.cycle import create_client, run_cycle
 from core.embedding import embed_text
 from core.logging import setup_logging
@@ -79,6 +80,23 @@ REDIS_EVENT_EXCEPTIONS = (
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class EngineRuntime:
+    ollama_client: Client
+    stm: ShortTermMemory
+    ltm: LongTermMemory
+    stimulus_queue: StimulusQueue
+    perception: PerceptionManager
+    action_manager: ActionManager
+    model_config: dict
+    context_window: int
+    embedding_model: str
+    retry_delay: float
+    max_retry_delay: float
+    reconnect_interval: float
+    bootstrap_identity: dict[str, str]
+
+
 def main() -> None:
     load_dotenv()
     args = _parse_args()
@@ -86,40 +104,44 @@ def main() -> None:
     setup_logging(config, component="core")
     log_file = _open_log(args.log)
 
-    # Connections — each may be None (graceful degradation)
+    ollama_client, redis_client, pg_conn = _create_connections()
+    runtime, identity = _build_runtime_components(config, log_file, ollama_client, redis_client, pg_conn)
+
+    _install_signal_handler(log_file, runtime.action_manager)
+    _emit_startup(log_file, runtime.model_config["name"], runtime.context_window,
+                  redis_client, pg_conn)
+    _run_engine_loop(log_file, runtime, identity)
+
+
+def _create_connections():
     ollama_client = create_client(
         os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
         os.environ.get("OLLAMA_AUTH_HEADER", ""),
         os.environ.get("OLLAMA_AUTH_VALUE", ""),
     )
-    redis_client = _connect_redis()
-    pg_conn = _connect_pg()
+    return ollama_client, _connect_redis(), _connect_pg()
 
-    # Core config
+
+def _build_runtime_components(
+    config: dict,
+    log_file,
+    ollama_client: Client,
+    redis_client,
+    pg_conn,
+) -> tuple[EngineRuntime, dict[str, str]]:
     model_config = config["models"]["primary"]
     embedding_model = config["models"]["embedding"]["name"]
+    retry_delay, max_retry_delay, reconnect_interval = _runtime_retry_settings(config)
+    bootstrap_identity = config["bootstrap"]["identity"]
     context_window = config["short_term_memory"]["context_window_size"]
     buffer_size = config.get("short_term_memory", {}).get("buffer_size", 500)
     retrieval_top_k = config.get("long_term_memory", {}).get("retrieval_top_k", 5)
-    runtime = config.get("runtime", {})
-    retry_delay = float(runtime.get("error_retry_delay_seconds", 1.0))
-    max_retry_delay = float(runtime.get("max_error_retry_delay_seconds", 10.0))
-    reconnect_interval = 5.0
-    bootstrap_identity = config["bootstrap"]["identity"]
 
-    # Identity — from PostgreSQL if available, else from config bootstrap
     identity = load_identity(pg_conn, bootstrap_identity)
-
-    # Memory stores
     stm = ShortTermMemory(redis_client, context_window, buffer_size)
     ltm = LongTermMemory(pg_conn, retrieval_top_k)
     stimulus_queue = StimulusQueue(redis_client)
-    perception_config = dict(config.get("perception") or {})
-    if not perception_config.get("default_weather_location"):
-        perception_config["default_weather_location"] = str(
-            (config.get("actions") or {}).get("default_weather_location", "")
-        ).strip()
-    perception = PerceptionManager.from_config(perception_config)
+    perception = PerceptionManager.from_config(_perception_config(config))
     action_manager = create_action_manager(
         redis_client,
         stimulus_queue,
@@ -132,90 +154,239 @@ def main() -> None:
         log_callback=lambda text: _output(log_file, text),
         event_callback=lambda event_type, payload: _publish_event(stm.redis_client, event_type, payload),
     )
+    runtime = EngineRuntime(
+        ollama_client=ollama_client,
+        stm=stm,
+        ltm=ltm,
+        stimulus_queue=stimulus_queue,
+        perception=perception,
+        action_manager=action_manager,
+        model_config=model_config,
+        context_window=context_window,
+        embedding_model=embedding_model,
+        retry_delay=retry_delay,
+        max_retry_delay=max_retry_delay,
+        reconnect_interval=reconnect_interval,
+        bootstrap_identity=bootstrap_identity,
+    )
+    return runtime, identity
 
-    _install_signal_handler(log_file, action_manager)
 
+def _runtime_retry_settings(config: dict) -> tuple[float, float, float]:
+    runtime = config.get("runtime", {})
+    retry_delay = float(runtime.get("error_retry_delay_seconds", 1.0))
+    max_retry_delay = float(runtime.get("max_error_retry_delay_seconds", 10.0))
+    reconnect_interval = 5.0
+    return retry_delay, max_retry_delay, reconnect_interval
+
+
+def _perception_config(config: dict) -> dict:
+    perception_config = dict(config.get("perception") or {})
+    if not perception_config.get("default_weather_location"):
+        perception_config["default_weather_location"] = str(
+            (config.get("actions") or {}).get("default_weather_location", "")
+        ).strip()
+    return perception_config
+
+
+def _emit_startup(log_file, model_name: str, context_window: int, redis_client, pg_conn) -> None:
     _output(log_file, "Seedwake v0.2 — 心相续引擎启动")
-    _output(log_file, f"模型: {model_config['name']}  上下文窗口: {context_window} 轮")
+    _output(log_file, f"模型: {model_name}  上下文窗口: {context_window} 轮")
     _output(log_file, f"Redis: {'已连接' if redis_client else '未连接（使用内存）'}")
     _output(log_file, f"PostgreSQL: {'已连接' if pg_conn else '未连接（跳过长期记忆）'}")
     _output(log_file, "─" * 60)
     _publish_event(redis_client, "status", _status_payload("core_started"))
 
+
+def _run_engine_loop(log_file, runtime: EngineRuntime, identity: dict[str, str]) -> None:
     cycle_id = 0
-    current_retry_delay = retry_delay
+    current_retry_delay = runtime.retry_delay
     last_redis_reconnect = 0.0
     last_pg_reconnect = 0.0
 
     while True:
         cycle_id += 1
-        now = time.monotonic()
-        had_redis = stm.redis_available
-        had_pg = ltm.available
-        last_redis_reconnect = _maybe_reconnect_redis(
-            log_file, stm, now, last_redis_reconnect, reconnect_interval,
+        (
+            identity,
+            last_redis_reconnect,
+            last_pg_reconnect,
+            stimuli,
+            running_actions,
+            perception_cues,
+        ) = _prepare_cycle(
+            log_file,
+            cycle_id,
+            runtime,
+            identity,
+            runtime.bootstrap_identity,
+            runtime.reconnect_interval,
+            last_redis_reconnect,
+            last_pg_reconnect,
         )
-        if stm.redis_available and stm.redis_client is not None and (
-            not had_redis
-            or not stimulus_queue.redis_available
-            or not action_manager.redis_available
-        ):
-            stimulus_queue.attach_redis(stm.redis_client)
-            action_manager.attach_redis(stm.redis_client)
-            _publish_event(stm.redis_client, "status", _status_payload("redis_recovered"))
-        identity, last_pg_reconnect = _maybe_reconnect_pg(
-            log_file, ltm, identity, bootstrap_identity,
-            now, last_pg_reconnect, reconnect_interval,
-        )
-        if not had_pg and ltm.available:
-            _publish_event(stm.redis_client, "status", _status_payload("postgres_recovered"))
-
-        _push_passive_stimuli(stimulus_queue, perception.collect_passive_stimuli(cycle_id))
-        controls = pop_action_controls(stm.redis_client)
-        action_manager.apply_controls(controls)
-        stimuli = stimulus_queue.pop_many(limit=2)
-        perception.observe_stimuli(cycle_id, stimuli)
-        perception.observe_types(cycle_id, action_manager.pop_perception_observations())
-        running_actions = action_manager.running_actions()
-        perception_cues = perception.build_prompt_cues(cycle_id, running_actions)
         try:
-            # Retrieve long-term associations via embedding
-            ltm_context = _retrieve_associations(
-                ltm, ollama_client, stm, embedding_model,
+            new_thoughts = _execute_cycle(
+                runtime,
+                cycle_id,
+                identity,
+                stimuli,
+                running_actions,
+                perception_cues,
             )
-
-            new_thoughts = run_cycle(
-                ollama_client, cycle_id, identity,
-                stm.get_context(), context_window, model_config,
-                long_term_context=ltm_context,
-                stimuli=stimuli,
-                running_actions=running_actions,
-                perception_cues=perception_cues,
-            )
-            stm.append(new_thoughts)
-            _store_to_ltm(ltm, ollama_client, new_thoughts, embedding_model, cycle_id)
-            action_manager.submit_from_thoughts(new_thoughts)
         except KeyboardInterrupt:
             raise
-        except MAIN_LOOP_EXCEPTIONS as e:
-            stimulus_queue.requeue_front(stimuli)
-            _print_error(log_file, cycle_id, e, current_retry_delay)
-            time.sleep(current_retry_delay)
-            current_retry_delay = min(current_retry_delay * 2, max_retry_delay)
+        except MAIN_LOOP_EXCEPTIONS as exc:
+            current_retry_delay = _handle_cycle_failure(
+                log_file,
+                cycle_id,
+                stimuli,
+                runtime.stimulus_queue,
+                exc,
+                current_retry_delay,
+                runtime.max_retry_delay,
+            )
             continue
         # noinspection PyBroadException
         except Exception as exc:
-            stimulus_queue.requeue_front(stimuli)
             logger.exception("unexpected main loop failure at cycle %s: %s", cycle_id, exc)
-            _print_error(log_file, cycle_id, exc, current_retry_delay)
-            time.sleep(current_retry_delay)
-            current_retry_delay = min(current_retry_delay * 2, max_retry_delay)
+            current_retry_delay = _handle_cycle_failure(
+                log_file,
+                cycle_id,
+                stimuli,
+                runtime.stimulus_queue,
+                exc,
+                current_retry_delay,
+                runtime.max_retry_delay,
+            )
             continue
 
-        _print_stimuli(log_file, stimuli)
-        _print_cycle(log_file, cycle_id, new_thoughts)
-        _publish_reply_event(stm.redis_client, stimuli, new_thoughts)
-        current_retry_delay = retry_delay
+        _finish_cycle(log_file, cycle_id, runtime.stm.redis_client, stimuli, new_thoughts)
+        current_retry_delay = runtime.retry_delay
+
+
+def _prepare_cycle(
+    log_file,
+    cycle_id: int,
+    runtime: EngineRuntime,
+    identity: dict[str, str],
+    bootstrap_identity: dict[str, str],
+    reconnect_interval: float,
+    last_redis_reconnect: float,
+    last_pg_reconnect: float,
+) -> tuple[dict[str, str], float, float, list[Stimulus], list[ActionRecord], list[str]]:
+    now = time.monotonic()
+    identity, last_redis_reconnect, last_pg_reconnect = _recover_runtime_services(
+        log_file,
+        runtime,
+        identity,
+        bootstrap_identity,
+        now,
+        reconnect_interval,
+        last_redis_reconnect,
+        last_pg_reconnect,
+    )
+    _push_passive_stimuli(runtime.stimulus_queue, runtime.perception.collect_passive_stimuli(cycle_id))
+    controls = pop_action_controls(runtime.stm.redis_client)
+    runtime.action_manager.apply_controls(controls)
+    stimuli = runtime.stimulus_queue.pop_many(limit=2)
+    runtime.perception.observe_stimuli(cycle_id, stimuli)
+    runtime.perception.observe_types(cycle_id, runtime.action_manager.pop_perception_observations())
+    running_actions = runtime.action_manager.running_actions()
+    perception_cues = runtime.perception.build_prompt_cues(cycle_id, running_actions)
+    return identity, last_redis_reconnect, last_pg_reconnect, stimuli, running_actions, perception_cues
+
+
+def _recover_runtime_services(
+    log_file,
+    runtime: EngineRuntime,
+    identity: dict[str, str],
+    bootstrap_identity: dict[str, str],
+    now: float,
+    reconnect_interval: float,
+    last_redis_reconnect: float,
+    last_pg_reconnect: float,
+) -> tuple[dict[str, str], float, float]:
+    had_redis = runtime.stm.redis_available
+    had_pg = runtime.ltm.available
+    last_redis_reconnect = _maybe_reconnect_redis(
+        log_file, runtime.stm, now, last_redis_reconnect, reconnect_interval,
+    )
+    if _redis_recovered(runtime.stm, runtime.stimulus_queue, runtime.action_manager, had_redis):
+        _publish_event(runtime.stm.redis_client, "status", _status_payload("redis_recovered"))
+    identity, last_pg_reconnect = _maybe_reconnect_pg(
+        log_file, runtime.ltm, identity, bootstrap_identity,
+        now, last_pg_reconnect, reconnect_interval,
+    )
+    if not had_pg and runtime.ltm.available:
+        _publish_event(runtime.stm.redis_client, "status", _status_payload("postgres_recovered"))
+    return identity, last_redis_reconnect, last_pg_reconnect
+
+
+def _redis_recovered(
+    stm: ShortTermMemory,
+    stimulus_queue: StimulusQueue,
+    action_manager,
+    had_redis: bool,
+) -> bool:
+    if not stm.redis_available or stm.redis_client is None:
+        return False
+    if had_redis and stimulus_queue.redis_available and action_manager.redis_available:
+        return False
+    stimulus_queue.attach_redis(stm.redis_client)
+    action_manager.attach_redis(stm.redis_client)
+    return True
+
+
+def _execute_cycle(
+    runtime: EngineRuntime,
+    cycle_id: int,
+    identity: dict[str, str],
+    stimuli: list[Stimulus],
+    running_actions: list[ActionRecord],
+    perception_cues: list[str],
+) -> list[Thought]:
+    ltm_context = _retrieve_associations(
+        runtime.ltm,
+        runtime.ollama_client,
+        runtime.stm,
+        runtime.embedding_model,
+    )
+    thoughts = run_cycle(
+        runtime.ollama_client,
+        cycle_id,
+        identity,
+        runtime.stm.get_context(),
+        runtime.context_window,
+        runtime.model_config,
+        long_term_context=ltm_context,
+        stimuli=stimuli,
+        running_actions=running_actions,
+        perception_cues=perception_cues,
+    )
+    runtime.stm.append(thoughts)
+    _store_to_ltm(runtime.ltm, runtime.ollama_client, thoughts, runtime.embedding_model, cycle_id)
+    runtime.action_manager.submit_from_thoughts(thoughts)
+    return thoughts
+
+
+def _handle_cycle_failure(
+    log_file,
+    cycle_id: int,
+    stimuli: list[Stimulus],
+    stimulus_queue: StimulusQueue,
+    exc: Exception,
+    retry_delay: float,
+    max_retry_delay: float,
+) -> float:
+    stimulus_queue.requeue_front(stimuli)
+    _print_error(log_file, cycle_id, exc, retry_delay)
+    time.sleep(retry_delay)
+    return min(retry_delay * 2, max_retry_delay)
+
+
+def _finish_cycle(log_file, cycle_id: int, redis_client, stimuli: list[Stimulus], thoughts: list[Thought]) -> None:
+    _print_stimuli(log_file, stimuli)
+    _print_cycle(log_file, cycle_id, thoughts)
+    _publish_reply_event(redis_client, stimuli, thoughts)
 
 
 # -- Long-term memory read/write ------------------------------------------
@@ -228,7 +399,7 @@ def _retrieve_associations(
 ) -> list[str] | None:
     """Embed the latest thought and retrieve related long-term memories.
 
-    # TODO: SPECS §14.2 requires Embedding fallback to time-ordered retrieval.
+    # NOTE: SPECS §14.2 requires Embedding fallback to time-ordered retrieval.
     # Current implementation skips LTM entirely on embed failure. Deferred
     # because early-stage LTM data overlaps heavily with STM context window.
     """

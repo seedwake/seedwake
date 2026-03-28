@@ -76,8 +76,7 @@ def create_application(config: dict | None = None, redis_client=None) -> Applica
         raise RuntimeError("config.yml 缺少 telegram.allowed_user_ids")
 
     async def post_init(app: Application) -> None:
-        task = asyncio.create_task(_forward_events(app), name="seedwake-telegram-events")
-        app.bot_data["event_forwarder"] = task
+        await _start_event_forwarder(app)
 
     async def post_shutdown(app: Application) -> None:
         task = app.bot_data.get("event_forwarder")
@@ -250,18 +249,8 @@ async def _forward_events(application: Application) -> None:
 
         pubsub = None
         try:
-            pubsub = redis_client.pubsub(ignore_subscribe_messages=True)
-            await asyncio.to_thread(pubsub.subscribe, EVENT_CHANNEL)
-            while True:
-                message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
-                if message is None:
-                    await asyncio.sleep(0.2)
-                    continue
-                raw = _decode_pubsub_value(message.get("data"))
-                if not raw:
-                    continue
-                envelope = json.loads(raw)
-                await _dispatch_event(application, envelope)
+            pubsub = await _open_event_pubsub(redis_client)
+            await _forward_event_messages(application, pubsub)
         except asyncio.CancelledError:
             raise
         except BOT_REDIS_EXCEPTIONS:
@@ -283,29 +272,74 @@ async def _dispatch_event(application: Application, envelope: EventEnvelope) -> 
     if not isinstance(payload, dict):
         return
     if event_type == "reply":
-        reply_payload = _coerce_reply_payload(payload)
-        if reply_payload is None:
-            return
-        chat_id = extract_telegram_chat_id(reply_payload["source"])
-        text = reply_payload["message"].strip()
-        if chat_id is None or not text:
-            return
-        await _safe_send_message(application, chat_id=chat_id, text=text)
+        await _dispatch_reply_event(application, payload)
         return
     if event_type == "action":
-        action_payload = _coerce_action_payload(payload)
-        if action_payload is None:
-            return
-        await _broadcast_action_event(application, action_payload)
+        await _dispatch_action_update(application, payload)
         return
     if event_type == "status":
-        status_payload = _coerce_status_payload(payload)
-        if status_payload is None:
-            return
-        text = format_status_event(status_payload)
-        if not text:
-            return
-        await _broadcast_text(application, text)
+        await _dispatch_status_update(application, payload)
+
+
+async def _start_event_forwarder(application: Application) -> None:
+    application.bot_data["event_forwarder"] = asyncio.create_task(
+        _forward_events(application),
+        name="seedwake-telegram-events",
+    )
+    await asyncio.sleep(0)
+
+
+async def _open_event_pubsub(redis_client):
+    pubsub = redis_client.pubsub(ignore_subscribe_messages=True)
+    await asyncio.to_thread(pubsub.subscribe, EVENT_CHANNEL)
+    return pubsub
+
+
+async def _forward_event_messages(application: Application, pubsub) -> None:
+    while True:
+        envelope = await _read_event_envelope(pubsub)
+        if envelope is None:
+            await asyncio.sleep(0.2)
+            continue
+        await _dispatch_event(application, envelope)
+
+
+async def _read_event_envelope(pubsub) -> EventEnvelope | None:
+    message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
+    if message is None:
+        return None
+    raw = _decode_pubsub_value(message.get("data"))
+    if not raw:
+        return None
+    return json.loads(raw)
+
+
+async def _dispatch_reply_event(application: Application, payload: JsonObject) -> None:
+    reply_payload = _coerce_reply_payload(payload)
+    if reply_payload is None:
+        return
+    chat_id = extract_telegram_chat_id(reply_payload["source"])
+    text = reply_payload["message"].strip()
+    if chat_id is None or not text:
+        return
+    await _safe_send_message(application, chat_id=chat_id, text=text)
+
+
+async def _dispatch_action_update(application: Application, payload: JsonObject) -> None:
+    action_payload = _coerce_action_payload(payload)
+    if action_payload is None:
+        return
+    await _broadcast_action_event(application, action_payload)
+
+
+async def _dispatch_status_update(application: Application, payload: JsonObject) -> None:
+    status_payload = _coerce_status_payload(payload)
+    if status_payload is None:
+        return
+    text = format_status_event(status_payload)
+    if not text:
+        return
+    await _broadcast_text(application, text)
 
 
 async def _broadcast_action_event(application: Application, payload: ActionEventPayload) -> None:

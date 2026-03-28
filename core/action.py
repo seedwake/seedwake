@@ -899,46 +899,62 @@ def _build_openclaw_task(
     news_feed_urls: list[str],
 ) -> str:
     raw_params = str((thought.action_request or {}).get("params") or "")
-    search_query = (
-        _extract_action_param(raw_params, "query")
-        or _extract_action_param(raw_params, "keywords")
-        or _extract_action_param(raw_params, "topic")
-    )
-    reading_query = (
-        _extract_action_param(raw_params, "query")
-        or _extract_action_param(raw_params, "topic")
-        or _extract_action_param(raw_params, "keywords")
-    )
     if action_type == "search":
-        if search_query:
-            return f"围绕“{search_query}”进行搜索，返回按相关性整理的简洁结果。"
-        if explicit_task:
-            return explicit_task
-        return thought.content
+        return _build_search_task(raw_params, explicit_task, thought)
     if action_type == "news":
-        if news_feed_urls:
-            joined = "\n".join(f"- {url}" for url in news_feed_urls)
-            return (
-                "读取以下固定 RSS feed 列表，按时间顺序提取最新几条内容。"
-                "返回 JSON，其中 data.items 是列表；每项尽量包含 feed_url、guid、link、title、published_at、summary，"
-                "并保证同一条 RSS 项目在同次结果里只出现一次：\n"
-                f"{joined}"
-            )
-        return "固定 RSS feed 列表未配置，请明确说明当前无法获取新闻。"
+        return _build_news_task(news_feed_urls)
     if action_type == "reading":
-        if reading_query:
-            return f"围绕“{reading_query}”寻找一小段值得阅读的外部材料，返回原文片段和简短说明。"
-        if explicit_task:
-            return explicit_task
-        return f"围绕这条念头当前真正想读的方向寻找一小段外部材料：{thought.content}"
+        return _build_reading_task(raw_params, explicit_task, thought)
     if action_type == "weather":
-        location = _extract_action_param(raw_params, "location") or default_weather_location
-        if location:
-            return f"查询 {location} 的当前天气，返回简洁概况。"
-        return "查询默认位置的当前天气；如果缺少默认位置，请明确说明无法确定位置。"
+        return _build_weather_task(raw_params, default_weather_location)
     if explicit_task:
         return explicit_task
     return thought.content
+
+
+def _build_search_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
+    search_query = _extract_action_first_param(raw_params, "query", "keywords", "topic")
+    if search_query:
+        return f"围绕“{search_query}”进行搜索，返回按相关性整理的简洁结果。"
+    if explicit_task:
+        return explicit_task
+    return thought.content
+
+
+def _build_news_task(news_feed_urls: list[str]) -> str:
+    if not news_feed_urls:
+        return "固定 RSS feed 列表未配置，请明确说明当前无法获取新闻。"
+    joined = "\n".join(f"- {url}" for url in news_feed_urls)
+    return (
+        "读取以下固定 RSS feed 列表，按时间顺序提取最新几条内容。"
+        "返回 JSON，其中 data.items 是列表；每项尽量包含 feed_url、guid、link、title、published_at、summary，"
+        "并保证同一条 RSS 项目在同次结果里只出现一次：\n"
+        f"{joined}"
+    )
+
+
+def _build_reading_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
+    reading_query = _extract_action_first_param(raw_params, "query", "topic", "keywords")
+    if reading_query:
+        return f"围绕“{reading_query}”寻找一小段值得阅读的外部材料，返回原文片段和简短说明。"
+    if explicit_task:
+        return explicit_task
+    return f"围绕这条念头当前真正想读的方向寻找一小段外部材料：{thought.content}"
+
+
+def _build_weather_task(raw_params: str, default_weather_location: str) -> str:
+    location = _extract_action_param(raw_params, "location") or default_weather_location
+    if location:
+        return f"查询 {location} 的当前天气，返回简洁概况。"
+    return "查询默认位置的当前天气；如果缺少默认位置，请明确说明无法确定位置。"
+
+
+def _extract_action_first_param(raw_params: str, *keys: str) -> str | None:
+    for key in keys:
+        value = _extract_action_param(raw_params, key)
+        if value:
+            return value
+    return None
 
 
 def _extract_action_param(raw_params: str, key: str) -> str | None:
@@ -1001,10 +1017,11 @@ def _copy_action_result(
     data: JsonObject | None = None,
     error=None,
 ) -> ActionResultEnvelope:
+    copied_data = _result_data_or_default(result, data)
     copied = _build_action_result(
         ok=bool(result.get("ok", True)) if ok is None else ok,
         summary=str(result.get("summary") or "") if summary is None else summary,
-        data=result.get("data") if isinstance(result.get("data"), dict) else {} if data is None else data,
+        data=copied_data,
         error=result.get("error") if error is None else error,
         run_id=result.get("run_id") if isinstance(result.get("run_id"), str) else None,
         session_key=result.get("session_key") if isinstance(result.get("session_key"), str) else None,
@@ -1014,6 +1031,15 @@ def _copy_action_result(
     if data is not None:
         copied["data"] = data
     return copied
+
+
+def _result_data_or_default(result: ActionResultEnvelope, data: JsonObject | None) -> JsonObject:
+    if data is not None:
+        return data
+    existing = result.get("data")
+    if isinstance(existing, dict):
+        return existing
+    return {}
 
 
 def _action_to_dict(action: ActionRecord) -> dict:

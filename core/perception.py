@@ -4,8 +4,13 @@ import os
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
+from core.stimulus import Stimulus
 from core.types import MemorySnapshot, PerceptionStimulusPayload, SystemStatusSnapshot
+
+if TYPE_CHECKING:
+    from core.action import ActionRecord
 
 
 @dataclass
@@ -85,7 +90,7 @@ class PerceptionManager:
 
         return stimuli
 
-    def build_prompt_cues(self, cycle_id: int, running_actions: list[object]) -> list[str]:
+    def build_prompt_cues(self, cycle_id: int, running_actions: list["ActionRecord"]) -> list[str]:
         cues = []
 
         if self._should_offer("weather", cycle_id, self._config.weather_cue_interval_cycles, running_actions):
@@ -111,7 +116,7 @@ class PerceptionManager:
 
         return cues
 
-    def observe_stimuli(self, cycle_id: int, stimuli: list[object]) -> None:
+    def observe_stimuli(self, cycle_id: int, stimuli: list[Stimulus]) -> None:
         for stimulus in stimuli:
             stimulus_type = str(getattr(stimulus, "type", "")).strip()
             self.observe_types(cycle_id, [stimulus_type])
@@ -127,7 +132,7 @@ class PerceptionManager:
         stimulus_type: str,
         cycle_id: int,
         interval_cycles: int,
-        running_actions: list[object],
+        running_actions: list["ActionRecord"],
     ) -> bool:
         if not self._is_due(stimulus_type, cycle_id, interval_cycles):
             return False
@@ -242,10 +247,10 @@ def _read_memory_snapshot() -> MemorySnapshot | None:
     return memory_snapshot
 
 
-def _has_running_perception_action(running_actions: list[object], stimulus_type: str) -> bool:
+def _has_running_perception_action(running_actions: list["ActionRecord"], stimulus_type: str) -> bool:
     action_type = _stimulus_to_action_type(stimulus_type)
     for action in running_actions:
-        if str(getattr(action, "type", "")).strip() == action_type:
+        if action.type == action_type:
             return True
     return False
 

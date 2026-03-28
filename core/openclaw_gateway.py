@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import os
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib import error, request
@@ -258,10 +259,8 @@ class _GatewayRpcClient:
         if self._reader_task.done():
             return
         self._reader_task.cancel()
-        try:
+        with suppress(asyncio.CancelledError):
             await self._reader_task
-        except asyncio.CancelledError:
-            return
 
     async def send_request(self, request_id: str, method: str, params: dict) -> None:
         await self._ws.send(json.dumps({
@@ -282,10 +281,7 @@ class _GatewayRpcClient:
         return frame
 
     async def _recv_from_queue(self, queue: asyncio.Queue, timeout_seconds: int):
-        try:
-            frame = await asyncio.wait_for(queue.get(), timeout_seconds)
-        except TimeoutError:
-            raise
+        frame = await asyncio.wait_for(queue.get(), timeout_seconds)
         if frame is self._sentinel:
             raise RuntimeError("Gateway 连接已关闭") from self._reader_error
         return frame
@@ -293,21 +289,7 @@ class _GatewayRpcClient:
     async def _reader(self) -> None:
         try:
             while True:
-                raw = await self._ws.recv()
-                frame = json.loads(raw)
-                if frame.get("type") == "res":
-                    request_id = str(frame.get("id") or "")
-                    if not request_id:
-                        continue
-                    queue = self._responses.setdefault(request_id, asyncio.Queue())
-                    await queue.put(frame)
-                    continue
-                if frame.get("type") == "event":
-                    event_name = str(frame.get("event") or "")
-                    if not event_name:
-                        continue
-                    queue = self._events.setdefault(event_name, asyncio.Queue())
-                    await queue.put(frame)
+                await self._route_frame(json.loads(await self._ws.recv()))
         except asyncio.CancelledError:
             raise
         except OPENCLAW_TRANSPORT_EXCEPTIONS as exc:
@@ -315,6 +297,28 @@ class _GatewayRpcClient:
         finally:
             for queue in [*self._responses.values(), *self._events.values()]:
                 await queue.put(self._sentinel)
+
+    async def _route_frame(self, frame: dict) -> None:
+        frame_type = frame.get("type")
+        if frame_type == "res":
+            await self._queue_response(frame)
+            return
+        if frame_type == "event":
+            await self._queue_event(frame)
+
+    async def _queue_response(self, frame: dict) -> None:
+        request_id = str(frame.get("id") or "")
+        if not request_id:
+            return
+        queue = self._responses.setdefault(request_id, asyncio.Queue())
+        await queue.put(frame)
+
+    async def _queue_event(self, frame: dict) -> None:
+        event_name = str(frame.get("event") or "")
+        if not event_name:
+            return
+        queue = self._events.setdefault(event_name, asyncio.Queue())
+        await queue.put(frame)
 
 
 async def _abort_session(client: _GatewayRpcClient, session_key: str, run_id: str, timeout_seconds: int) -> None:
@@ -485,7 +489,7 @@ def _load_or_create_device_identity(path_str: str) -> dict[str, str]:
                 "public_key_pem": public_key_pem,
                 "private_key_pem": private_key_pem,
             }
-        except (json.JSONDecodeError, KeyError, OSError, TypeError, ValueError):
+        except (json.JSONDecodeError, KeyError, OSError, TypeError):
             pass
 
     serialization, ed25519 = _import_crypto()

@@ -66,7 +66,7 @@ class LongTermMemory:
             self._conn.rollback()
             raise
 
-    # TODO: SPECS §4.2 requires ranking by similarity × importance × time_decay.
+    # NOTE: SPECS §4.2 requires ranking by similarity × importance × time_decay.
     # Current implementation uses pure vector distance. Weighted sorting deferred
     # until Phase 4 (sleep mechanism) makes importance/time_decay meaningful.
     def search(

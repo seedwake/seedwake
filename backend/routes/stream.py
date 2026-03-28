@@ -2,6 +2,7 @@
 
 import json
 import logging
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
@@ -13,11 +14,12 @@ from core.types import EventEnvelope, EventPayload, StatusEventPayload
 router = APIRouter(prefix="/api")
 EVENT_CHANNEL = "seedwake:events"
 logger = logging.getLogger(__name__)
+AdminQueryToken = Annotated[str | None, Query()]
 
 
 def _resolve_admin_query(
     request: Request,
-    token: str | None = Query(default=None),
+    token: AdminQueryToken = None,
 ) -> str:
     return resolve_admin_from_query(request.app.state.config, token)
 
@@ -25,7 +27,7 @@ def _resolve_admin_query(
 @router.get("/stream")
 def stream_events(
     request: Request,
-    admin_username: str = Depends(_resolve_admin_query),
+    admin_username: Annotated[str, Depends(_resolve_admin_query)],
 ) -> StreamingResponse:
     redis_client = request.app.state.redis
     if redis_client is None:
@@ -41,19 +43,8 @@ def stream_events(
             yield _format_sse("status", _stream_status_payload("stream_connected", admin_username))
             while True:
                 try:
-                    message = pubsub.get_message(timeout=15.0)
-                    if message is None:
-                        yield ": keepalive\n\n"
-                        continue
-                    channel = _decode_channel(message.get("channel"))
-                    data = _decode_data(message.get("data"))
-                    if channel == THOUGHT_CHANNEL:
-                        yield _raw_sse("thought", data)
-                        continue
-                    if channel == EVENT_CHANNEL:
-                        envelope = _parse_event_envelope(data)
-                        yield _format_sse(envelope["type"], envelope["payload"])
-                except (json.JSONDecodeError, TypeError, ValueError, KeyError):
+                    yield _stream_next_chunk(pubsub)
+                except (json.JSONDecodeError, TypeError, KeyError):
                     logger.exception("malformed SSE event payload")
                     continue
         # noinspection PyBroadException
@@ -87,6 +78,20 @@ def _decode_data(value) -> str:
 
 def _parse_event_envelope(raw: str) -> EventEnvelope:
     return json.loads(raw)
+
+
+def _stream_next_chunk(pubsub) -> str:
+    message = pubsub.get_message(timeout=15.0)
+    if message is None:
+        return ": keepalive\n\n"
+    channel = _decode_channel(message.get("channel"))
+    data = _decode_data(message.get("data"))
+    if channel == THOUGHT_CHANNEL:
+        return _raw_sse("thought", data)
+    if channel == EVENT_CHANNEL:
+        envelope = _parse_event_envelope(data)
+        return _format_sse(envelope["type"], envelope["payload"])
+    return ": keepalive\n\n"
 
 
 def _raw_sse(event_name: str, raw_json: str) -> str:

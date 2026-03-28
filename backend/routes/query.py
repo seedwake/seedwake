@@ -1,6 +1,7 @@
 """Read/query routes for recent thoughts and action state."""
 
 import json
+from typing import Annotated
 
 import redis as redis_lib
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -17,13 +18,20 @@ REDIS_ROUTE_EXCEPTIONS = (
     TypeError,
     ValueError,
 )
+AdminUsername = Annotated[str, Depends(resolve_admin)]
+ThoughtLimit = Annotated[int, Query(ge=1, le=300)]
+ActionLimit = Annotated[int, Query(ge=1, le=300)]
+ActionStatusFilter = Annotated[str | None, Query()]
+REDIS_UNAVAILABLE_RESPONSE = {
+    503: {"description": "Redis unavailable"},
+}
 
 
-@router.get("/thoughts")
+@router.get("/thoughts", responses=REDIS_UNAVAILABLE_RESPONSE)
 def list_recent_thoughts(
     request: Request,
-    limit: int = Query(default=60, ge=1, le=300),
-    admin_username: str = Depends(resolve_admin),
+    admin_username: AdminUsername,
+    limit: ThoughtLimit = 60,
 ) -> ThoughtsResponse:
     redis_client = require_redis(request)
     try:
@@ -39,12 +47,12 @@ def list_recent_thoughts(
     }
 
 
-@router.get("/actions")
+@router.get("/actions", responses=REDIS_UNAVAILABLE_RESPONSE)
 def list_actions(
     request: Request,
-    limit: int = Query(default=100, ge=1, le=300),
-    status: str | None = Query(default=None),
-    admin_username: str = Depends(resolve_admin),
+    admin_username: AdminUsername,
+    limit: ActionLimit = 100,
+    status: ActionStatusFilter = None,
 ) -> ActionsResponse:
     redis_client = require_redis(request)
     items = _load_action_items(redis_client)

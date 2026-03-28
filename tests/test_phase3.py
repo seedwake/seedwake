@@ -215,7 +215,7 @@ class _RedisNewsSeenStub:
         bucket = self.sorted_sets.get(key, {})
         ceiling = float(max_score)
         removed = 0
-        for member, score in list(bucket.items()):
+        for member, score in tuple(bucket.items()):
             if score <= ceiling:
                 bucket.pop(member, None)
                 removed += 1

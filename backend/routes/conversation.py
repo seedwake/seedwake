@@ -1,6 +1,7 @@
 """Conversation history and action confirmation routes."""
 
 import json
+from typing import Annotated
 
 import redis as redis_lib
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -18,6 +19,11 @@ REDIS_ROUTE_EXCEPTIONS = (
     TypeError,
     ValueError,
 )
+AdminUsername = Annotated[str, Depends(resolve_admin)]
+ConversationLimit = Annotated[int, Query(ge=1, le=300)]
+REDIS_UNAVAILABLE_RESPONSE = {
+    503: {"description": "Redis unavailable or action control unavailable"},
+}
 
 
 class ActionConfirmBody(BaseModel):
@@ -26,11 +32,11 @@ class ActionConfirmBody(BaseModel):
     note: str = ""
 
 
-@router.get("/conversation")
+@router.get("/conversation", responses=REDIS_UNAVAILABLE_RESPONSE)
 def get_conversation_history(
     request: Request,
-    limit: int = Query(default=100, ge=1, le=300),
-    admin_username: str = Depends(resolve_admin),
+    admin_username: AdminUsername,
+    limit: ConversationLimit = 100,
 ) -> ConversationHistoryResponse:
     redis_client = require_redis(request)
     try:
@@ -45,11 +51,11 @@ def get_conversation_history(
     }
 
 
-@router.post("/action/confirm")
+@router.post("/action/confirm", responses=REDIS_UNAVAILABLE_RESPONSE)
 def confirm_action(
     body: ActionConfirmBody,
     request: Request,
-    admin_username: str = Depends(resolve_admin),
+    admin_username: AdminUsername,
 ) -> ActionConfirmResponse:
     redis_client = require_redis(request)
     pushed = push_action_control(

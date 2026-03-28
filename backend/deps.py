@@ -1,13 +1,17 @@
 """Shared FastAPI dependencies for backend routes."""
 
+from typing import Annotated
+
 from fastapi import Header, HTTPException, Request
 
 from backend.auth import resolve_admin_from_header
 
+AuthorizationHeader = Annotated[str | None, Header()]
+
 
 def resolve_admin(
     request: Request,
-    authorization: str | None = Header(default=None),
+    authorization: AuthorizationHeader = None,
 ) -> str:
     return resolve_admin_from_header(request.app.state.config, authorization)
 
