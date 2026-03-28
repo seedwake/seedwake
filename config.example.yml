@@ -44,8 +44,8 @@ actions:
   session_key_prefix: "seedwake:action"   # each action gets an isolated OpenClaw session
   use_openclaw_http_fallback: false
   default_weather_location: "replace_me_city"
-  auto_execute: [search, web_fetch, news, weather, reading]
-  require_confirmation: [system_change, send_message, file_modify]
+  auto_execute: [search, web_fetch, news, weather, reading, send_message]
+  require_confirmation: [system_change, file_modify]
   forbidden: [delete_system_file, network_config_change]
 
 perception:

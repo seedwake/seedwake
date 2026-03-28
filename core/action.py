@@ -4,15 +4,17 @@ import hashlib
 import json
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Lock
 
 from ollama import RequestError as OllamaRequestError, ResponseError as OllamaResponseError
 from redis import exceptions as redis_exceptions
 
+from core.openclaw_gateway import OpenClawUnavailableError
 from core.perception import collect_system_status_snapshot
+from core.rss import RSS_READ_EXCEPTIONS, read_news_result
 from core.stimulus import StimulusQueue
 from core.thought_parser import Thought
 from core.types import (
@@ -26,7 +28,7 @@ from core.types import (
 ACTION_REDIS_KEY = "seedwake:actions"
 ACTION_CONTROL_KEY = "seedwake:action_control"
 NEWS_SEEN_REDIS_KEY = "seedwake:news_seen"
-OPENCLAW_ACTION_TYPES = {"search", "web_fetch", "system_change", "custom", "news", "weather", "reading"}
+OPENCLAW_ACTION_TYPES = {"search", "web_fetch", "system_change", "custom", "weather", "reading"}
 PERCEPTION_AUTO_EXECUTE_TYPES = {"news", "weather", "reading"}
 ACTION_REDIS_EXCEPTIONS = (
     redis_exceptions.RedisError,
@@ -50,6 +52,7 @@ PLANNER_EXCEPTIONS = (
 ACTION_EXECUTION_EXCEPTIONS = (
     OllamaRequestError,
     OllamaResponseError,
+    *RSS_READ_EXCEPTIONS,
     RuntimeError,
     OSError,
     ValueError,
@@ -67,6 +70,7 @@ class ActionPlan:
     task: str
     timeout_seconds: int
     reason: str
+    news_feed_urls: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -84,6 +88,7 @@ class ActionRecord:
     run_id: str | None = None
     session_key: str | None = None
     awaiting_confirmation: bool = False
+    retry_after: datetime | None = None
 
 
 class ActionManager:
@@ -101,6 +106,8 @@ class ActionManager:
         forbidden: list[str],
         news_seen_ttl_hours: int = 720,
         news_seen_max_items: int = 5000,
+        news_reader=read_news_result,
+        openclaw_retry_delay_seconds: float = 5.0,
         log_callback=None,
         event_callback=None,
     ):
@@ -113,6 +120,8 @@ class ActionManager:
         self._forbidden = set(forbidden)
         self._news_seen_ttl_hours = max(1, news_seen_ttl_hours)
         self._news_seen_max_items = max(1, news_seen_max_items)
+        self._news_reader = news_reader
+        self._openclaw_retry_delay_seconds = max(0.0, openclaw_retry_delay_seconds)
         self._log_callback = log_callback
         self._event_callback = event_callback
         self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="seedwake-action")
@@ -120,6 +129,7 @@ class ActionManager:
         self._actions: dict[str, ActionRecord] = {}
         self._news_seen_shadow: dict[str, float] = {}
         self._perception_observations: list[str] = []
+        self._futures: set[Future] = set()
 
     def submit_from_thoughts(self, thoughts: list[Thought]) -> list[ActionRecord]:
         created: list[ActionRecord] = []
@@ -138,11 +148,12 @@ class ActionManager:
             action = ActionRecord(
                 action_id=f"act_{thought.thought_id}",
                 type=plan.action_type,
-                request={
-                    "task": plan.task,
-                    "reason": plan.reason,
-                    "raw_action": thought.action_request,
-                },
+                request=_build_action_request_payload(
+                    task=plan.task,
+                    reason=plan.reason,
+                    raw_action=thought.action_request,
+                    news_feed_urls=plan.news_feed_urls,
+                ),
                 executor=plan.executor,
                 status="pending",
                 source_thought_id=thought.thought_id,
@@ -238,24 +249,61 @@ class ActionManager:
         return self._redis is not None
 
     def shutdown(self) -> None:
-        self._pool.shutdown(wait=True)
+        self.shutdown_with_timeout()
+
+    def shutdown_with_timeout(self, wait_timeout_seconds: float | None = None) -> bool:
+        self._pool.shutdown(wait=False, cancel_futures=False)
+        futures = self._snapshot_futures()
+        if not futures:
+            return True
+        done, not_done = wait(futures, timeout=wait_timeout_seconds)
+        if not_done:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+            return False
+        return len(done) == len(futures)
+
+    def retry_deferred_actions(self) -> None:
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            retry_ids = [
+                action.action_id
+                for action in self._actions.values()
+                if (
+                    action.executor == "openclaw"
+                    and action.status == "pending"
+                    and not action.awaiting_confirmation
+                    and action.retry_after is not None
+                    and action.retry_after <= now
+                )
+            ]
+        for action_id in retry_ids:
+            self._start_action(action_id)
 
     def _start_action(self, action_id: str) -> None:
         action = self._get_action(action_id)
         self._emit(f"行动提交 {action.action_id} [{action.type}/{action.executor}]")
         self._publish_action_event(action, "pending", "已提交")
-        self._pool.submit(self._run_action, action_id)
+        self._update_action(action_id, status="running", retry_after=None)
+        future = self._pool.submit(self._run_action, action_id)
+        with self._lock:
+            self._futures.add(future)
+        future.add_done_callback(self._discard_future)
 
     def _run_action(self, action_id: str) -> None:
         action = self._get_action(action_id)
         try:
-            self._update_action(action_id, status="running")
             self._publish_action_event(action, "running", "执行中")
 
             if action.executor == "native":
-                result = _run_native_action(action)
+                result = _run_native_action(
+                    action,
+                    news_reader=self._news_reader,
+                )
             else:
                 result = self._openclaw_executor.execute(action)
+        except OpenClawUnavailableError as exc:
+            self._defer_openclaw_action(action_id, str(exc))
+            return
         except TimeoutError:
             self._safe_finalize_action(
                 action_id,
@@ -357,6 +405,19 @@ class ActionManager:
         except Exception as exc:
             logger.exception("failed to persist forced action failure: %s (%s)", action_id, exc)
 
+    def _defer_openclaw_action(self, action_id: str, reason: str) -> None:
+        retry_after = datetime.now(timezone.utc) + timedelta(seconds=self._openclaw_retry_delay_seconds)
+        action = self._update_action(
+            action_id,
+            status="pending",
+            result=None,
+            run_id=None,
+            session_key=None,
+            retry_after=retry_after,
+        )
+        self._emit(f"OpenClaw 不可用，行动排队等待恢复 {action.action_id}: {reason}")
+        self._publish_action_event(action, "pending", "等待 OpenClaw 恢复")
+
     def _emit(self, text: str) -> None:
         if self._log_callback:
             self._log_callback(text)
@@ -375,6 +436,14 @@ class ActionManager:
             "session_key": action.session_key,
             "awaiting_confirmation": action.awaiting_confirmation,
         })
+
+    def _snapshot_futures(self) -> list[Future]:
+        with self._lock:
+            return list(self._futures)
+
+    def _discard_future(self, future: Future) -> None:
+        with self._lock:
+            self._futures.discard(future)
 
     def _record_perception_observation(
         self,
@@ -665,6 +734,8 @@ def create_action_manager(
         forbidden=list(action_config.get("forbidden", [])),
         news_seen_ttl_hours=news_seen_ttl_hours,
         news_seen_max_items=news_seen_max_items,
+        news_reader=read_news_result,
+        openclaw_retry_delay_seconds=float(action_config.get("openclaw_retry_delay_seconds", 5.0)),
         log_callback=log_callback,
         event_callback=event_callback,
     )
@@ -685,9 +756,9 @@ def _planner_messages(thought: Thought) -> list[dict[str, str]]:
             "content": (
                 "你是 Seedwake 的前额叶行动规划器。"
                 "不要执行动作，只能通过一个 tool call 返回结构化决定。"
-                "纯本地、无副作用、一次函数调用即可完成的时间读取和系统状态读取可选 native。"
-                "新闻、天气、阅读、网页搜索、网页抓取、系统变更、浏览器/命令行/文件修改或多步探索一律委托 OpenClaw。"
-                "news 只读取配置里的固定 RSS feed 列表，不需要 topic。"
+                "纯本地、无副作用、一次函数调用即可完成的时间读取、系统状态读取和固定 RSS 新闻读取可选 native。"
+                "天气、阅读、网页搜索、网页抓取、系统变更、浏览器/命令行/文件修改或多步探索一律委托 OpenClaw。"
+                "news 只读取配置里的固定 RSS feed 列表，不需要 topic，也不委托 OpenClaw。"
                 "reading 的阅读方向由 Seedwake 自己决定；如果原始 action 带了 query/topic/keywords，就保留它。"
                 "如果 reading 没带参数，也应围绕原始念头内容组织任务，不要把阅读主题交给 OpenClaw 自己决定。"
                 "weather 不写 location 时使用配置中的默认位置；只有想查特定地点时才带 location。"
@@ -747,6 +818,20 @@ def _planner_tools() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "native_read_news",
+                "description": "Read the configured RSS feeds and return structured news items.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reason": {"type": "string"},
+                        "timeout_seconds": {"type": "integer"},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "ignore_action",
                 "description": "Do not execute any action for this thought.",
                 "parameters": {
@@ -789,19 +874,30 @@ def _plan_from_tool_call(
             timeout_seconds=timeout_seconds,
             reason=reason,
         )
+    if tool_name == "native_read_news":
+        return _native_news_plan(
+            timeout_seconds=timeout_seconds,
+            reason=reason,
+            news_feed_urls=news_feed_urls,
+        )
     if tool_name == "delegate_openclaw":
         action_type = str(
             arguments.get("action_type")
             or (thought.action_request or {}).get("type")
             or "custom"
         )
+        if action_type == "news":
+            return _native_news_plan(
+                timeout_seconds=timeout_seconds,
+                reason=reason,
+                news_feed_urls=news_feed_urls,
+            )
         explicit_task = str(arguments.get("task") or "").strip()
         task = _build_openclaw_task(
             action_type=action_type,
             explicit_task=explicit_task,
             thought=thought,
             default_weather_location=default_weather_location,
-            news_feed_urls=news_feed_urls,
         )
         return ActionPlan(
             action_type=action_type,
@@ -830,6 +926,12 @@ def _fallback_plan(
             timeout_seconds=default_timeout_seconds,
             reason="fallback",
         )
+    if action_type == "news":
+        return _native_news_plan(
+            timeout_seconds=default_timeout_seconds,
+            reason="fallback",
+            news_feed_urls=news_feed_urls,
+        )
     if action_type == "system_status":
         return ActionPlan(
             action_type="get_system_status",
@@ -847,7 +949,6 @@ def _fallback_plan(
                 explicit_task="",
                 thought=thought,
                 default_weather_location=default_weather_location,
-                news_feed_urls=news_feed_urls,
             ),
             timeout_seconds=default_timeout_seconds,
             reason="fallback",
@@ -855,7 +956,7 @@ def _fallback_plan(
     return None
 
 
-def _run_native_action(action: ActionRecord) -> ActionResultEnvelope:
+def _run_native_action(action: ActionRecord, *, news_reader=read_news_result) -> ActionResultEnvelope:
     if action.type == "get_time":
         now = datetime.now().astimezone()
         return _build_action_result(
@@ -870,6 +971,9 @@ def _run_native_action(action: ActionRecord) -> ActionResultEnvelope:
             session_key=None,
             transport="native",
         )
+    if action.type == "news":
+        feed_urls = _coerce_news_feed_urls(action.request.get("news_feed_urls"))
+        return news_reader(feed_urls, timeout_seconds=action.timeout_seconds)
     if action.type == "get_system_status":
         snapshot = collect_system_status_snapshot()
         return _build_action_result(
@@ -896,13 +1000,10 @@ def _build_openclaw_task(
     explicit_task: str,
     thought: Thought,
     default_weather_location: str,
-    news_feed_urls: list[str],
 ) -> str:
     raw_params = str((thought.action_request or {}).get("params") or "")
     if action_type == "search":
         return _build_search_task(raw_params, explicit_task, thought)
-    if action_type == "news":
-        return _build_news_task(news_feed_urls)
     if action_type == "reading":
         return _build_reading_task(raw_params, explicit_task, thought)
     if action_type == "weather":
@@ -919,18 +1020,6 @@ def _build_search_task(raw_params: str, explicit_task: str, thought: Thought) ->
     if explicit_task:
         return explicit_task
     return thought.content
-
-
-def _build_news_task(news_feed_urls: list[str]) -> str:
-    if not news_feed_urls:
-        return "固定 RSS feed 列表未配置，请明确说明当前无法获取新闻。"
-    joined = "\n".join(f"- {url}" for url in news_feed_urls)
-    return (
-        "读取以下固定 RSS feed 列表，按时间顺序提取最新几条内容。"
-        "返回 JSON，其中 data.items 是列表；每项尽量包含 feed_url、guid、link、title、published_at、summary，"
-        "并保证同一条 RSS 项目在同次结果里只出现一次：\n"
-        f"{joined}"
-    )
 
 
 def _build_reading_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
@@ -1045,6 +1134,7 @@ def _result_data_or_default(result: ActionResultEnvelope, data: JsonObject | Non
 def _action_to_dict(action: ActionRecord) -> dict:
     payload = asdict(action)
     payload["submitted_at"] = action.submitted_at.isoformat()
+    payload["retry_after"] = action.retry_after.isoformat() if action.retry_after else None
     return payload
 
 
@@ -1086,6 +1176,45 @@ def _normalize_news_item(item: JsonObject) -> NewsItem:
 
 def _stringify_json_field(value) -> str:
     return str(value).strip() if value is not None else ""
+
+
+def _build_action_request_payload(
+    *,
+    task: str,
+    reason: str,
+    raw_action,
+    news_feed_urls: list[str],
+) -> ActionRequestPayload:
+    payload: ActionRequestPayload = {
+        "task": task,
+        "reason": reason,
+        "raw_action": raw_action,
+    }
+    if news_feed_urls:
+        payload["news_feed_urls"] = list(news_feed_urls)
+    return payload
+
+
+def _native_news_plan(
+    *,
+    timeout_seconds: int,
+    reason: str,
+    news_feed_urls: list[str],
+) -> ActionPlan:
+    return ActionPlan(
+        action_type="news",
+        executor="native",
+        task="读取固定 RSS 信息流",
+        timeout_seconds=timeout_seconds,
+        reason=reason,
+        news_feed_urls=list(news_feed_urls),
+    )
+
+
+def _coerce_news_feed_urls(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _news_item_key(item: NewsItem) -> str | None:
@@ -1214,10 +1343,23 @@ def pop_action_controls(redis_client, limit: int = 20) -> list[ActionControl]:
     controls = []
     for _ in range(limit):
         try:
-            raw = redis_client.lpop(ACTION_CONTROL_KEY)
+            raw_items = redis_client.lrange(ACTION_CONTROL_KEY, 0, 0)
         except ACTION_REDIS_EXCEPTIONS:
             return controls
-        if raw is None:
+        if not raw_items:
             break
-        controls.append(json.loads(raw))
+        raw = raw_items[0]
+        try:
+            control = json.loads(raw)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            try:
+                redis_client.ltrim(ACTION_CONTROL_KEY, 1, -1)
+            except ACTION_REDIS_EXCEPTIONS:
+                return controls
+            continue
+        controls.append(control)
+        try:
+            redis_client.ltrim(ACTION_CONTROL_KEY, 1, -1)
+        except ACTION_REDIS_EXCEPTIONS:
+            return controls
     return controls

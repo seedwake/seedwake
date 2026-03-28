@@ -1,6 +1,6 @@
 import unittest
 from threading import Barrier
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # noinspection PyProtectedMember
 from core.main import _publish_reply_event
@@ -13,8 +13,10 @@ from core.action import (
     pop_action_controls,
     push_action_control,
 )
+from core.openclaw_gateway import OpenClawUnavailableError
 from core.perception import PerceptionManager
 from core.prompt_builder import build_prompt
+from core.rss import read_news_result
 from core.stimulus import CONVERSATION_HISTORY_KEY, StimulusQueue
 from core.thought_parser import Thought
 from core.types import ActionControl, ActionResultEnvelope
@@ -59,6 +61,16 @@ class _OpenClawExecutor:
     def execute(self, action):
         self.calls.append(action.action_id)
         return self._result
+
+
+class _UnavailableOpenClawExecutor:
+    def __init__(self, message: str = "gateway unavailable"):
+        self.calls = []
+        self._message = message
+
+    def execute(self, action):
+        self.calls.append(action.action_id)
+        raise OpenClawUnavailableError(self._message)
 
 
 def _news_result(
@@ -117,12 +129,21 @@ def _action_control(action_id: str, *, approved: bool, actor: str, note: str) ->
     }
 
 
+def _constant_news_reader(result: ActionResultEnvelope):
+    def reader(_feed_urls: list[str], *, timeout_seconds: int) -> ActionResultEnvelope:
+        _ = timeout_seconds
+        return result
+
+    return reader
+
+
 def _build_action_manager(
     queue: StimulusQueue,
     planner: _Planner,
     *,
     redis_client=None,
     openclaw_executor=None,
+    news_reader=None,
     auto_execute=None,
     require_confirmation=None,
     forbidden=None,
@@ -137,6 +158,7 @@ def _build_action_manager(
         require_confirmation=require_confirmation or [],
         forbidden=forbidden or [],
         news_seen_max_items=news_seen_max_items,
+        news_reader=news_reader,
     )
 
 
@@ -155,9 +177,9 @@ def _assert_failed_news_action(
     queue = StimulusQueue(redis_client=None)
     manager = _build_action_manager(
         queue,
-        _Planner(ActionPlan("news", "openclaw", "读取 RSS", 30, "测试")),
+        _Planner(ActionPlan("news", "native", "读取 RSS", 30, "测试", ["https://example.com/rss.xml"])),
         redis_client=_RedisNewsSeenStub(),
-        openclaw_executor=_OpenClawExecutor(result),
+        news_reader=_constant_news_reader(result),
     )
     created = _submit_and_shutdown(
         manager,
@@ -308,6 +330,64 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("外部新闻", prompt)
 
 
+class NativeNewsReaderTests(unittest.TestCase):
+    def test_read_news_result_parses_rss_items(self) -> None:
+        xml_text = """<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <title>Example Feed</title>
+            <item>
+              <guid>item-1</guid>
+              <link>https://example.com/1</link>
+              <title>第一条</title>
+              <pubDate>Fri, 27 Mar 2026 10:00:00 +0000</pubDate>
+              <description><![CDATA[<p>摘要 <b>一</b></p>]]></description>
+            </item>
+          </channel>
+        </rss>
+        """
+
+        with patch("core.rss._fetch_feed_text", return_value=xml_text):
+            result = read_news_result(["https://example.com/rss.xml"])
+
+        self.assertTrue(result["ok"])
+        items = result["data"]["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["feed_url"], "https://example.com/rss.xml")
+        self.assertEqual(items[0]["guid"], "item-1")
+        self.assertEqual(items[0]["title"], "第一条")
+        self.assertEqual(items[0]["summary"], "摘要 一")
+
+    def test_read_news_result_returns_partial_success_when_some_feeds_fail(self) -> None:
+        xml_text = """<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <item>
+              <guid>item-1</guid>
+              <link>https://example.com/1</link>
+              <title>第一条</title>
+            </item>
+          </channel>
+        </rss>
+        """
+
+        def fetch_feed_text(feed_url: str, *, timeout_seconds: float) -> str:
+            _ = timeout_seconds
+            if feed_url.endswith("broken.xml"):
+                raise OSError("boom")
+            return xml_text
+
+        with patch("core.rss._fetch_feed_text", side_effect=fetch_feed_text):
+            result = read_news_result([
+                "https://example.com/broken.xml",
+                "https://example.com/rss.xml",
+            ])
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(result["data"]["items"]), 1)
+        self.assertIn("errors", result["data"])
+
+
 class PerceptionManagerTests(unittest.TestCase):
     def test_collect_passive_stimuli_emits_time_and_system_status(self) -> None:
         manager = PerceptionManager.from_config({
@@ -353,11 +433,14 @@ class PerceptionManagerTests(unittest.TestCase):
 class ActionManagerTests(unittest.TestCase):
     def test_news_stimulus_skips_already_seen_rss_items(self) -> None:
         queue = StimulusQueue(redis_client=None)
+        seen_feed_urls = []
         manager = _build_action_manager(
             queue,
-            _Planner(ActionPlan("news", "openclaw", "读取 RSS", 30, "测试")),
+            _Planner(ActionPlan("news", "native", "读取 RSS", 30, "测试", ["https://example.com/rss.xml"])),
             redis_client=_RedisNewsSeenStub(),
-            openclaw_executor=_OpenClawExecutor(_news_result()),
+            news_reader=lambda feed_urls, *, timeout_seconds: (
+                seen_feed_urls.append(list(feed_urls)) or _news_result()
+            ),
         )
         _assert_single_news_stimulus(
             self,
@@ -369,38 +452,39 @@ class ActionManagerTests(unittest.TestCase):
             ],
             expected_text="第一条",
         )
+        self.assertEqual(seen_feed_urls[0], ["https://example.com/rss.xml"])
         self.assertEqual(manager.pop_perception_observations().count("news"), 2)
 
     def test_concurrent_news_actions_do_not_duplicate_same_item(self) -> None:
         queue = StimulusQueue(redis_client=None)
-        planner = _Planner(ActionPlan("news", "openclaw", "读取 RSS", 30, "测试"))
+        planner = _Planner(ActionPlan("news", "native", "读取 RSS", 30, "测试", ["https://example.com/rss.xml"]))
         barrier = Barrier(2)
 
-        class Executor:
-            @staticmethod
-            def execute(action):
-                barrier.wait(timeout=1)
-                return _action_result(
-                    summary="新闻已读取",
-                    data={
-                        "items": [{
-                            "feed_url": "https://example.com/rss.xml",
-                            "guid": "same-item",
-                            "link": "https://example.com/1",
-                            "title": "同一条新闻",
-                            "published_at": "2026-03-27T10:00:00+00:00",
-                            "summary": "摘要 1",
-                        }],
-                    },
-                    run_id="run_news_same",
-                    session_key=f"seedwake:action:{action.action_id}",
-                )
+        def news_reader(_feed_urls: list[str], *, timeout_seconds: int):
+            _ = timeout_seconds
+            barrier.wait(timeout=1)
+            return _action_result(
+                summary="新闻已读取",
+                data={
+                    "items": [{
+                        "feed_url": "https://example.com/rss.xml",
+                        "guid": "same-item",
+                        "link": "https://example.com/1",
+                        "title": "同一条新闻",
+                        "published_at": "2026-03-27T10:00:00+00:00",
+                        "summary": "摘要 1",
+                    }],
+                },
+                run_id=None,
+                session_key=None,
+                transport="native",
+            )
 
         manager = _build_action_manager(
             queue,
             planner,
             redis_client=_RedisNewsSeenStub(),
-            openclaw_executor=Executor(),
+            news_reader=news_reader,
         )
         _assert_single_news_stimulus(
             self,
@@ -414,36 +498,35 @@ class ActionManagerTests(unittest.TestCase):
 
     def test_news_seen_index_is_bounded(self) -> None:
         queue = StimulusQueue(redis_client=None)
-        planner = _Planner(ActionPlan("news", "openclaw", "读取 RSS", 30, "测试"))
+        planner = _Planner(ActionPlan("news", "native", "读取 RSS", 30, "测试", ["https://example.com/rss.xml"]))
+        count = {"value": 0}
 
-        class Executor:
-            def __init__(self):
-                self.count = 0
-
-            def execute(self, _action):
-                self.count += 1
-                return _action_result(
-                    summary="新闻已读取",
-                    data={
-                        "items": [{
-                            "feed_url": "https://example.com/rss.xml",
-                            "guid": f"item-{self.count}",
-                            "link": f"https://example.com/{self.count}",
-                            "title": f"第{self.count}条",
-                            "published_at": f"2026-03-27T1{self.count}:00:00+00:00",
-                            "summary": f"摘要 {self.count}",
-                        }],
-                    },
-                    run_id=f"run_news_{self.count}",
-                    session_key=f"seedwake:action:act_C{self.count}-1",
-                )
+        def news_reader(_feed_urls: list[str], *, timeout_seconds: int):
+            _ = timeout_seconds
+            count["value"] += 1
+            return _action_result(
+                summary="新闻已读取",
+                data={
+                    "items": [{
+                        "feed_url": "https://example.com/rss.xml",
+                        "guid": f"item-{count['value']}",
+                        "link": f"https://example.com/{count['value']}",
+                        "title": f"第{count['value']}条",
+                        "published_at": f"2026-03-27T1{count['value']}:00:00+00:00",
+                        "summary": f"摘要 {count['value']}",
+                    }],
+                },
+                run_id=None,
+                session_key=None,
+                transport="native",
+            )
 
         redis_stub = _RedisNewsSeenStub()
         manager = _build_action_manager(
             queue,
             planner,
             redis_client=redis_stub,
-            openclaw_executor=Executor(),
+            news_reader=news_reader,
             news_seen_max_items=2,
         )
         _submit_and_shutdown(manager, [
@@ -456,13 +539,13 @@ class ActionManagerTests(unittest.TestCase):
 
     def test_news_seen_shadow_syncs_to_redis_on_reconnect(self) -> None:
         queue = StimulusQueue(redis_client=None)
-        planner = _Planner(ActionPlan("news", "openclaw", "读取 RSS", 30, "测试"))
+        planner = _Planner(ActionPlan("news", "native", "读取 RSS", 30, "测试", ["https://example.com/rss.xml"]))
         result = _news_result()
         first_manager = _build_action_manager(
             queue,
             planner,
             redis_client=None,
-            openclaw_executor=_OpenClawExecutor(result),
+            news_reader=_constant_news_reader(result),
         )
 
         try:
@@ -479,7 +562,7 @@ class ActionManagerTests(unittest.TestCase):
             second_queue,
             planner,
             redis_client=redis_stub,
-            openclaw_executor=_OpenClawExecutor(result),
+            news_reader=_constant_news_reader(result),
         )
         _submit_and_shutdown(second_manager, [
             _make_thought(cycle_id=2, action_request={"type": "news", "params": ""}),
@@ -512,6 +595,27 @@ class ActionManagerTests(unittest.TestCase):
             ),
             "新闻条目缺少可识别字段",
         )
+
+    def test_openclaw_unavailable_actions_are_deferred_until_retry(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        planner = _Planner(ActionPlan("search", "openclaw", "搜索资料", 30, "测试"))
+        manager = _build_action_manager(
+            queue,
+            planner,
+            openclaw_executor=_UnavailableOpenClawExecutor(),
+        )
+
+        try:
+            created = manager.submit_from_thoughts([
+                _make_thought(action_request={"type": "search", "params": 'query:"Seedwake"'})
+            ])
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(created[0].status, "pending")
+        self.assertIsNotNone(created[0].retry_after)
+        self.assertEqual(queue.pop_many(limit=5), [])
 
     def test_openclaw_action_generates_action_result_stimulus(self) -> None:
         queue = StimulusQueue(redis_client=None)
@@ -686,10 +790,8 @@ class ActionManagerTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(plan)
-        self.assertEqual(plan.executor, "openclaw")
-        self.assertIn("https://example.com/a.xml", plan.task)
-        self.assertIn("https://example.com/b.xml", plan.task)
-        self.assertNotIn("默认信息流", plan.task)
+        self.assertEqual(plan.executor, "native")
+        self.assertEqual(plan.news_feed_urls, ["https://example.com/a.xml", "https://example.com/b.xml"])
 
     def test_news_fallback_reports_missing_rss_config(self) -> None:
         thought = _make_thought(
@@ -707,8 +809,8 @@ class ActionManagerTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(plan)
-        self.assertEqual(plan.executor, "openclaw")
-        self.assertIn("未配置", plan.task)
+        self.assertEqual(plan.executor, "native")
+        self.assertEqual(plan.news_feed_urls, [])
 
     def test_search_fallback_preserves_seedwake_query(self) -> None:
         thought = _make_thought(
@@ -834,11 +936,20 @@ class ActionControlQueueTests(unittest.TestCase):
                 _ = key
                 self.items.append(payload)
 
-            def lpop(self, key):
+            def lrange(self, key, start, stop):
                 _ = key
+                _ = start
+                _ = stop
                 if not self.items:
-                    return None
-                return self.items.pop(0)
+                    return []
+                return [self.items[0]]
+
+            def ltrim(self, key, start, stop):
+                _ = key
+                _ = stop
+                if start <= 0:
+                    return
+                self.items = self.items[start:]
 
         redis_stub = RedisStub()
         pushed = push_action_control(
@@ -853,6 +964,36 @@ class ActionControlQueueTests(unittest.TestCase):
         self.assertTrue(pushed)
         self.assertEqual(len(controls), 1)
         self.assertEqual(controls[0]["action_id"], "act_1")
+
+    def test_pop_action_controls_skips_invalid_json_without_losing_following_item(self) -> None:
+        class RedisStub:
+            def __init__(self):
+                self.items = [
+                    "{bad json",
+                    '{"action_id":"act_2","approved":true,"actor":"alice","note":"","timestamp":"2026-03-28T00:00:00+00:00"}',
+                ]
+
+            def lrange(self, key, start, stop):
+                _ = key
+                _ = start
+                _ = stop
+                if not self.items:
+                    return []
+                return [self.items[0]]
+
+            def ltrim(self, key, start, stop):
+                _ = key
+                _ = stop
+                if start <= 0:
+                    return
+                self.items = self.items[start:]
+
+        redis_stub = RedisStub()
+
+        controls = pop_action_controls(redis_stub)
+
+        self.assertEqual(len(controls), 1)
+        self.assertEqual(controls[0]["action_id"], "act_2")
 
 
 if __name__ == "__main__":

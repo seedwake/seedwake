@@ -599,7 +599,7 @@ pending → running → succeeded / failed / timeout
 
 执行层的后端分工：
 
-- native tools：一次结构化调用即可完成的本地能力或已封装 API
+- native tools：一次结构化调用即可完成的本地能力或已封装 API，例如时间读取、系统状态读取、固定 RSS 新闻读取
 - OpenClaw：需要浏览器、命令行、文件修改、权限控制或多步探索的任务
 
 OpenClaw 任务默认通过 `agent` 立即拿到 `accepted/runId`，再由后台 worker 使用 `agent.wait` 等待最终完成；后续如需显式取消，可在同一控制面上补接 `sessions.abort`。

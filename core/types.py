@@ -17,6 +17,7 @@ class ActionRequestPayload(TypedDict):
     task: str
     reason: str
     raw_action: RawActionRequest | None
+    news_feed_urls: NotRequired[list[str]]
 
 
 class ActionControl(TypedDict):

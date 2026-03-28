@@ -4,6 +4,7 @@ import json
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from threading import RLock
 from redis import exceptions as redis_exceptions
 from uuid import uuid4
 
@@ -42,6 +43,7 @@ class StimulusQueue:
     def __init__(self, redis_client):
         self._redis = redis_client
         self._deque: deque[Stimulus] = deque()
+        self._lock = RLock()
 
     def push(
         self,
@@ -62,13 +64,15 @@ class StimulusQueue:
             action_id=action_id,
             metadata=metadata or {},
         )
-        self._deque.append(stimulus)
-        if self._redis:
+        with self._lock:
+            self._deque.append(stimulus)
+            redis_client = self._redis
+        if redis_client:
             try:
-                self._redis.rpush(REDIS_KEY, _stimulus_to_json(stimulus))
+                redis_client.rpush(REDIS_KEY, _stimulus_to_json(stimulus))
                 if stimulus_type == "conversation":
                     append_conversation_history(
-                        self._redis,
+                        redis_client,
                         role="user",
                         source=source,
                         content=content,
@@ -77,45 +81,55 @@ class StimulusQueue:
                         timestamp=stimulus.timestamp,
                     )
             except STIMULUS_REDIS_EXCEPTIONS:
-                self._redis = None
+                with self._lock:
+                    self._redis = None
         return stimulus
 
     def pop_many(self, limit: int = 2) -> list[Stimulus]:
         if limit <= 0:
             return []
-        if self._redis:
+        with self._lock:
+            redis_client = self._redis
+        if redis_client:
             try:
-                return self._redis_pop_many(limit)
+                return self._redis_pop_many(redis_client, limit)
             except STIMULUS_REDIS_EXCEPTIONS:
-                self._redis = None
+                with self._lock:
+                    self._redis = None
         return self._shadow_pop_many(limit)
 
     def requeue_front(self, stimuli: list[Stimulus]) -> None:
         if not stimuli:
             return
-        for stimulus in reversed(stimuli):
-            self._deque.appendleft(stimulus)
-        if self._redis:
+        with self._lock:
+            for stimulus in reversed(stimuli):
+                self._deque.appendleft(stimulus)
+            redis_client = self._redis
+        if redis_client:
             try:
                 payloads = [_stimulus_to_json(stimulus) for stimulus in reversed(stimuli)]
-                self._redis.lpush(REDIS_KEY, *payloads)
+                redis_client.lpush(REDIS_KEY, *payloads)
             except STIMULUS_REDIS_EXCEPTIONS:
-                self._redis = None
+                with self._lock:
+                    self._redis = None
 
     @property
     def redis_available(self) -> bool:
-        return self._redis is not None
+        with self._lock:
+            return self._redis is not None
 
     def attach_redis(self, redis_client) -> bool:
-        self._redis = redis_client
+        with self._lock:
+            self._redis = redis_client
         try:
             self._sync_to_redis()
         except STIMULUS_REDIS_EXCEPTIONS:
-            self._redis = None
+            with self._lock:
+                self._redis = None
         return self.redis_available
 
-    def _redis_pop_many(self, limit: int) -> list[Stimulus]:
-        raw_items = self._redis.lrange(REDIS_KEY, 0, -1)
+    def _redis_pop_many(self, redis_client, limit: int) -> list[Stimulus]:
+        raw_items = redis_client.lrange(REDIS_KEY, 0, -1)
         if not raw_items:
             return []
         parsed = [_stimulus_from_dict(json.loads(item)) for item in raw_items]
@@ -123,13 +137,14 @@ class StimulusQueue:
         chosen_items = [parsed[index] for index, _ in chosen_pairs]
 
         for index, _ in chosen_pairs:
-            self._redis.lrem(REDIS_KEY, 1, raw_items[index])
+            redis_client.lrem(REDIS_KEY, 1, raw_items[index])
 
         self._drop_shadow_items([stimulus.stimulus_id for stimulus in chosen_items])
         return chosen_items
 
     def _shadow_pop_many(self, limit: int) -> list[Stimulus]:
-        items = list(self._deque)
+        with self._lock:
+            items = list(self._deque)
         chosen_pairs = _select_ranked(items, limit)
         chosen_items = [items[index] for index, _ in chosen_pairs]
         self._drop_shadow_items([stimulus.stimulus_id for stimulus in chosen_items])
@@ -139,24 +154,28 @@ class StimulusQueue:
         if not stimulus_ids:
             return
         id_set = set(stimulus_ids)
-        self._deque = deque(
-            stimulus for stimulus in self._deque
-            if stimulus.stimulus_id not in id_set
-        )
+        with self._lock:
+            self._deque = deque(
+                stimulus for stimulus in self._deque
+                if stimulus.stimulus_id not in id_set
+            )
 
     def _sync_to_redis(self) -> None:
-        existing = self._redis.lrange(REDIS_KEY, 0, -1)
+        with self._lock:
+            redis_client = self._redis
+            shadow_items = list(self._deque)
+        existing = redis_client.lrange(REDIS_KEY, 0, -1)
         existing_ids = {
             json.loads(item)["stimulus_id"]
             for item in existing
         }
-        for stimulus in self._deque:
+        for stimulus in shadow_items:
             if stimulus.stimulus_id in existing_ids:
                 continue
-            self._redis.rpush(REDIS_KEY, _stimulus_to_json(stimulus))
+            redis_client.rpush(REDIS_KEY, _stimulus_to_json(stimulus))
             if stimulus.type == "conversation":
                 append_conversation_history(
-                    self._redis,
+                    redis_client,
                     role="user",
                     source=stimulus.source,
                     content=stimulus.content,

@@ -49,6 +49,10 @@ Do not wrap the JSON in markdown fences.
 """
 
 
+class OpenClawUnavailableError(RuntimeError):
+    """Transport-level OpenClaw unavailability."""
+
+
 class OpenClawGatewayExecutor:
     """Delegates actions to OpenClaw over Gateway WS, with optional HTTP fallback."""
 
@@ -73,16 +77,19 @@ class OpenClawGatewayExecutor:
 
     def execute(self, action) -> ActionResultEnvelope:
         if not self._gateway_url:
-            raise RuntimeError("OPENCLAW_GATEWAY_URL 未配置")
+            raise OpenClawUnavailableError("OPENCLAW_GATEWAY_URL 未配置")
         if not self._gateway_token:
-            raise RuntimeError("OPENCLAW_GATEWAY_TOKEN 未配置")
+            raise OpenClawUnavailableError("OPENCLAW_GATEWAY_TOKEN 未配置")
 
         try:
             return asyncio.run(self._execute_ws(action))
         except OPENCLAW_TRANSPORT_EXCEPTIONS as exc:
             if not self._use_http_fallback:
-                raise
-            return self._execute_http(action, exc)
+                raise OpenClawUnavailableError(str(exc)) from exc
+            try:
+                return self._execute_http(action, exc)
+            except OPENCLAW_TRANSPORT_EXCEPTIONS as fallback_exc:
+                raise OpenClawUnavailableError(str(fallback_exc)) from fallback_exc
 
     async def _execute_ws(self, action) -> ActionResultEnvelope:
         websockets = _import_websockets()

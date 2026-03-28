@@ -287,6 +287,7 @@ def _prepare_cycle(
     _push_passive_stimuli(runtime.stimulus_queue, runtime.perception.collect_passive_stimuli(cycle_id))
     controls = pop_action_controls(runtime.stm.redis_client)
     runtime.action_manager.apply_controls(controls)
+    runtime.action_manager.retry_deferred_actions()
     stimuli = runtime.stimulus_queue.pop_many(limit=2)
     runtime.perception.observe_stimuli(cycle_id, stimuli)
     runtime.perception.observe_types(cycle_id, runtime.action_manager.pop_perception_observations())
@@ -331,9 +332,9 @@ def _redis_recovered(
         return False
     if had_redis and stimulus_queue.redis_available and action_manager.redis_available:
         return False
-    stimulus_queue.attach_redis(stm.redis_client)
-    action_manager.attach_redis(stm.redis_client)
-    return True
+    queue_ok = stimulus_queue.attach_redis(stm.redis_client)
+    action_ok = action_manager.attach_redis(stm.redis_client)
+    return queue_ok and action_ok
 
 
 def _execute_cycle(
@@ -651,9 +652,12 @@ def _install_signal_handler(log_file, action_manager) -> None:
     def handler(sig, frame):
         _ = sig, frame
         print(f"\n\n{C_DIM}心相续止息。{C_RESET}")
-        action_manager.shutdown()
+        drained = action_manager.shutdown_with_timeout(wait_timeout_seconds=5.0)
         if log_file:
             log_file.close()
+        if not drained:
+            logger.warning("forced exit with running actions still active")
+            os._exit(0)
         sys.exit(0)
     signal.signal(signal.SIGINT, handler)
     signal.signal(signal.SIGTERM, handler)
