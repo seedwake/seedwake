@@ -73,13 +73,14 @@ class PerceptionManager:
         )
         warnings = list(system_status.get("warnings") or [])
         if warnings or self._is_due("system_status", cycle_id, self._config.passive_system_status_interval_cycles):
-            stimuli.append({
+            system_stimulus: PerceptionStimulusPayload = {
                 "type": "system_status",
                 "priority": 3 if warnings else 4,
                 "source": "system:status",
                 "content": str(system_status.get("summary") or "系统状态已更新"),
-                "metadata": system_status,
-            })
+                "metadata": dict(system_status),
+            }
+            stimuli.append(system_stimulus)
             self._last_seen_cycle["system_status"] = cycle_id
 
         return stimuli
@@ -233,11 +234,12 @@ def _read_memory_snapshot() -> MemorySnapshot | None:
         return None
 
     used_ratio = max(0.0, min(1.0, (total_kb - available_kb) / total_kb))
-    return {
+    memory_snapshot: MemorySnapshot = {
         "total_kb": float(total_kb),
         "available_kb": float(available_kb),
         "used_ratio": used_ratio,
     }
+    return memory_snapshot
 
 
 def _has_running_perception_action(running_actions: list[object], stimulus_type: str) -> bool:

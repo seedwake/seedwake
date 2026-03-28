@@ -1,9 +1,12 @@
 import asyncio
 import json
 import unittest
+from collections.abc import AsyncIterable
 from types import SimpleNamespace
+from typing import cast
 
 import redis as redis_lib
+from fastapi import Request
 from fastapi.testclient import TestClient
 
 from backend.main import create_app
@@ -13,10 +16,13 @@ from core.stimulus import CONVERSATION_HISTORY_KEY
 from test_support import slice_window
 
 
-async def _read_first_stream_chunk(iterator) -> str | bytes:
-    first_chunk = await iterator.__anext__()
-    await iterator.aclose()
+async def _read_first_stream_chunk(iterator: AsyncIterable[str | bytes | memoryview]) -> str | bytes | memoryview:
+    first_chunk = await anext(aiter(iterator))
     return first_chunk
+
+
+def _as_request(value: object) -> Request:
+    return cast(Request, value)
 
 
 class FakePubSub:
@@ -24,9 +30,11 @@ class FakePubSub:
         self._messages = messages
 
     def subscribe(self, *channels):
+        _ = channels
         return None
 
     def get_message(self, timeout=0):
+        _ = timeout
         if not self._messages:
             return None
         return self._messages.pop(0)
@@ -73,6 +81,7 @@ class FakeRedis:
         return list(self.hashes.get(key, {}).values())
 
     def pubsub(self, ignore_subscribe_messages=True):
+        _ = ignore_subscribe_messages
         return FakePubSub([
             {
                 "channel": "seedwake:events",
@@ -188,7 +197,7 @@ class BackendTests(unittest.TestCase):
             ),
         )
 
-        response = stream_events(request=request, admin_username="alice")
+        response = stream_events(request=_as_request(request), admin_username="alice")
         first_chunk = asyncio.run(_read_first_stream_chunk(response.body_iterator))
         if isinstance(first_chunk, bytes):
             first_chunk = first_chunk.decode("utf-8")

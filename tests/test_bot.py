@@ -1,9 +1,12 @@
 import unittest
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import redis as redis_lib
 from telegram.error import TelegramError
+from telegram import Update
+from telegram.ext import Application, ContextTypes
 
 from bot.main import (
     _dispatch_event,
@@ -17,6 +20,7 @@ from bot.main import (
 )
 from core.action import ACTION_CONTROL_KEY
 from core.stimulus import CONVERSATION_HISTORY_KEY, REDIS_KEY as STIMULUS_REDIS_KEY
+from core.types import ActionEventPayload, EventEnvelope, ReplyEventPayload
 from test_support import slice_window
 
 
@@ -38,18 +42,40 @@ class FakeRedis:
         return list(self.hashes.get(key, {}).values())
 
 
+def _as_update(value: object) -> Update:
+    return cast(Update, value)
+
+
+def _as_application(value: object) -> Application:
+    return cast(Application, value)
+
+
+def _as_context(value: object) -> ContextTypes.DEFAULT_TYPE:
+    return cast(ContextTypes.DEFAULT_TYPE, value)
+
+
+def _reply_text_mock(update: Update) -> AsyncMock:
+    message = update.effective_message
+    assert message is not None
+    return cast(AsyncMock, cast(object, message.reply_text))
+
+
+def _send_message_mock(context: ContextTypes.DEFAULT_TYPE) -> AsyncMock:
+    return cast(AsyncMock, cast(object, context.application.bot.send_message))
+
+
 def _make_update(
     *,
     user_id: int = 1,
     chat_id: int = 1,
     text: str = "你好",
     username: str = "alice",
-):
+ ) -> Update:
     message = SimpleNamespace(
         text=text,
         reply_text=AsyncMock(),
     )
-    return SimpleNamespace(
+    return _as_update(SimpleNamespace(
         effective_user=SimpleNamespace(
             id=user_id,
             username=username,
@@ -58,19 +84,38 @@ def _make_update(
         effective_chat=SimpleNamespace(id=chat_id),
         effective_message=message,
         callback_query=None,
-    )
+    ))
 
 
-def _make_context(redis_client=None, *, allowed_user_ids=None, args=None):
-    application = SimpleNamespace(
+def _make_context(redis_client=None, *, allowed_user_ids=None, args=None) -> ContextTypes.DEFAULT_TYPE:
+    application = _as_application(SimpleNamespace(
         bot_data={
             "redis": redis_client,
             "allowed_user_ids": set(allowed_user_ids or {1}),
             "notification_user_ids": list(allowed_user_ids or {1}),
         },
         bot=SimpleNamespace(send_message=AsyncMock()),
-    )
-    return SimpleNamespace(application=application, args=args or [])
+    ))
+    return _as_context(SimpleNamespace(application=application, args=args or []))
+
+
+def _reply_envelope(source: str, message: str) -> EventEnvelope:
+    payload: ReplyEventPayload = {"source": source, "message": message, "stimulus_id": None}
+    return {"type": "reply", "payload": payload}
+
+
+def _action_envelope() -> EventEnvelope:
+    payload: ActionEventPayload = {
+        "action_id": "act_1",
+        "type": "system_change",
+        "executor": "openclaw",
+        "status": "pending",
+        "summary": "需要管理员确认",
+        "run_id": None,
+        "session_key": None,
+        "awaiting_confirmation": True,
+    }
+    return {"type": "action", "payload": payload}
 
 
 class TelegramBotHelpersTests(unittest.TestCase):
@@ -83,14 +128,17 @@ class TelegramBotHelpersTests(unittest.TestCase):
         self.assertIsNone(_extract_telegram_chat_id("user:alice"))
 
     def test_format_action_event(self) -> None:
-        text = _format_action_event({
+        payload: ActionEventPayload = {
             "action_id": "act_1",
             "type": "system_change",
             "executor": "openclaw",
             "status": "pending",
             "summary": "需要管理员确认",
+            "run_id": None,
+            "session_key": None,
             "awaiting_confirmation": True,
-        })
+        }
+        text = _format_action_event(payload)
         self.assertIn("需要确认的行动", text)
         self.assertIn("act_1", text)
 
@@ -109,7 +157,7 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         history = redis_client.lists[CONVERSATION_HISTORY_KEY][0]
         self.assertIn('"role": "user"', history)
         self.assertIn('"content": "你好"', history)
-        update.effective_message.reply_text.assert_awaited_once()
+        _reply_text_mock(update).assert_awaited_once()
 
     async def test_handle_text_message_rejects_unauthorized_user(self) -> None:
         redis_client = FakeRedis()
@@ -119,18 +167,17 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         await _handle_text_message(update, context)
 
         self.assertNotIn(STIMULUS_REDIS_KEY, redis_client.lists)
-        update.effective_message.reply_text.assert_awaited_once()
-        self.assertIn("无权限", update.effective_message.reply_text.await_args.args[0])
+        reply_mock = _reply_text_mock(update)
+        reply_mock.assert_awaited_once()
+        self.assertIn("无权限", reply_mock.await_args.args[0])
 
     async def test_dispatch_reply_event_sends_to_source_chat(self) -> None:
         context = _make_context(FakeRedis(), allowed_user_ids={1})
 
-        await _dispatch_event(
-            context.application,
-            {"type": "reply", "payload": {"source": "telegram:99", "message": "你好"}},
-        )
+        await _dispatch_event(context.application, _reply_envelope("telegram:99", "你好"))
 
-        context.application.bot.send_message.assert_awaited_once_with(
+        send_mock = _send_message_mock(context)
+        send_mock.assert_awaited_once_with(
             chat_id=99,
             text="你好",
             reply_markup=None,
@@ -139,23 +186,11 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_dispatch_action_event_broadcasts_confirmation(self) -> None:
         context = _make_context(FakeRedis(), allowed_user_ids={1, 2})
 
-        await _dispatch_event(
-            context.application,
-            {
-                "type": "action",
-                "payload": {
-                    "action_id": "act_1",
-                    "type": "system_change",
-                    "executor": "openclaw",
-                    "status": "pending",
-                    "summary": "需要管理员确认",
-                    "awaiting_confirmation": True,
-                },
-            },
-        )
+        await _dispatch_event(context.application, _action_envelope())
 
-        self.assertEqual(context.application.bot.send_message.await_count, 2)
-        first_kwargs = context.application.bot.send_message.await_args_list[0].kwargs
+        send_mock = _send_message_mock(context)
+        self.assertEqual(send_mock.await_count, 2)
+        first_kwargs = send_mock.await_args_list[0].kwargs
         self.assertEqual(first_kwargs["chat_id"], 1)
         self.assertIsNotNone(first_kwargs["reply_markup"])
 
@@ -163,22 +198,9 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         context = _make_context(FakeRedis(), allowed_user_ids={1, 2})
         context.application.bot.send_message = AsyncMock(side_effect=[TelegramError("boom"), None])
 
-        await _dispatch_event(
-            context.application,
-            {
-                "type": "action",
-                "payload": {
-                    "action_id": "act_1",
-                    "type": "system_change",
-                    "executor": "openclaw",
-                    "status": "pending",
-                    "summary": "需要管理员确认",
-                    "awaiting_confirmation": True,
-                },
-            },
-        )
+        await _dispatch_event(context.application, _action_envelope())
 
-        self.assertEqual(context.application.bot.send_message.await_count, 2)
+        self.assertEqual(_send_message_mock(context).await_count, 2)
 
     async def test_handle_approve_pushes_action_control(self) -> None:
         redis_client = FakeRedis()
@@ -189,7 +211,7 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         stored = redis_client.lists[ACTION_CONTROL_KEY][0]
         self.assertIn('"action_id": "act_1"', stored)
-        update.effective_message.reply_text.assert_awaited_once()
+        _reply_text_mock(update).assert_awaited_once()
 
     async def test_handle_actions_reads_live_actions(self) -> None:
         redis_client = FakeRedis()
@@ -204,8 +226,9 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         await _handle_actions(update, context)
 
-        update.effective_message.reply_text.assert_awaited_once()
-        self.assertIn("act_1", update.effective_message.reply_text.await_args.args[0])
+        reply_mock = _reply_text_mock(update)
+        reply_mock.assert_awaited_once()
+        self.assertIn("act_1", reply_mock.await_args.args[0])
 
     async def test_handle_actions_marks_redis_unavailable_on_read_error(self) -> None:
         class FailingRedis(FakeRedis):
@@ -218,7 +241,7 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         await _handle_actions(update, context)
 
         self.assertIsNone(context.application.bot_data["redis"])
-        self.assertIn("Redis 不可用", update.effective_message.reply_text.await_args.args[0])
+        self.assertIn("Redis 不可用", _reply_text_mock(update).await_args.args[0])
 
     async def test_handle_text_message_reports_redis_write_failure(self) -> None:
         class FailingRedis(FakeRedis):
@@ -231,13 +254,13 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         await _handle_text_message(update, context)
 
         self.assertIsNone(context.application.bot_data["redis"])
-        self.assertIn("Redis 不可用", update.effective_message.reply_text.await_args.args[0])
+        self.assertIn("Redis 不可用", _reply_text_mock(update).await_args.args[0])
 
 
 class TelegramBotRedisRecoveryTests(unittest.TestCase):
     def test_ensure_redis_client_reconnects_when_missing(self) -> None:
         redis_client = FakeRedis()
-        application = SimpleNamespace(bot_data={"redis": None})
+        application = _as_application(SimpleNamespace(bot_data={"redis": None}))
 
         with patch("bot.main.connect_redis_from_env", return_value=redis_client):
             recovered = _ensure_redis_client(application)

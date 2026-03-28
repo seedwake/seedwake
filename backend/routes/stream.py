@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.auth import resolve_admin_from_query
 from core.memory.short_term import REDIS_CHANNEL as THOUGHT_CHANNEL
-from core.types import EventEnvelope, EventPayload
+from core.types import EventEnvelope, EventPayload, StatusEventPayload
 
 router = APIRouter(prefix="/api")
 EVENT_CHANNEL = "seedwake:events"
@@ -38,7 +38,7 @@ def stream_events(
 
     def generate():
         try:
-            yield _format_sse("status", {"message": "stream_connected", "username": admin_username})
+            yield _format_sse("status", _stream_status_payload("stream_connected", admin_username))
             while True:
                 try:
                     message = pubsub.get_message(timeout=15.0)
@@ -59,7 +59,7 @@ def stream_events(
         # noinspection PyBroadException
         except Exception as exc:
             logger.exception("unexpected SSE stream failure: %s", exc)
-            yield _format_sse("status", {"message": "stream_error"})
+            yield _format_sse("status", _stream_status_payload("stream_error"))
         finally:
             pubsub.close()
 
@@ -95,3 +95,10 @@ def _raw_sse(event_name: str, raw_json: str) -> str:
 
 def _format_sse(event_name: str, payload: EventPayload) -> str:
     return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _stream_status_payload(message: str, username: str | None = None) -> StatusEventPayload:
+    payload: StatusEventPayload = {"message": message}
+    if username:
+        payload["username"] = username
+    return payload

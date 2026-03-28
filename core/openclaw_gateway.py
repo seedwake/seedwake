@@ -147,15 +147,15 @@ class OpenClawGatewayExecutor:
                 wait_payload = wait_res.get("payload") or {}
                 if wait_payload.get("status") == "timeout":
                     await _abort_session(client, session_key, run_id, timeout_seconds=5)
-                    return {
-                        "ok": False,
-                        "summary": "行动超时",
-                        "data": {},
-                        "error": "timeout",
-                        "run_id": run_id or None,
-                        "session_key": session_key,
-                        "transport": "ws",
-                    }
+                    return _build_gateway_result(
+                        ok=False,
+                        summary="行动超时",
+                        data={},
+                        error="timeout",
+                        run_id=run_id or None,
+                        session_key=session_key,
+                        transport="ws",
+                    )
 
                 final_frame = await client.recv_response(request_id, 5)
                 return _normalize_agent_final(final_frame, run_id=run_id, session_key=session_key)
@@ -188,13 +188,15 @@ class OpenClawGatewayExecutor:
                 body = json.loads(resp.read().decode("utf-8"))
         except error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            return {
-                "ok": False,
-                "summary": f"OpenClaw HTTP fallback 失败: {exc.code}",
-                "data": {},
-                "error": detail,
-                "session_key": session_key,
-            }
+            return _build_gateway_result(
+                ok=False,
+                summary=f"OpenClaw HTTP fallback 失败: {exc.code}",
+                data={},
+                error=detail,
+                run_id=None,
+                session_key=session_key,
+                transport="http",
+            )
 
         text = _extract_responses_api_text(body)
         normalized = _normalize_worker_text(text)
@@ -336,15 +338,15 @@ async def _abort_session(client: _GatewayRpcClient, session_key: str, run_id: st
 def _normalize_agent_final(frame: JsonObject, *, run_id: str | None, session_key: str) -> ActionResultEnvelope:
     payload = frame.get("payload") or {}
     if not frame.get("ok"):
-        return {
-            "ok": False,
-            "summary": payload.get("summary") or _format_gateway_error(frame),
-            "data": {},
-            "error": _format_gateway_error(frame),
-            "run_id": payload.get("runId") or run_id,
-            "session_key": session_key,
-            "transport": "ws",
-        }
+        return _build_gateway_result(
+            ok=False,
+            summary=str(payload.get("summary") or _format_gateway_error(frame)),
+            data={},
+            error=_format_gateway_error(frame),
+            run_id=str(payload.get("runId") or run_id or "") or None,
+            session_key=session_key,
+            transport="ws",
+        )
 
     result_payload = payload.get("result") or {}
     text = _extract_payload_text(result_payload)
@@ -379,20 +381,27 @@ def _extract_responses_api_text(response_body: dict) -> str:
 def _normalize_worker_text(text: str) -> ActionResultEnvelope:
     parsed = _extract_json_object(text)
     if isinstance(parsed, dict):
-        return {
-            "ok": bool(parsed.get("ok", True)),
-            "summary": str(parsed.get("summary") or text or "OpenClaw 完成任务"),
-            "data": parsed.get("data") if isinstance(parsed.get("data"), dict) else {},
-            "error": parsed.get("error"),
-            "raw_text": text,
-        }
-    return {
-        "ok": True,
-        "summary": text or "OpenClaw 完成任务",
-        "data": {},
-        "error": None,
-        "raw_text": text,
-    }
+        data = parsed.get("data")
+        return _build_gateway_result(
+            ok=bool(parsed.get("ok", True)),
+            summary=str(parsed.get("summary") or text or "OpenClaw 完成任务"),
+            data=dict(data) if isinstance(data, dict) else {},
+            error=parsed.get("error"),
+            run_id=None,
+            session_key=None,
+            transport="openclaw",
+            raw_text=text,
+        )
+    return _build_gateway_result(
+        ok=True,
+        summary=text or "OpenClaw 完成任务",
+        data={},
+        error=None,
+        run_id=None,
+        session_key=None,
+        transport="openclaw",
+        raw_text=text,
+    )
 
 
 def _extract_json_object(text: str) -> JsonObject | None:
@@ -407,6 +416,31 @@ def _extract_json_object(text: str) -> JsonObject | None:
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _build_gateway_result(
+    *,
+    ok: bool,
+    summary: str,
+    data: JsonObject,
+    error,
+    run_id: str | None,
+    session_key: str | None,
+    transport: str,
+    raw_text: str | None = None,
+) -> ActionResultEnvelope:
+    result: ActionResultEnvelope = {
+        "ok": ok,
+        "summary": summary,
+        "data": data,
+        "error": error,
+        "run_id": run_id,
+        "session_key": session_key,
+        "transport": transport,
+    }
+    if raw_text is not None:
+        result["raw_text"] = raw_text
+    return result
 
 
 def _format_gateway_error(frame: dict) -> str:

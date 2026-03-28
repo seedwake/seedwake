@@ -15,7 +15,7 @@ from core.perception import PerceptionManager
 from core.prompt_builder import build_prompt
 from core.stimulus import CONVERSATION_HISTORY_KEY, StimulusQueue
 from core.thought_parser import Thought
-from core.types import ActionResultEnvelope
+from core.types import ActionControl, ActionResultEnvelope
 from test_support import ListRedisStub
 
 
@@ -40,20 +40,19 @@ class _Planner:
     def __init__(self, plan: ActionPlan | None):
         self._plan = plan
 
-    def plan(self, thought: Thought) -> ActionPlan | None:
+    def plan(self, _thought: Thought) -> ActionPlan | None:
         return self._plan
 
 
 class _OpenClawExecutor:
     def __init__(self, result: ActionResultEnvelope | None = None):
         self.calls = []
-        self._result = result or {
-            "ok": True,
-            "summary": "搜索完成",
-            "data": {"items": 1},
-            "run_id": "run_1",
-            "session_key": "seedwake:action:act_C1-1",
-        }
+        self._result = result or _action_result(
+            summary="搜索完成",
+            data={"items": 1},
+            run_id="run_1",
+            session_key="seedwake:action:act_C1-1",
+        )
 
     def execute(self, action):
         self.calls.append(action.action_id)
@@ -68,10 +67,9 @@ def _news_result(
     published_at: str = "2026-03-27T10:00:00+00:00",
     summary: str = "摘要 1",
 ) -> ActionResultEnvelope:
-    return {
-        "ok": True,
-        "summary": "新闻已读取",
-        "data": {
+    return _action_result(
+        summary="新闻已读取",
+        data={
             "items": [{
                 "feed_url": "https://example.com/rss.xml",
                 "guid": guid,
@@ -81,8 +79,39 @@ def _news_result(
                 "summary": summary,
             }],
         },
-        "run_id": f"run_news_{guid}",
-        "session_key": "seedwake:action:act_C1-1",
+        run_id=f"run_news_{guid}",
+        session_key="seedwake:action:act_C1-1",
+    )
+
+
+def _action_result(
+    *,
+    summary: str,
+    data: dict,
+    ok: bool = True,
+    error=None,
+    run_id: str | None = None,
+    session_key: str | None = None,
+    transport: str = "openclaw",
+) -> ActionResultEnvelope:
+    return {
+        "ok": ok,
+        "summary": summary,
+        "data": data,
+        "error": error,
+        "run_id": run_id,
+        "session_key": session_key,
+        "transport": transport,
+    }
+
+
+def _action_control(action_id: str, *, approved: bool, actor: str, note: str) -> ActionControl:
+    return {
+        "action_id": action_id,
+        "approved": approved,
+        "actor": actor,
+        "note": note,
+        "timestamp": "2026-03-28T00:00:00+00:00",
     }
 
 
@@ -180,6 +209,7 @@ class _RedisNewsSeenStub:
         self.sorted_sets.get(key, {}).pop(member, None)
 
     def zremrangebyscore(self, key, min_score, max_score):
+        _ = min_score
         bucket = self.sorted_sets.get(key, {})
         ceiling = float(max_score)
         removed = 0
@@ -347,10 +377,9 @@ class ActionManagerTests(unittest.TestCase):
         class Executor:
             def execute(self, action):
                 barrier.wait(timeout=1)
-                return {
-                    "ok": True,
-                    "summary": "新闻已读取",
-                    "data": {
+                return _action_result(
+                    summary="新闻已读取",
+                    data={
                         "items": [{
                             "feed_url": "https://example.com/rss.xml",
                             "guid": "same-item",
@@ -360,9 +389,9 @@ class ActionManagerTests(unittest.TestCase):
                             "summary": "摘要 1",
                         }],
                     },
-                    "run_id": "run_news_same",
-                    "session_key": f"seedwake:action:{action.action_id}",
-                }
+                    run_id="run_news_same",
+                    session_key=f"seedwake:action:{action.action_id}",
+                )
 
         manager = _build_action_manager(
             queue,
@@ -388,12 +417,11 @@ class ActionManagerTests(unittest.TestCase):
             def __init__(self):
                 self.count = 0
 
-            def execute(self, action):
+            def execute(self, _action):
                 self.count += 1
-                return {
-                    "ok": True,
-                    "summary": "新闻已读取",
-                    "data": {
+                return _action_result(
+                    summary="新闻已读取",
+                    data={
                         "items": [{
                             "feed_url": "https://example.com/rss.xml",
                             "guid": f"item-{self.count}",
@@ -403,9 +431,9 @@ class ActionManagerTests(unittest.TestCase):
                             "summary": f"摘要 {self.count}",
                         }],
                     },
-                    "run_id": f"run_news_{self.count}",
-                    "session_key": f"seedwake:action:act_C{self.count}-1",
-                }
+                    run_id=f"run_news_{self.count}",
+                    session_key=f"seedwake:action:act_C{self.count}-1",
+                )
 
         redis_stub = _RedisNewsSeenStub()
         manager = _build_action_manager(
@@ -459,28 +487,26 @@ class ActionManagerTests(unittest.TestCase):
     def test_malformed_news_result_falls_back_to_failed_action_result(self) -> None:
         _assert_failed_news_action(
             self,
-            {
-                "ok": True,
-                "summary": "新闻已读取",
-                "data": {},
-                "run_id": "run_news_bad",
-                "session_key": "seedwake:action:act_C1-1",
-            },
+            _action_result(
+                summary="新闻已读取",
+                data={},
+                run_id="run_news_bad",
+                session_key="seedwake:action:act_C1-1",
+            ),
             "新闻结果缺少结构化 RSS 条目",
         )
 
     def test_news_items_without_identifiable_fields_are_rejected(self) -> None:
         _assert_failed_news_action(
             self,
-            {
-                "ok": True,
-                "summary": "新闻已读取",
-                "data": {
+            _action_result(
+                summary="新闻已读取",
+                data={
                     "items": [{"foo": "bar"}],
                 },
-                "run_id": "run_news_bad_item",
-                "session_key": "seedwake:action:act_C1-1",
-            },
+                run_id="run_news_bad_item",
+                session_key="seedwake:action:act_C1-1",
+            ),
             "新闻条目缺少可识别字段",
         )
 
@@ -592,13 +618,12 @@ class ActionManagerTests(unittest.TestCase):
     def test_perception_action_auto_executes_without_auto_execute_list(self) -> None:
         queue = StimulusQueue(redis_client=None)
         planner = _Planner(ActionPlan("weather", "openclaw", "查询当前天气", 30, "测试"))
-        executor = _OpenClawExecutor({
-            "ok": True,
-            "summary": "多云，15°C",
-            "data": {"location": "当前所在位置"},
-            "run_id": "run_weather_1",
-            "session_key": "seedwake:action:act_C1-1",
-        })
+        executor = _OpenClawExecutor(_action_result(
+            summary="多云，15°C",
+            data={"location": "当前所在位置"},
+            run_id="run_weather_1",
+            session_key="seedwake:action:act_C1-1",
+        ))
         manager = ActionManager(
             redis_client=None,
             stimulus_queue=queue,
@@ -758,12 +783,9 @@ class ActionManagerTests(unittest.TestCase):
                 _make_thought(action_request={"type": "system_change", "params": 'target:"sys"'})
             ])
             self.assertTrue(created[0].awaiting_confirmation)
-            manager.apply_controls([{
-                "action_id": created[0].action_id,
-                "approved": True,
-                "actor": "alice",
-                "note": "",
-            }])
+            manager.apply_controls([
+                _action_control(created[0].action_id, approved=True, actor="alice", note="")
+            ])
             manager.shutdown()
         finally:
             manager.shutdown()
@@ -787,12 +809,9 @@ class ActionManagerTests(unittest.TestCase):
             created = manager.submit_from_thoughts([
                 _make_thought(action_request={"type": "system_change", "params": 'target:"sys"'})
             ])
-            manager.apply_controls([{
-                "action_id": created[0].action_id,
-                "approved": False,
-                "actor": "alice",
-                "note": "不允许",
-            }])
+            manager.apply_controls([
+                _action_control(created[0].action_id, approved=False, actor="alice", note="不允许")
+            ])
             manager.shutdown()
         finally:
             manager.shutdown()
@@ -809,9 +828,11 @@ class ActionControlQueueTests(unittest.TestCase):
                 self.items = []
 
             def rpush(self, key, payload):
+                _ = key
                 self.items.append(payload)
 
             def lpop(self, key):
+                _ = key
                 if not self.items:
                     return None
                 return self.items.pop(0)

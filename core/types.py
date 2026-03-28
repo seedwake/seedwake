@@ -117,7 +117,7 @@ class ActionEventPayload(TypedDict):
     type: str
     executor: str
     status: str
-    source_thought_id: str
+    source_thought_id: NotRequired[str]
     summary: str
     run_id: str | None
     session_key: str | None
@@ -132,6 +132,7 @@ class ReplyEventPayload(TypedDict):
 
 class StatusEventPayload(TypedDict):
     message: str
+    username: NotRequired[str]
 
 
 type EventPayload = ActionEventPayload | ReplyEventPayload | StatusEventPayload

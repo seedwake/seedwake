@@ -58,7 +58,7 @@ class ThoughtParserTests(unittest.TestCase):
 
 class CycleTests(unittest.TestCase):
     @patch("core.cycle._call_ollama", return_value="[思考] a\n[意图] b\n[反应] c\n")
-    def test_run_cycle_returns_parsed_thoughts(self, mock_call_ollama) -> None:
+    def test_run_cycle_returns_parsed_thoughts(self, _) -> None:
         mock_client = MagicMock()
         thoughts = run_cycle(
             mock_client,
@@ -73,7 +73,7 @@ class CycleTests(unittest.TestCase):
         self.assertEqual([t.thought_id for t in thoughts], ["C4-1", "C4-2", "C4-3"])
 
     @patch("core.cycle._call_ollama", return_value="无法解析的输出")
-    def test_run_cycle_fallback_on_unparseable(self, mock_call_ollama) -> None:
+    def test_run_cycle_fallback_on_unparseable(self, _) -> None:
         mock_client = MagicMock()
         thoughts = run_cycle(
             mock_client,

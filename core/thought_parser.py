@@ -72,7 +72,8 @@ def _parse_action(content: str) -> RawActionRequest | None:
     m = ACTION_PATTERN.search(content)
     if not m:
         return None
-    return {"type": m.group(1), "params": m.group(2)}
+    action_request: RawActionRequest = {"type": m.group(1), "params": m.group(2)}
+    return action_request
 
 
 def _build_thought(

@@ -28,6 +28,7 @@ from core.types import (
     AuthorizedTelegramUser,
     EventEnvelope,
     JsonObject,
+    ReplyEventPayload,
     StatusEventPayload,
 )
 
@@ -276,17 +277,26 @@ async def _dispatch_event(application: Application, envelope: EventEnvelope) -> 
     if not isinstance(payload, dict):
         return
     if event_type == "reply":
-        chat_id = _extract_telegram_chat_id(str(payload.get("source") or ""))
-        text = str(payload.get("message") or "").strip()
+        reply_payload = _coerce_reply_payload(payload)
+        if reply_payload is None:
+            return
+        chat_id = _extract_telegram_chat_id(reply_payload["source"])
+        text = reply_payload["message"].strip()
         if chat_id is None or not text:
             return
         await _safe_send_message(application, chat_id=chat_id, text=text)
         return
     if event_type == "action":
-        await _broadcast_action_event(application, payload)
+        action_payload = _coerce_action_payload(payload)
+        if action_payload is None:
+            return
+        await _broadcast_action_event(application, action_payload)
         return
     if event_type == "status":
-        text = _format_status_event(payload)
+        status_payload = _coerce_status_payload(payload)
+        if status_payload is None:
+            return
+        text = _format_status_event(status_payload)
         if not text:
             return
         await _broadcast_text(application, text)
@@ -353,12 +363,13 @@ async def _ensure_authorized(
     if user.id not in allowed:
         await _reply_text(update, "无权限。")
         return None
-    return {
+    authorized_user: AuthorizedTelegramUser = {
         "user_id": user.id,
         "chat_id": chat.id,
         "username": user.username or "",
         "full_name": user.full_name,
     }
+    return authorized_user
 
 
 async def _reply_text(update: Update, text: str) -> None:
@@ -468,6 +479,66 @@ def _format_status_event(payload: StatusEventPayload) -> str:
     if not message:
         return ""
     return f"系统状态：{message}"
+
+
+def _coerce_reply_payload(payload: JsonObject) -> ReplyEventPayload | None:
+    source = payload.get("source")
+    message = payload.get("message")
+    if not isinstance(source, str) or not isinstance(message, str):
+        return None
+    stimulus_id = payload.get("stimulus_id")
+    reply_payload: ReplyEventPayload = {
+        "source": source,
+        "message": message,
+        "stimulus_id": stimulus_id if isinstance(stimulus_id, str) else None,
+    }
+    return reply_payload
+
+
+def _coerce_action_payload(payload: JsonObject) -> ActionEventPayload | None:
+    action_id = payload.get("action_id")
+    action_type = payload.get("type")
+    executor = payload.get("executor")
+    status = payload.get("status")
+    summary = payload.get("summary")
+    if not isinstance(action_id, str):
+        return None
+    if not isinstance(action_type, str):
+        return None
+    if not isinstance(executor, str):
+        return None
+    if not isinstance(status, str):
+        return None
+    if not isinstance(summary, str):
+        return None
+    run_id = payload.get("run_id")
+    session_key = payload.get("session_key")
+    awaiting_confirmation = payload.get("awaiting_confirmation")
+    action_payload: ActionEventPayload = {
+        "action_id": action_id,
+        "type": action_type,
+        "executor": executor,
+        "status": status,
+        "summary": summary,
+        "run_id": run_id if isinstance(run_id, str) else None,
+        "session_key": session_key if isinstance(session_key, str) else None,
+        "awaiting_confirmation": bool(awaiting_confirmation),
+    }
+    source_thought_id = payload.get("source_thought_id")
+    if isinstance(source_thought_id, str):
+        action_payload["source_thought_id"] = source_thought_id
+    return action_payload
+
+
+def _coerce_status_payload(payload: JsonObject) -> StatusEventPayload | None:
+    message = payload.get("message")
+    if not isinstance(message, str):
+        return None
+    status_payload: StatusEventPayload = {"message": message}
+    username = payload.get("username")
+    if isinstance(username, str):
+        status_payload["username"] = username
+    return status_payload
 
 
 if __name__ == "__main__":

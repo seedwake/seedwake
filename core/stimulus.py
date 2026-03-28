@@ -176,7 +176,7 @@ def append_conversation_history(
     metadata: JsonObject | None = None,
     timestamp: datetime | None = None,
 ) -> ConversationEntry:
-    entry = {
+    entry: ConversationEntry = {
         "entry_id": f"conv_{uuid4().hex}",
         "role": role,
         "source": source,

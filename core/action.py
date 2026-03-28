@@ -158,12 +158,7 @@ class ActionManager:
                 self._finalize_action(
                     action.action_id,
                     status="failed",
-                    result={
-                        "ok": False,
-                        "summary": blocked_reason,
-                        "data": {},
-                        "error": blocked_reason,
-                    },
+                    result=_failure_result(blocked_reason, blocked_reason, transport=action.executor),
                 )
                 continue
             if policy == "confirmation":
@@ -176,12 +171,7 @@ class ActionManager:
                 self._finalize_action(
                     action.action_id,
                     status="failed",
-                    result={
-                        "ok": False,
-                        "summary": blocked_reason,
-                        "data": {},
-                        "error": blocked_reason,
-                    },
+                    result=_failure_result(blocked_reason, blocked_reason, transport=action.executor),
                 )
                 continue
 
@@ -217,12 +207,7 @@ class ActionManager:
             self._finalize_action(
                 action_id,
                 status="failed",
-                result={
-                    "ok": False,
-                    "summary": summary,
-                    "data": {},
-                    "error": "rejected",
-                },
+                result=_failure_result(summary, "rejected", transport=action.executor),
             )
 
     def running_actions(self) -> list[ActionRecord]:
@@ -262,8 +247,8 @@ class ActionManager:
         self._pool.submit(self._run_action, action_id)
 
     def _run_action(self, action_id: str) -> None:
+        action = self._get_action(action_id)
         try:
-            action = self._get_action(action_id)
             self._update_action(action_id, status="running")
             self._publish_action_event(action, "running", "执行中")
 
@@ -275,24 +260,14 @@ class ActionManager:
             self._safe_finalize_action(
                 action_id,
                 status="timeout",
-                result={
-                    "ok": False,
-                    "summary": "行动超时",
-                    "data": {},
-                    "error": "timeout",
-                },
+                result=_failure_result("行动超时", "timeout", transport=action.executor),
             )
             return
         except ACTION_EXECUTION_EXCEPTIONS as exc:
             self._safe_finalize_action(
                 action_id,
                 status="failed",
-                result={
-                    "ok": False,
-                    "summary": f"行动失败：{exc}",
-                    "data": {},
-                    "error": str(exc),
-                },
+                result=_failure_result(f"行动失败：{exc}", str(exc), transport=action.executor),
             )
             return
         # noinspection PyBroadException
@@ -360,12 +335,8 @@ class ActionManager:
             self._force_fail_action(action_id, f"行动收尾失败：{exc}")
 
     def _force_fail_action(self, action_id: str, summary: str) -> None:
-        fallback_result = {
-            "ok": False,
-            "summary": summary,
-            "data": {},
-            "error": summary,
-        }
+        action = self._get_action(action_id)
+        fallback_result = _failure_result(summary, summary, transport=action.executor)
         try:
             self._finalize_action(action_id, status="failed", result=fallback_result)
             return
@@ -426,10 +397,12 @@ class ActionManager:
         if status != "succeeded" or action.type != "news" or not bool(result.get("ok", True)):
             return status, result, True
         if not _is_structured_news_result(result):
-            malformed = dict(result)
-            malformed["ok"] = False
-            malformed["summary"] = "新闻结果缺少结构化 RSS 条目"
-            malformed["error"] = "malformed_news_result"
+            malformed = _copy_action_result(
+                result,
+                ok=False,
+                summary="新闻结果缺少结构化 RSS 条目",
+                error="malformed_news_result",
+            )
             return "failed", malformed, True
         deduped_result, should_emit = self._dedupe_news_result(result)
         if not bool(deduped_result.get("ok", True)):
@@ -471,8 +444,7 @@ class ActionManager:
             "dropped_items": max(total_items - len(new_items), 0),
             "invalid_items": invalid_items,
         }
-        deduped_result = dict(result)
-        deduped_result["data"] = deduped_data
+        deduped_result = _copy_action_result(result, data=deduped_data)
         if invalid_items and not new_items:
             deduped_result["ok"] = False
             deduped_result["summary"] = "新闻条目缺少可识别字段"
@@ -886,29 +858,29 @@ def _fallback_plan(
 def _run_native_action(action: ActionRecord) -> ActionResultEnvelope:
     if action.type == "get_time":
         now = datetime.now().astimezone()
-        return {
-            "ok": True,
-            "summary": now.strftime("%Y-%m-%d %H:%M:%S %Z"),
-            "data": {
+        return _build_action_result(
+            ok=True,
+            summary=now.strftime("%Y-%m-%d %H:%M:%S %Z"),
+            data={
                 "local_iso": now.isoformat(),
                 "utc_iso": datetime.now(timezone.utc).isoformat(),
             },
-            "error": None,
-            "run_id": None,
-            "session_key": None,
-            "transport": "native",
-        }
+            error=None,
+            run_id=None,
+            session_key=None,
+            transport="native",
+        )
     if action.type == "get_system_status":
         snapshot = collect_system_status_snapshot()
-        return {
-            "ok": True,
-            "summary": str(snapshot.get("summary") or "系统状态已更新"),
-            "data": snapshot,
-            "error": None,
-            "run_id": None,
-            "session_key": None,
-            "transport": "native",
-        }
+        return _build_action_result(
+            ok=True,
+            summary=str(snapshot.get("summary") or "系统状态已更新"),
+            data=dict(snapshot),
+            error=None,
+            run_id=None,
+            session_key=None,
+            transport="native",
+        )
     raise RuntimeError(f"不支持的 native action: {action.type}")
 
 
@@ -984,6 +956,66 @@ def _read_env(name: str) -> str:
     return os.environ.get(name, "")
 
 
+def _build_action_result(
+    *,
+    ok: bool,
+    summary: str,
+    data: JsonObject,
+    error,
+    run_id: str | None,
+    session_key: str | None,
+    transport: str,
+    raw_text: str | None = None,
+) -> ActionResultEnvelope:
+    result: ActionResultEnvelope = {
+        "ok": ok,
+        "summary": summary,
+        "data": data,
+        "error": error,
+        "run_id": run_id,
+        "session_key": session_key,
+        "transport": transport,
+    }
+    if raw_text is not None:
+        result["raw_text"] = raw_text
+    return result
+
+
+def _failure_result(summary: str, error, *, transport: str) -> ActionResultEnvelope:
+    return _build_action_result(
+        ok=False,
+        summary=summary,
+        data={},
+        error=error,
+        run_id=None,
+        session_key=None,
+        transport=transport,
+    )
+
+
+def _copy_action_result(
+    result: ActionResultEnvelope,
+    *,
+    ok: bool | None = None,
+    summary: str | None = None,
+    data: JsonObject | None = None,
+    error=None,
+) -> ActionResultEnvelope:
+    copied = _build_action_result(
+        ok=bool(result.get("ok", True)) if ok is None else ok,
+        summary=str(result.get("summary") or "") if summary is None else summary,
+        data=result.get("data") if isinstance(result.get("data"), dict) else {} if data is None else data,
+        error=result.get("error") if error is None else error,
+        run_id=result.get("run_id") if isinstance(result.get("run_id"), str) else None,
+        session_key=result.get("session_key") if isinstance(result.get("session_key"), str) else None,
+        transport=str(result.get("transport") or ""),
+        raw_text=result.get("raw_text") if isinstance(result.get("raw_text"), str) else None,
+    )
+    if data is not None:
+        copied["data"] = data
+    return copied
+
+
 def _action_to_dict(action: ActionRecord) -> dict:
     payload = asdict(action)
     payload["submitted_at"] = action.submitted_at.isoformat()
@@ -993,20 +1025,21 @@ def _action_to_dict(action: ActionRecord) -> dict:
 def _normalize_action_result(result: ActionResultEnvelope, action: ActionRecord) -> ActionResultEnvelope:
     summary = str(result.get("summary") or "行动完成")
     data = result.get("data")
-    return {
-        "ok": bool(result.get("ok", True)),
-        "summary": summary,
-        "data": data if isinstance(data, dict) else {},
-        "error": result.get("error"),
-        "run_id": result.get("run_id") if isinstance(result.get("run_id"), str) else action.run_id,
-        "session_key": (
+    raw_text = result.get("raw_text")
+    return _build_action_result(
+        ok=bool(result.get("ok", True)),
+        summary=summary,
+        data=data if isinstance(data, dict) else {},
+        error=result.get("error"),
+        run_id=result.get("run_id") if isinstance(result.get("run_id"), str) else action.run_id,
+        session_key=(
             result.get("session_key")
             if isinstance(result.get("session_key"), str)
             else action.session_key
         ),
-        "transport": str(result.get("transport") or action.executor),
-        "raw_text": result.get("raw_text"),
-    }
+        transport=str(result.get("transport") or action.executor),
+        raw_text=raw_text if isinstance(raw_text, str) else None,
+    )
 
 
 def _is_structured_news_result(result: ActionResultEnvelope) -> bool:
@@ -1015,11 +1048,18 @@ def _is_structured_news_result(result: ActionResultEnvelope) -> bool:
 
 
 def _normalize_news_item(item: JsonObject) -> NewsItem:
-    normalized = dict(item)
-    for key in ("feed_url", "guid", "link", "title", "published_at", "summary"):
-        value = normalized.get(key)
-        normalized[key] = str(value).strip() if value is not None else ""
-    return normalized
+    return {
+        "feed_url": _stringify_json_field(item.get("feed_url")),
+        "guid": _stringify_json_field(item.get("guid")),
+        "link": _stringify_json_field(item.get("link")),
+        "title": _stringify_json_field(item.get("title")),
+        "published_at": _stringify_json_field(item.get("published_at")),
+        "summary": _stringify_json_field(item.get("summary")),
+    }
+
+
+def _stringify_json_field(value) -> str:
+    return str(value).strip() if value is not None else ""
 
 
 def _news_item_key(item: NewsItem) -> str | None:

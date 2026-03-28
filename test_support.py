@@ -28,5 +28,5 @@ class ListRedisStub:
     def ltrim(self, key, start, end):
         self.lists[key] = slice_window(self.lists.get(key, []), start, end)
 
-    def publish(self, channel, payload):
+    def publish(self, _channel, _payload):
         return None

@@ -28,7 +28,7 @@ from core.perception import PerceptionManager
 from core.runtime import connect_redis_from_env, load_yaml_config
 from core.stimulus import Stimulus, StimulusQueue, append_conversation_history
 from core.thought_parser import Thought
-from core.types import EventPayload, PerceptionStimulusPayload
+from core.types import EventPayload, PerceptionStimulusPayload, ReplyEventPayload, StatusEventPayload
 
 # Terminal colors
 C_RESET = "\033[0m"
@@ -140,7 +140,7 @@ def main() -> None:
     _output(log_file, f"Redis: {'已连接' if redis_client else '未连接（使用内存）'}")
     _output(log_file, f"PostgreSQL: {'已连接' if pg_conn else '未连接（跳过长期记忆）'}")
     _output(log_file, "─" * 60)
-    _publish_event(redis_client, "status", {"message": "core_started"})
+    _publish_event(redis_client, "status", _status_payload("core_started"))
 
     cycle_id = 0
     current_retry_delay = retry_delay
@@ -162,13 +162,13 @@ def main() -> None:
         ):
             stimulus_queue.attach_redis(stm.redis_client)
             action_manager.attach_redis(stm.redis_client)
-            _publish_event(stm.redis_client, "status", {"message": "redis_recovered"})
+            _publish_event(stm.redis_client, "status", _status_payload("redis_recovered"))
         identity, last_pg_reconnect = _maybe_reconnect_pg(
             log_file, ltm, identity, bootstrap_identity,
             now, last_pg_reconnect, reconnect_interval,
         )
         if not had_pg and ltm.available:
-            _publish_event(stm.redis_client, "status", {"message": "postgres_recovered"})
+            _publish_event(stm.redis_client, "status", _status_payload("postgres_recovered"))
 
         _push_passive_stimuli(stimulus_queue, perception.collect_passive_stimuli(cycle_id))
         controls = pop_action_controls(stm.redis_client)
@@ -385,11 +385,11 @@ def _publish_reply_event(redis_client, stimuli: list[Stimulus], thoughts: list[T
         content=reply,
         stimulus_id=conversation.stimulus_id,
     )
-    _publish_event(redis_client, "reply", {
-        "source": conversation.source,
-        "message": reply,
-        "stimulus_id": conversation.stimulus_id,
-    })
+    _publish_event(redis_client, "reply", _reply_payload(
+        source=conversation.source,
+        message=reply,
+        stimulus_id=conversation.stimulus_id,
+    ))
 
 
 def _push_passive_stimuli(stimulus_queue: StimulusQueue, stimuli: list[PerceptionStimulusPayload]) -> None:
@@ -431,6 +431,18 @@ def _publish_event(redis_client, event_type: str, payload: EventPayload) -> None
         return
 
 
+def _status_payload(message: str) -> StatusEventPayload:
+    return {"message": message}
+
+
+def _reply_payload(*, source: str, message: str, stimulus_id: str | None) -> ReplyEventPayload:
+    return {
+        "source": source,
+        "message": message,
+        "stimulus_id": stimulus_id,
+    }
+
+
 def _select_reply_text(thoughts: list[Thought]) -> str | None:
     reactive = next((thought for thought in thoughts if thought.type == "反应"), None)
     if reactive:
@@ -466,6 +478,7 @@ def _open_log(path: str | None):
 
 def _install_signal_handler(log_file, action_manager) -> None:
     def handler(sig, frame):
+        _ = sig, frame
         print(f"\n\n{C_DIM}心相续止息。{C_RESET}")
         action_manager.shutdown()
         if log_file:
