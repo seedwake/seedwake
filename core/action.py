@@ -130,6 +130,11 @@ class ActionManager:
         self._news_seen_shadow: dict[str, float] = {}
         self._perception_observations: list[str] = []
         self._futures: set[Future] = set()
+        if self._redis is not None:
+            try:
+                self._restore_from_redis()
+            except ACTION_REDIS_EXCEPTIONS:
+                self._redis = None
 
     def submit_from_thoughts(self, thoughts: list[Thought]) -> list[ActionRecord]:
         created: list[ActionRecord] = []
@@ -239,6 +244,7 @@ class ActionManager:
     def attach_redis(self, redis_client) -> bool:
         self._redis = redis_client
         try:
+            self._restore_from_redis()
             self._sync_to_redis()
         except ACTION_REDIS_EXCEPTIONS:
             self._redis = None
@@ -269,11 +275,13 @@ class ActionManager:
                 action.action_id
                 for action in self._actions.values()
                 if (
-                    action.executor == "openclaw"
-                    and action.status == "pending"
+                    action.status == "pending"
                     and not action.awaiting_confirmation
-                    and action.retry_after is not None
-                    and action.retry_after <= now
+                    and (
+                        action.executor == "native"
+                        or action.retry_after is None
+                        or action.retry_after <= now
+                    )
                 )
             ]
         for action_id in retry_ids:
@@ -629,6 +637,17 @@ class ActionManager:
             payload = json.dumps(_action_to_dict(action), ensure_ascii=False)
             self._redis.hset(ACTION_REDIS_KEY, action.action_id, payload)
         self._sync_news_seen_to_redis(seen_items)
+
+    def _restore_from_redis(self) -> None:
+        now = datetime.now(timezone.utc)
+        for item in load_action_items(self._redis):
+            action = _action_from_json_object(item, now=now)
+            if action is None:
+                continue
+            with self._lock:
+                if action.action_id in self._actions:
+                    continue
+                self._actions[action.action_id] = action
 
     def _sync_news_seen_to_redis(self, seen_items: dict[str, float]) -> None:
         if not seen_items:
@@ -1337,6 +1356,30 @@ def push_action_control(
     return True
 
 
+def load_action_items(redis_client) -> list[JsonObject]:
+    if redis_client is None:
+        return []
+    try:
+        raw_items = redis_client.hvals(ACTION_REDIS_KEY)
+    except AttributeError:
+        try:
+            raw_items = list(redis_client.hgetall(ACTION_REDIS_KEY).values())
+        except AttributeError:
+            return []
+    items = []
+    for raw in raw_items:
+        try:
+            item = json.loads(raw)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            logger.warning("skipping malformed action record: %s", exc)
+            continue
+        if not isinstance(item, dict):
+            logger.warning("skipping non-object action record")
+            continue
+        items.append(item)
+    return items
+
+
 def pop_action_controls(redis_client, limit: int = 20) -> list[ActionControl]:
     if redis_client is None or limit <= 0:
         return []
@@ -1363,3 +1406,73 @@ def pop_action_controls(redis_client, limit: int = 20) -> list[ActionControl]:
         except ACTION_REDIS_EXCEPTIONS:
             return controls
     return controls
+
+
+def _action_from_json_object(item: JsonObject, *, now: datetime) -> ActionRecord | None:
+    action_id = _stringify_json_field(item.get("action_id"))
+    action_type = _stringify_json_field(item.get("type"))
+    executor = _stringify_json_field(item.get("executor"))
+    source_thought_id = _stringify_json_field(item.get("source_thought_id"))
+    source_content = _stringify_json_field(item.get("source_content"))
+    status = _stringify_json_field(item.get("status")) or "pending"
+    request = item.get("request")
+    if not (
+        action_id
+        and action_type
+        and executor
+        and source_thought_id
+        and source_content
+        and isinstance(request, dict)
+    ):
+        logger.warning("skipping incomplete action record: %s", action_id or "<unknown>")
+        return None
+    awaiting_confirmation = bool(item.get("awaiting_confirmation"))
+    if status not in {"pending", "running"} and not awaiting_confirmation:
+        return None
+
+    request_payload = _coerce_action_request_payload(request, source_content)
+    submitted_at = _parse_action_datetime(item.get("submitted_at")) or now
+    restored_status = "pending" if status == "running" else status
+    action = ActionRecord(
+        action_id=action_id,
+        type=action_type,
+        request=request_payload,
+        executor=executor,
+        status=restored_status,
+        source_thought_id=source_thought_id,
+        source_content=source_content,
+        submitted_at=submitted_at,
+        timeout_seconds=_clamp_timeout(item.get("timeout_seconds"), 300),
+        run_id=_stringify_json_field(item.get("run_id")) or None,
+        session_key=_stringify_json_field(item.get("session_key")) or None,
+        awaiting_confirmation=awaiting_confirmation,
+        retry_after=_parse_action_datetime(item.get("retry_after")),
+    )
+    result = item.get("result")
+    if isinstance(result, dict):
+        action.result = _normalize_action_result(result, action)
+    if action.status == "pending" and not action.awaiting_confirmation and action.executor == "openclaw":
+        action.retry_after = action.retry_after or now
+    return action
+
+
+def _coerce_action_request_payload(value: JsonObject, source_content: str) -> ActionRequestPayload:
+    raw_action = value.get("raw_action")
+    payload: ActionRequestPayload = {
+        "task": _stringify_json_field(value.get("task")) or source_content,
+        "reason": _stringify_json_field(value.get("reason")) or "restored",
+        "raw_action": raw_action if isinstance(raw_action, dict) else None,
+    }
+    news_feed_urls = _coerce_news_feed_urls(value.get("news_feed_urls"))
+    if news_feed_urls:
+        payload["news_feed_urls"] = news_feed_urls
+    return payload
+
+
+def _parse_action_datetime(value) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None

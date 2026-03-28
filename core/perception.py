@@ -1,5 +1,6 @@
 """Perception helpers for passive sensing and proactive cues."""
 
+import logging
 import os
 import shutil
 from dataclasses import dataclass
@@ -11,6 +12,9 @@ from core.types import MemorySnapshot, PerceptionStimulusPayload, SystemStatusSn
 
 if TYPE_CHECKING:
     from core.action import ActionRecord
+
+logger = logging.getLogger(__name__)
+_LOADAVG_WARNING_EMITTED = False
 
 
 @dataclass
@@ -165,12 +169,15 @@ def collect_system_status_snapshot(
     warn_memory_ratio: float = 0.9,
     warn_disk_ratio: float = 0.9,
 ) -> SystemStatusSnapshot:
+    global _LOADAVG_WARNING_EMITTED
     cpu_count = os.cpu_count() or 1
     load_1m = load_5m = load_15m = 0.0
     try:
         load_1m, load_5m, load_15m = os.getloadavg()
-    except OSError:
-        pass
+    except OSError as exc:
+        if not _LOADAVG_WARNING_EMITTED:
+            logger.warning("os.getloadavg unavailable; using zero load snapshot: %s", exc)
+            _LOADAVG_WARNING_EMITTED = True
 
     disk = shutil.disk_usage("/")
     disk_used_ratio = 0.0 if disk.total <= 0 else disk.used / disk.total

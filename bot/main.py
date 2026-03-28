@@ -25,7 +25,7 @@ from bot.helpers import (
     format_status_event,
     load_allowed_user_ids,
 )
-from core.action import ACTION_REDIS_KEY, push_action_control
+from core.action import load_action_items, push_action_control
 from core.logging import setup_logging
 from core.runtime import connect_redis_from_env, load_yaml_config
 from core.stimulus import StimulusQueue
@@ -451,12 +451,9 @@ def _load_actions(redis_client) -> list[JsonObject]:
     if redis_client is None:
         return []
     try:
-        raw_items = redis_client.hvals(ACTION_REDIS_KEY)
-    except AttributeError:
-        raw_items = list(redis_client.hgetall(ACTION_REDIS_KEY).values())
+        return load_action_items(redis_client)
     except BOT_REDIS_EXCEPTIONS as exc:
         raise RuntimeError("redis unavailable") from exc
-    return [json.loads(item) for item in raw_items]
 
 
 async def _safe_send_message(

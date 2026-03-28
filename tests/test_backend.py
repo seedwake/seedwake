@@ -253,3 +253,25 @@ class BackendTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["count"], 1)
         self.assertEqual(body["items"][0]["action_id"], "act_1")
+
+    def test_actions_query_skips_malformed_action_record(self) -> None:
+        self.redis.hset("seedwake:actions", "bad", "{bad json")
+        self.redis.hset(
+            "seedwake:actions",
+            "act_1",
+            json.dumps({
+                "action_id": "act_1",
+                "status": "running",
+                "submitted_at": "2026-03-27T12:00:00+00:00",
+            }),
+        )
+
+        response = self.client.get(
+            "/api/actions",
+            headers={"Authorization": "Bearer token_alice"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["items"][0]["action_id"], "act_1")

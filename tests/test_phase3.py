@@ -1,3 +1,4 @@
+import json
 import unittest
 from threading import Barrier
 from unittest.mock import MagicMock, patch
@@ -208,6 +209,36 @@ def _assert_single_news_stimulus(
         test_case.assertIn(expected_text, stimuli[0].content)
 
 
+def _stored_action_payload(
+    *,
+    action_id: str = "act_C1-1",
+    action_type: str = "search",
+    executor: str = "openclaw",
+    status: str = "pending",
+    awaiting_confirmation: bool = False,
+) -> str:
+    return json.dumps({
+        "action_id": action_id,
+        "type": action_type,
+        "request": {
+            "task": "搜索资料",
+            "reason": "测试",
+            "raw_action": {"type": action_type, "params": 'query:"Seedwake"'},
+        },
+        "executor": executor,
+        "status": status,
+        "source_thought_id": "C1-1",
+        "source_content": "我想搜一下 Seedwake",
+        "submitted_at": "2026-03-27T12:00:00+00:00",
+        "timeout_seconds": 30,
+        "result": None,
+        "run_id": None,
+        "session_key": "seedwake:action:act_C1-1",
+        "awaiting_confirmation": awaiting_confirmation,
+        "retry_after": None,
+    }, ensure_ascii=False)
+
+
 class _RedisNewsSeenStub:
     def __init__(self):
         self.hashes = {}
@@ -215,6 +246,12 @@ class _RedisNewsSeenStub:
 
     def hset(self, key, field, value):
         self.hashes.setdefault(key, {})[field] = value
+
+    def hvals(self, key):
+        return list(self.hashes.get(key, {}).values())
+
+    def hgetall(self, key):
+        return dict(self.hashes.get(key, {}))
 
     def zscore(self, key, member):
         return self.sorted_sets.get(key, {}).get(member)
@@ -616,6 +653,33 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(created[0].status, "pending")
         self.assertIsNotNone(created[0].retry_after)
         self.assertEqual(queue.pop_many(limit=5), [])
+
+    def test_restored_confirmation_action_can_be_approved_after_restart(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        redis_stub = _RedisNewsSeenStub()
+        redis_stub.hset("seedwake:actions", "act_C1-1", _stored_action_payload(awaiting_confirmation=True))
+        executor = _OpenClawExecutor()
+        manager = ActionManager(
+            redis_client=redis_stub,
+            stimulus_queue=queue,
+            planner=_Planner(None),
+            openclaw_executor=executor,
+            auto_execute=[],
+            require_confirmation=["search"],
+            forbidden=[],
+        )
+
+        try:
+            manager.apply_controls([
+                _action_control("act_C1-1", approved=True, actor="alice", note=""),
+            ])
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(executor.calls, ["act_C1-1"])
+        stimulus = queue.pop_many(limit=1)[0]
+        self.assertEqual(stimulus.type, "action_result")
 
     def test_openclaw_action_generates_action_result_stimulus(self) -> None:
         queue = StimulusQueue(redis_client=None)

@@ -7,7 +7,7 @@ import redis as redis_lib
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from backend.deps import require_redis, resolve_admin
-from core.action import ACTION_REDIS_KEY
+from core.action import load_action_items
 from core.memory.short_term import REDIS_KEY as THOUGHT_REDIS_KEY
 from core.types import ActionsResponse, JsonObject, ThoughtsResponse
 
@@ -71,9 +71,6 @@ def list_actions(
 
 def _load_action_items(redis_client) -> list[JsonObject]:
     try:
-        raw_items = redis_client.hvals(ACTION_REDIS_KEY)
-    except AttributeError:
-        raw_items = list(redis_client.hgetall(ACTION_REDIS_KEY).values())
+        return load_action_items(redis_client)
     except REDIS_ROUTE_EXCEPTIONS as exc:
         raise HTTPException(status_code=503, detail=f"redis read failed: {exc}") from exc
-    return [json.loads(item) for item in raw_items]

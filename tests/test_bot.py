@@ -251,6 +251,24 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         reply_mock.assert_awaited_once()
         self.assertIn("act_1", reply_mock.await_args.args[0])
 
+    async def test_handle_actions_skips_malformed_action_record(self) -> None:
+        redis_client = FakeRedis()
+        redis_client.hset("seedwake:actions", "bad", "{bad json")
+        redis_client.hset(
+            "seedwake:actions",
+            "act_1",
+            ('{"action_id":"act_1","type":"search","executor":"openclaw","status":"running",'
+             '"submitted_at":"2026-03-27T00:00:00+00:00"}'),
+        )
+        update = _make_update()
+        context = _make_context(redis_client, allowed_user_ids={1})
+
+        await _handle_actions(update, context)
+
+        reply_mock = _reply_text_mock(update)
+        reply_mock.assert_awaited_once()
+        self.assertIn("act_1", reply_mock.await_args.args[0])
+
     async def test_handle_actions_marks_redis_unavailable_on_read_error(self) -> None:
         class FailingRedis(FakeRedis):
             def hvals(self, key):

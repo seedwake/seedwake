@@ -5,7 +5,11 @@ On subsequent runs, loads from PostgreSQL (which may have evolved).
 Falls back to config bootstrap when PostgreSQL is unavailable or broken.
 """
 
+import logging
+
 import psycopg
+
+logger = logging.getLogger(__name__)
 
 
 def load_identity(pg_conn, bootstrap: dict[str, str]) -> dict[str, str]:
@@ -34,7 +38,8 @@ def _read_from_db(conn) -> dict[str, str]:
             cur.execute("SELECT section, content FROM identity ORDER BY id")
             rows = cur.fetchall()
         return dict(rows) if rows else {}
-    except psycopg.Error:
+    except psycopg.Error as exc:
+        logger.warning("identity read failed, falling back to bootstrap: %s", exc)
         conn.rollback()
         return {}
 
@@ -53,5 +58,6 @@ def _bootstrap_to_db(conn, bootstrap: dict[str, str]) -> None:
                     (section, content.strip()),
                 )
         conn.commit()
-    except psycopg.Error:
+    except psycopg.Error as exc:
+        logger.warning("identity bootstrap write failed: %s", exc)
         conn.rollback()
