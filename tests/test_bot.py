@@ -42,6 +42,25 @@ class FakeRedis:
         return list(self.hashes.get(key, {}).values())
 
 
+class FakeTelegramMessage(SimpleNamespace):
+    text: str
+    reply_text: AsyncMock
+
+
+class FakeTelegramBot(SimpleNamespace):
+    send_message: AsyncMock
+
+
+class FakeTelegramApplication(SimpleNamespace):
+    bot_data: dict
+    bot: FakeTelegramBot
+
+
+class FakeTelegramContext(SimpleNamespace):
+    application: FakeTelegramApplication
+    args: list[str]
+
+
 def _as_update(value: object) -> Update:
     return cast(Update, value)
 
@@ -56,12 +75,14 @@ def _as_context(value: object) -> ContextTypes.DEFAULT_TYPE:
 
 def _reply_text_mock(update: Update) -> AsyncMock:
     message = update.effective_message
-    assert message is not None
-    return cast(AsyncMock, cast(object, message.reply_text))
+    assert isinstance(message, FakeTelegramMessage)
+    return message.reply_text
 
 
 def _send_message_mock(context: ContextTypes.DEFAULT_TYPE) -> AsyncMock:
-    return cast(AsyncMock, cast(object, context.application.bot.send_message))
+    application = context.application
+    assert isinstance(application, FakeTelegramApplication)
+    return application.bot.send_message
 
 
 def _make_update(
@@ -71,7 +92,7 @@ def _make_update(
     text: str = "你好",
     username: str = "alice",
  ) -> Update:
-    message = SimpleNamespace(
+    message = FakeTelegramMessage(
         text=text,
         reply_text=AsyncMock(),
     )
@@ -88,15 +109,15 @@ def _make_update(
 
 
 def _make_context(redis_client=None, *, allowed_user_ids=None, args=None) -> ContextTypes.DEFAULT_TYPE:
-    application = _as_application(SimpleNamespace(
+    application = FakeTelegramApplication(
         bot_data={
             "redis": redis_client,
             "allowed_user_ids": set(allowed_user_ids or {1}),
             "notification_user_ids": list(allowed_user_ids or {1}),
         },
-        bot=SimpleNamespace(send_message=AsyncMock()),
-    ))
-    return _as_context(SimpleNamespace(application=application, args=args or []))
+        bot=FakeTelegramBot(send_message=AsyncMock()),
+    )
+    return _as_context(FakeTelegramContext(application=application, args=args or []))
 
 
 def _reply_envelope(source: str, message: str) -> EventEnvelope:
