@@ -2,12 +2,8 @@
 
 import asyncio
 import json
-import os
 from contextlib import suppress
-from pathlib import Path
 
-import redis as redis_lib
-import yaml
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -21,7 +17,15 @@ from telegram.ext import (
 )
 
 from core.action import ACTION_REDIS_KEY, push_action_control
+from core.runtime import connect_redis_from_env, load_yaml_config
 from core.stimulus import StimulusQueue
+from core.types import (
+    ActionEventPayload,
+    AuthorizedTelegramUser,
+    EventEnvelope,
+    JsonObject,
+    StatusEventPayload,
+)
 
 EVENT_CHANNEL = "seedwake:events"
 REDIS_RECONNECT_DELAY_SECONDS = 2.0
@@ -34,8 +38,8 @@ def main() -> None:
 
 def create_application(config: dict | None = None, redis_client=None) -> Application:
     load_dotenv()
-    cfg = config or _load_config("config.yml")
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    cfg = config or load_yaml_config("config.yml")
+    token = _read_env("TELEGRAM_BOT_TOKEN").strip()
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN 未配置")
 
@@ -64,7 +68,7 @@ def create_application(config: dict | None = None, redis_client=None) -> Applica
     )
     application.bot_data.update({
         "config": cfg,
-        "redis": redis_client if redis_client is not None else _connect_redis(),
+        "redis": redis_client if redis_client is not None else connect_redis_from_env(),
         "allowed_user_ids": allowed_user_ids,
         "notification_user_ids": allowed_user_ids,
     })
@@ -241,7 +245,7 @@ async def _forward_events(application: Application) -> None:
                     await asyncio.to_thread(pubsub.close)
 
 
-async def _dispatch_event(application: Application, envelope: dict[str, object]) -> None:
+async def _dispatch_event(application: Application, envelope: EventEnvelope) -> None:
     event_type = str(envelope.get("type") or "")
     payload = envelope.get("payload")
     if not isinstance(payload, dict):
@@ -263,7 +267,7 @@ async def _dispatch_event(application: Application, envelope: dict[str, object])
         await _broadcast_text(application, text)
 
 
-async def _broadcast_action_event(application: Application, payload: dict[str, object]) -> None:
+async def _broadcast_action_event(application: Application, payload: ActionEventPayload) -> None:
     text = _format_action_event(payload)
     if not text:
         return
@@ -315,7 +319,7 @@ async def _handle_control_command(
 async def _ensure_authorized(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-) -> dict[str, object] | None:
+) -> AuthorizedTelegramUser | None:
     user = update.effective_user
     chat = update.effective_chat
     if user is None or chat is None:
@@ -342,40 +346,23 @@ async def _reply_text(update: Update, text: str) -> None:
     await message.reply_text(text)
 
 
-def _load_config(path: str) -> dict:
-    config_path = Path(path)
-    if not config_path.exists():
-        return {}
-    with open(config_path, encoding="utf-8") as file:
-        return yaml.safe_load(file) or {}
-
-
-def _connect_redis():
-    try:
-        client = redis_lib.Redis(
-            host=os.environ.get("REDIS_HOST", "localhost"),
-            port=int(os.environ.get("REDIS_PORT", "6379")),
-            decode_responses=True,
-            socket_connect_timeout=1.0,
-            socket_timeout=1.0,
-        )
-        client.ping()
-        return client
-    except Exception:
-        return None
-
-
 def _ensure_redis_client(application: Application):
     redis_client = application.bot_data.get("redis")
     if redis_client is not None:
         return redis_client
-    redis_client = _connect_redis()
+    redis_client = connect_redis_from_env()
     application.bot_data["redis"] = redis_client
     return redis_client
 
 
 def _mark_redis_unavailable(application: Application) -> None:
     application.bot_data["redis"] = None
+
+
+def _read_env(name: str) -> str:
+    import os
+
+    return os.environ.get(name, "")
 
 
 def _load_allowed_user_ids(config: dict) -> list[int]:
@@ -405,7 +392,7 @@ def _extract_telegram_chat_id(source: str) -> int | None:
         return None
 
 
-def _load_actions(redis_client) -> list[dict[str, object]]:
+def _load_actions(redis_client) -> list[JsonObject]:
     if redis_client is None:
         return []
     try:
@@ -431,7 +418,7 @@ async def _safe_send_message(
     return True
 
 
-def _format_action_event(payload: dict[str, object]) -> str:
+def _format_action_event(payload: ActionEventPayload) -> str:
     action_id = str(payload.get("action_id") or "").strip()
     action_type = str(payload.get("type") or "").strip()
     executor = str(payload.get("executor") or "").strip()
@@ -447,7 +434,7 @@ def _format_action_event(payload: dict[str, object]) -> str:
     ).strip()
 
 
-def _format_status_event(payload: dict[str, object]) -> str:
+def _format_status_event(payload: StatusEventPayload) -> str:
     message = str(payload.get("message") or "").strip()
     if not message:
         return ""

@@ -5,6 +5,8 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from core.types import MemorySnapshot, PerceptionStimulusPayload, SystemStatusSnapshot
+
 
 @dataclass
 class PerceptionConfig:
@@ -44,8 +46,8 @@ class PerceptionManager:
             default_weather_location=str(cfg.get("default_weather_location", "")).strip(),
         ))
 
-    def collect_passive_stimuli(self, cycle_id: int) -> list[dict[str, object]]:
-        stimuli = []
+    def collect_passive_stimuli(self, cycle_id: int) -> list[PerceptionStimulusPayload]:
+        stimuli: list[PerceptionStimulusPayload] = []
 
         if self._is_due("time", cycle_id, self._config.passive_time_interval_cycles):
             now = datetime.now().astimezone()
@@ -156,7 +158,7 @@ def collect_system_status_snapshot(
     warn_load_ratio: float = 1.0,
     warn_memory_ratio: float = 0.9,
     warn_disk_ratio: float = 0.9,
-) -> dict[str, object]:
+) -> SystemStatusSnapshot:
     cpu_count = os.cpu_count() or 1
     load_1m = load_5m = load_15m = 0.0
     try:
@@ -208,7 +210,7 @@ def collect_system_status_snapshot(
     }
 
 
-def _read_memory_snapshot() -> dict[str, float] | None:
+def _read_memory_snapshot() -> MemorySnapshot | None:
     meminfo_path = "/proc/meminfo"
     if not os.path.exists(meminfo_path):
         return None

@@ -9,6 +9,7 @@ from backend.main import create_app
 from backend.routes.stream import stream_events
 from core.action import ACTION_CONTROL_KEY
 from core.stimulus import CONVERSATION_HISTORY_KEY
+from test_support import slice_window
 
 
 async def _read_first_stream_chunk(iterator) -> str | bytes:
@@ -53,31 +54,16 @@ class FakeRedis:
         return items.pop(0)
 
     def lrange(self, key, start, end):
-        items = self.lists.get(key, [])
-        if start < 0:
-            start = max(len(items) + start, 0)
-        if end < 0:
-            end = len(items) + end
-        return items[start:end + 1]
+        return slice_window(self.lists.get(key, []), start, end)
 
     def ltrim(self, key, start, end):
-        items = self.lists.get(key, [])
-        if start < 0:
-            start = max(len(items) + start, 0)
-        if end < 0:
-            end = len(items) + end
-        self.lists[key] = items[start:end + 1]
+        self.lists[key] = slice_window(self.lists.get(key, []), start, end)
 
     def publish(self, channel, payload):
         self.messages.append((channel, payload))
 
     def zrange(self, key, start, end):
-        items = self.sorted_sets.get(key, [])
-        if start < 0:
-            start = max(len(items) + start, 0)
-        if end < 0:
-            end = len(items) + end
-        return items[start:end + 1]
+        return slice_window(self.sorted_sets.get(key, []), start, end)
 
     def hset(self, key, field, value):
         self.hashes.setdefault(key, {})[field] = value

@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from core.types import RawActionRequest
 
 THOUGHT_HEADER_PATTERN = re.compile(
     r"^\[(?P<type>思考|意图|反应)(?:-C\d+-\d+)?]\s*(?P<content>.*)$",
@@ -22,7 +23,7 @@ class Thought:
     type: str
     content: str
     trigger_ref: str | None = None
-    action_request: dict | None = None
+    action_request: RawActionRequest | None = None
     attention_weight: float = 0.0
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -67,7 +68,7 @@ def fallback_thought(raw_output: str, cycle_id: int) -> Thought:
     return _make_thought(cycle_id, 1, "思考", _clip_text(raw_output))
 
 
-def _parse_action(content: str) -> dict | None:
+def _parse_action(content: str) -> RawActionRequest | None:
     m = ACTION_PATTERN.search(content)
     if not m:
         return None

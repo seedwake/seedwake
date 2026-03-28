@@ -1,4 +1,3 @@
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -15,6 +14,7 @@ from bot.main import (
 )
 from core.action import ACTION_CONTROL_KEY
 from core.stimulus import CONVERSATION_HISTORY_KEY, REDIS_KEY as STIMULUS_REDIS_KEY
+from test_support import slice_window
 
 
 class FakeRedis:
@@ -26,12 +26,7 @@ class FakeRedis:
         self.lists.setdefault(key, []).append(value)
 
     def ltrim(self, key, start, end):
-        items = self.lists.get(key, [])
-        if start < 0:
-            start = max(len(items) + start, 0)
-        if end < 0:
-            end = len(items) + end
-        self.lists[key] = items[start:end + 1]
+        self.lists[key] = slice_window(self.lists.get(key, []), start, end)
 
     def hset(self, key, field, value):
         self.hashes.setdefault(key, {})[field] = value
@@ -198,7 +193,8 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         redis_client.hset(
             "seedwake:actions",
             "act_1",
-            '{"action_id":"act_1","type":"search","executor":"openclaw","status":"running","submitted_at":"2026-03-27T00:00:00+00:00"}',
+            ('{"action_id":"act_1","type":"search","executor":"openclaw","status":"running",'
+             '"submitted_at":"2026-03-27T00:00:00+00:00"}'),
         )
         update = _make_update()
         context = _make_context(redis_client, allowed_user_ids={1})
@@ -240,7 +236,7 @@ class TelegramBotRedisRecoveryTests(unittest.TestCase):
         redis_client = FakeRedis()
         application = SimpleNamespace(bot_data={"redis": None})
 
-        with patch("bot.main._connect_redis", return_value=redis_client):
+        with patch("bot.main.connect_redis_from_env", return_value=redis_client):
             recovered = _ensure_redis_client(application)
 
         self.assertIs(recovered, redis_client)

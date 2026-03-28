@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from core.types import ConversationEntry, JsonObject, StimulusRecord
+
 REDIS_KEY = "seedwake:stimuli"
 CONVERSATION_HISTORY_KEY = "seedwake:conversation_history"
 CONVERSATION_HISTORY_LIMIT = 500
@@ -20,7 +22,7 @@ class Stimulus:
     content: str
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     action_id: str | None = None
-    metadata: dict[str, object] = field(default_factory=dict)
+    metadata: JsonObject = field(default_factory=dict)
 
 
 class StimulusQueue:
@@ -38,7 +40,7 @@ class StimulusQueue:
         content: str,
         *,
         action_id: str | None = None,
-        metadata: dict[str, object] | None = None,
+        metadata: JsonObject | None = None,
     ) -> Stimulus:
         stimulus = Stimulus(
             stimulus_id=f"stim_{uuid4().hex}",
@@ -160,9 +162,9 @@ def append_conversation_history(
     source: str,
     content: str,
     stimulus_id: str | None = None,
-    metadata: dict[str, object] | None = None,
+    metadata: JsonObject | None = None,
     timestamp: datetime | None = None,
-) -> dict[str, object]:
+) -> ConversationEntry:
     entry = {
         "entry_id": f"conv_{uuid4().hex}",
         "role": role,
@@ -178,7 +180,7 @@ def append_conversation_history(
     return entry
 
 
-def load_conversation_history(redis_client, limit: int = 100) -> list[dict[str, object]]:
+def load_conversation_history(redis_client, limit: int = 100) -> list[ConversationEntry]:
     if redis_client is None or limit <= 0:
         return []
     raw_items = redis_client.lrange(CONVERSATION_HISTORY_KEY, -limit, -1)
@@ -193,7 +195,7 @@ def _select_ranked(items: list[Stimulus], limit: int) -> list[tuple[int, Stimulu
     return ranked[:limit]
 
 
-def _stimulus_to_dict(stimulus: Stimulus) -> dict:
+def _stimulus_to_dict(stimulus: Stimulus) -> StimulusRecord:
     return {
         "stimulus_id": stimulus.stimulus_id,
         "type": stimulus.type,
@@ -210,7 +212,7 @@ def _stimulus_to_json(stimulus: Stimulus) -> str:
     return json.dumps(_stimulus_to_dict(stimulus), ensure_ascii=False)
 
 
-def _stimulus_from_dict(data: dict) -> Stimulus:
+def _stimulus_from_dict(data: StimulusRecord) -> Stimulus:
     return Stimulus(
         stimulus_id=data["stimulus_id"],
         type=data["type"],

@@ -15,6 +15,8 @@ from core.perception import PerceptionManager
 from core.prompt_builder import build_prompt
 from core.stimulus import CONVERSATION_HISTORY_KEY, StimulusQueue
 from core.thought_parser import Thought
+from core.types import ActionResultEnvelope
+from test_support import ListRedisStub
 
 
 def _make_thought(
@@ -43,7 +45,7 @@ class _Planner:
 
 
 class _OpenClawExecutor:
-    def __init__(self, result: dict[str, object] | None = None):
+    def __init__(self, result: ActionResultEnvelope | None = None):
         self.calls = []
         self._result = result or {
             "ok": True,
@@ -56,6 +58,101 @@ class _OpenClawExecutor:
     def execute(self, action):
         self.calls.append(action.action_id)
         return self._result
+
+
+def _news_result(
+    *,
+    guid: str = "item-1",
+    title: str = "第一条",
+    link: str = "https://example.com/1",
+    published_at: str = "2026-03-27T10:00:00+00:00",
+    summary: str = "摘要 1",
+) -> ActionResultEnvelope:
+    return {
+        "ok": True,
+        "summary": "新闻已读取",
+        "data": {
+            "items": [{
+                "feed_url": "https://example.com/rss.xml",
+                "guid": guid,
+                "link": link,
+                "title": title,
+                "published_at": published_at,
+                "summary": summary,
+            }],
+        },
+        "run_id": f"run_news_{guid}",
+        "session_key": "seedwake:action:act_C1-1",
+    }
+
+
+def _build_action_manager(
+    queue: StimulusQueue,
+    planner: _Planner,
+    *,
+    redis_client=None,
+    openclaw_executor=None,
+    auto_execute=None,
+    require_confirmation=None,
+    forbidden=None,
+    news_seen_max_items: int = 5000,
+) -> ActionManager:
+    return ActionManager(
+        redis_client=redis_client,
+        stimulus_queue=queue,
+        planner=planner,
+        openclaw_executor=openclaw_executor or _OpenClawExecutor(),
+        auto_execute=auto_execute or [],
+        require_confirmation=require_confirmation or [],
+        forbidden=forbidden or [],
+        news_seen_max_items=news_seen_max_items,
+    )
+
+
+def _submit_and_shutdown(manager: ActionManager, thoughts: list[Thought]) -> list:
+    try:
+        return manager.submit_from_thoughts(thoughts)
+    finally:
+        manager.shutdown()
+
+
+def _assert_failed_news_action(
+    test_case: unittest.TestCase,
+    result: ActionResultEnvelope,
+    expected_message: str,
+) -> None:
+    queue = StimulusQueue(redis_client=None)
+    manager = _build_action_manager(
+        queue,
+        _Planner(ActionPlan("news", "openclaw", "读取 RSS", 30, "测试")),
+        redis_client=_RedisNewsSeenStub(),
+        openclaw_executor=_OpenClawExecutor(result),
+    )
+    created = _submit_and_shutdown(
+        manager,
+        [_make_thought(cycle_id=1, action_request={"type": "news", "params": ""})],
+    )
+
+    test_case.assertEqual(created[0].status, "failed")
+    stimulus = queue.pop_many(limit=1)[0]
+    test_case.assertEqual(stimulus.type, "action_result")
+    test_case.assertIn(expected_message, stimulus.content)
+
+
+def _assert_single_news_stimulus(
+    test_case: unittest.TestCase,
+    queue: StimulusQueue,
+    manager: ActionManager,
+    thoughts: list[Thought],
+    *,
+    expected_text: str | None = None,
+) -> None:
+    _submit_and_shutdown(manager, thoughts)
+    stimuli = queue.pop_many(limit=5)
+    test_case.assertEqual(len(stimuli), 1)
+    test_case.assertEqual(stimuli[0].type, "news")
+    if expected_text:
+        test_case.assertIn(expected_text, stimuli[0].content)
 
 
 class _RedisNewsSeenStub:
@@ -110,22 +207,7 @@ class _RedisNewsSeenStub:
 
 class StimulusQueueTests(unittest.TestCase):
     def test_conversation_push_is_recorded_in_history(self) -> None:
-        class RedisStub:
-            def __init__(self):
-                self.lists = {}
-
-            def rpush(self, key, payload):
-                self.lists.setdefault(key, []).append(payload)
-
-            def ltrim(self, key, start, end):
-                items = self.lists.get(key, [])
-                if start < 0:
-                    start = max(len(items) + start, 0)
-                if end < 0:
-                    end = len(items) + end
-                self.lists[key] = items[start:end + 1]
-
-        redis_stub = RedisStub()
+        redis_stub = ListRedisStub()
         queue = StimulusQueue(redis_client=redis_stub)
 
         queue.push("conversation", 1, "telegram:1", "你好")
@@ -154,25 +236,7 @@ class StimulusQueueTests(unittest.TestCase):
         self.assertEqual([stimulus.stimulus_id for stimulus in restored], [first.stimulus_id, second.stimulus_id])
 
     def test_reply_event_is_recorded_in_history(self) -> None:
-        class RedisStub:
-            def __init__(self):
-                self.lists = {}
-
-            def rpush(self, key, payload):
-                self.lists.setdefault(key, []).append(payload)
-
-            def ltrim(self, key, start, end):
-                items = self.lists.get(key, [])
-                if start < 0:
-                    start = max(len(items) + start, 0)
-                if end < 0:
-                    end = len(items) + end
-                self.lists[key] = items[start:end + 1]
-
-            def publish(self, channel, payload):
-                return None
-
-        redis_stub = RedisStub()
+        redis_stub = ListRedisStub()
         queue = StimulusQueue(redis_client=None)
         stimulus = queue.push("conversation", 1, "telegram:1", "你好")
 
@@ -257,46 +321,22 @@ class PerceptionManagerTests(unittest.TestCase):
 class ActionManagerTests(unittest.TestCase):
     def test_news_stimulus_skips_already_seen_rss_items(self) -> None:
         queue = StimulusQueue(redis_client=None)
-        planner = _Planner(ActionPlan("news", "openclaw", "读取 RSS", 30, "测试"))
-        executor = _OpenClawExecutor({
-            "ok": True,
-            "summary": "新闻已读取",
-            "data": {
-                "items": [{
-                    "feed_url": "https://example.com/rss.xml",
-                    "guid": "item-1",
-                    "link": "https://example.com/1",
-                    "title": "第一条",
-                    "published_at": "2026-03-27T10:00:00+00:00",
-                    "summary": "摘要 1",
-                }],
-            },
-            "run_id": "run_news_1",
-            "session_key": "seedwake:action:act_C1-1",
-        })
-        manager = ActionManager(
+        manager = _build_action_manager(
+            queue,
+            _Planner(ActionPlan("news", "openclaw", "读取 RSS", 30, "测试")),
             redis_client=_RedisNewsSeenStub(),
-            stimulus_queue=queue,
-            planner=planner,
-            openclaw_executor=executor,
-            auto_execute=[],
-            require_confirmation=[],
-            forbidden=[],
+            openclaw_executor=_OpenClawExecutor(_news_result()),
         )
-
-        try:
-            manager.submit_from_thoughts([
+        _assert_single_news_stimulus(
+            self,
+            queue,
+            manager,
+            [
                 _make_thought(cycle_id=1, action_request={"type": "news", "params": ""}),
                 _make_thought(cycle_id=2, action_request={"type": "news", "params": ""}),
-            ])
-            manager.shutdown()
-        finally:
-            manager.shutdown()
-
-        stimuli = queue.pop_many(limit=5)
-        self.assertEqual(len(stimuli), 1)
-        self.assertEqual(stimuli[0].type, "news")
-        self.assertIn("第一条", stimuli[0].content)
+            ],
+            expected_text="第一条",
+        )
         self.assertEqual(manager.pop_perception_observations().count("news"), 2)
 
     def test_concurrent_news_actions_do_not_duplicate_same_item(self) -> None:
@@ -324,28 +364,21 @@ class ActionManagerTests(unittest.TestCase):
                     "session_key": f"seedwake:action:{action.action_id}",
                 }
 
-        manager = ActionManager(
+        manager = _build_action_manager(
+            queue,
+            planner,
             redis_client=_RedisNewsSeenStub(),
-            stimulus_queue=queue,
-            planner=planner,
             openclaw_executor=Executor(),
-            auto_execute=[],
-            require_confirmation=[],
-            forbidden=[],
         )
-
-        try:
-            manager.submit_from_thoughts([
+        _assert_single_news_stimulus(
+            self,
+            queue,
+            manager,
+            [
                 _make_thought(cycle_id=1, action_request={"type": "news", "params": ""}),
                 _make_thought(cycle_id=2, action_request={"type": "news", "params": ""}),
-            ])
-            manager.shutdown()
-        finally:
-            manager.shutdown()
-
-        stimuli = queue.pop_many(limit=5)
-        self.assertEqual(len(stimuli), 1)
-        self.assertEqual(stimuli[0].type, "news")
+            ],
+        )
 
     def test_news_seen_index_is_bounded(self) -> None:
         queue = StimulusQueue(redis_client=None)
@@ -375,62 +408,35 @@ class ActionManagerTests(unittest.TestCase):
                 }
 
         redis_stub = _RedisNewsSeenStub()
-        manager = ActionManager(
+        manager = _build_action_manager(
+            queue,
+            planner,
             redis_client=redis_stub,
-            stimulus_queue=queue,
-            planner=planner,
             openclaw_executor=Executor(),
-            auto_execute=[],
-            require_confirmation=[],
-            forbidden=[],
             news_seen_max_items=2,
         )
-
-        try:
-            manager.submit_from_thoughts([
-                _make_thought(cycle_id=1, action_request={"type": "news", "params": ""}),
-                _make_thought(cycle_id=2, action_request={"type": "news", "params": ""}),
-                _make_thought(cycle_id=3, action_request={"type": "news", "params": ""}),
-            ])
-            manager.shutdown()
-        finally:
-            manager.shutdown()
+        _submit_and_shutdown(manager, [
+            _make_thought(cycle_id=1, action_request={"type": "news", "params": ""}),
+            _make_thought(cycle_id=2, action_request={"type": "news", "params": ""}),
+            _make_thought(cycle_id=3, action_request={"type": "news", "params": ""}),
+        ])
 
         self.assertLessEqual(redis_stub.zcard(NEWS_SEEN_REDIS_KEY), 2)
 
     def test_news_seen_shadow_syncs_to_redis_on_reconnect(self) -> None:
         queue = StimulusQueue(redis_client=None)
         planner = _Planner(ActionPlan("news", "openclaw", "读取 RSS", 30, "测试"))
-        result = {
-            "ok": True,
-            "summary": "新闻已读取",
-            "data": {
-                "items": [{
-                    "feed_url": "https://example.com/rss.xml",
-                    "guid": "item-1",
-                    "link": "https://example.com/1",
-                    "title": "第一条",
-                    "published_at": "2026-03-27T10:00:00+00:00",
-                    "summary": "摘要 1",
-                }],
-            },
-            "run_id": "run_news_1",
-            "session_key": "seedwake:action:act_C1-1",
-        }
-        first_manager = ActionManager(
+        result = _news_result()
+        first_manager = _build_action_manager(
+            queue,
+            planner,
             redis_client=None,
-            stimulus_queue=queue,
-            planner=planner,
             openclaw_executor=_OpenClawExecutor(result),
-            auto_execute=[],
-            require_confirmation=[],
-            forbidden=[],
         )
 
         try:
-            first_manager.submit_from_thoughts([
-                _make_thought(cycle_id=1, action_request={"type": "news", "params": ""}),
-            ])
+            first_manager.submit_from_thoughts([_make_thought(cycle_id=1,
+                                                              action_request={"type": "news", "params": ""})])
             redis_stub = _RedisNewsSeenStub()
             self.assertTrue(first_manager.attach_redis(redis_stub))
             self.assertEqual(redis_stub.zcard(NEWS_SEEN_REDIS_KEY), 1)
@@ -438,93 +444,45 @@ class ActionManagerTests(unittest.TestCase):
             first_manager.shutdown()
 
         second_queue = StimulusQueue(redis_client=None)
-        second_manager = ActionManager(
+        second_manager = _build_action_manager(
+            second_queue,
+            planner,
             redis_client=redis_stub,
-            stimulus_queue=second_queue,
-            planner=planner,
             openclaw_executor=_OpenClawExecutor(result),
-            auto_execute=[],
-            require_confirmation=[],
-            forbidden=[],
         )
-
-        try:
-            second_manager.submit_from_thoughts([
-                _make_thought(cycle_id=2, action_request={"type": "news", "params": ""}),
-            ])
-            second_manager.shutdown()
-        finally:
-            second_manager.shutdown()
+        _submit_and_shutdown(second_manager, [
+            _make_thought(cycle_id=2, action_request={"type": "news", "params": ""}),
+        ])
 
         self.assertEqual(second_queue.pop_many(limit=5), [])
 
     def test_malformed_news_result_falls_back_to_failed_action_result(self) -> None:
-        queue = StimulusQueue(redis_client=None)
-        planner = _Planner(ActionPlan("news", "openclaw", "读取 RSS", 30, "测试"))
-        executor = _OpenClawExecutor({
-            "ok": True,
-            "summary": "新闻已读取",
-            "data": {},
-            "run_id": "run_news_bad",
-            "session_key": "seedwake:action:act_C1-1",
-        })
-        manager = ActionManager(
-            redis_client=_RedisNewsSeenStub(),
-            stimulus_queue=queue,
-            planner=planner,
-            openclaw_executor=executor,
-            auto_execute=[],
-            require_confirmation=[],
-            forbidden=[],
+        _assert_failed_news_action(
+            self,
+            {
+                "ok": True,
+                "summary": "新闻已读取",
+                "data": {},
+                "run_id": "run_news_bad",
+                "session_key": "seedwake:action:act_C1-1",
+            },
+            "新闻结果缺少结构化 RSS 条目",
         )
-
-        try:
-            created = manager.submit_from_thoughts([
-                _make_thought(cycle_id=1, action_request={"type": "news", "params": ""}),
-            ])
-            manager.shutdown()
-        finally:
-            manager.shutdown()
-
-        self.assertEqual(created[0].status, "failed")
-        stimulus = queue.pop_many(limit=1)[0]
-        self.assertEqual(stimulus.type, "action_result")
-        self.assertIn("新闻结果缺少结构化 RSS 条目", stimulus.content)
 
     def test_news_items_without_identifiable_fields_are_rejected(self) -> None:
-        queue = StimulusQueue(redis_client=None)
-        planner = _Planner(ActionPlan("news", "openclaw", "读取 RSS", 30, "测试"))
-        executor = _OpenClawExecutor({
-            "ok": True,
-            "summary": "新闻已读取",
-            "data": {
-                "items": [{"foo": "bar"}],
+        _assert_failed_news_action(
+            self,
+            {
+                "ok": True,
+                "summary": "新闻已读取",
+                "data": {
+                    "items": [{"foo": "bar"}],
+                },
+                "run_id": "run_news_bad_item",
+                "session_key": "seedwake:action:act_C1-1",
             },
-            "run_id": "run_news_bad_item",
-            "session_key": "seedwake:action:act_C1-1",
-        })
-        manager = ActionManager(
-            redis_client=_RedisNewsSeenStub(),
-            stimulus_queue=queue,
-            planner=planner,
-            openclaw_executor=executor,
-            auto_execute=[],
-            require_confirmation=[],
-            forbidden=[],
+            "新闻条目缺少可识别字段",
         )
-
-        try:
-            created = manager.submit_from_thoughts([
-                _make_thought(cycle_id=1, action_request={"type": "news", "params": ""}),
-            ])
-            manager.shutdown()
-        finally:
-            manager.shutdown()
-
-        self.assertEqual(created[0].status, "failed")
-        stimulus = queue.pop_many(limit=1)[0]
-        self.assertEqual(stimulus.type, "action_result")
-        self.assertIn("新闻条目缺少可识别字段", stimulus.content)
 
     def test_openclaw_action_generates_action_result_stimulus(self) -> None:
         queue = StimulusQueue(redis_client=None)

@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.auth import resolve_admin_from_query
 from core.memory.short_term import REDIS_CHANNEL as THOUGHT_CHANNEL
+from core.types import EventEnvelope, EventPayload
 
 router = APIRouter(prefix="/api")
 EVENT_CHANNEL = "seedwake:events"
@@ -74,7 +75,7 @@ def _decode_data(value) -> str:
     return str(value)
 
 
-def _parse_event_envelope(raw: str) -> dict:
+def _parse_event_envelope(raw: str) -> EventEnvelope:
     return json.loads(raw)
 
 
@@ -82,5 +83,5 @@ def _raw_sse(event_name: str, raw_json: str) -> str:
     return f"event: {event_name}\ndata: {raw_json}\n\n"
 
 
-def _format_sse(event_name: str, payload: dict[str, object]) -> str:
+def _format_sse(event_name: str, payload: EventPayload) -> str:
     return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"

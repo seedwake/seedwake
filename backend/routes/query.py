@@ -2,36 +2,23 @@
 
 import json
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from backend.auth import resolve_admin_from_header
+from backend.deps import require_redis, resolve_admin
 from core.action import ACTION_REDIS_KEY
 from core.memory.short_term import REDIS_KEY as THOUGHT_REDIS_KEY
+from core.types import ActionsResponse, JsonObject, ThoughtsResponse
 
 router = APIRouter(prefix="/api")
-
-
-def _resolve_admin_header(
-    request: Request,
-    authorization: str | None = Header(default=None),
-) -> str:
-    return resolve_admin_from_header(request.app.state.config, authorization)
-
-
-def _require_redis(request: Request):
-    redis_client = request.app.state.redis
-    if redis_client is None:
-        raise HTTPException(status_code=503, detail="redis unavailable")
-    return redis_client
 
 
 @router.get("/thoughts")
 def list_recent_thoughts(
     request: Request,
     limit: int = Query(default=60, ge=1, le=300),
-    admin_username: str = Depends(_resolve_admin_header),
-) -> dict[str, object]:
-    redis_client = _require_redis(request)
+    admin_username: str = Depends(resolve_admin),
+) -> ThoughtsResponse:
+    redis_client = require_redis(request)
     try:
         raw_items = redis_client.zrange(THOUGHT_REDIS_KEY, -limit, -1)
     except Exception as exc:
@@ -50,9 +37,9 @@ def list_actions(
     request: Request,
     limit: int = Query(default=100, ge=1, le=300),
     status: str | None = Query(default=None),
-    admin_username: str = Depends(_resolve_admin_header),
-) -> dict[str, object]:
-    redis_client = _require_redis(request)
+    admin_username: str = Depends(resolve_admin),
+) -> ActionsResponse:
+    redis_client = require_redis(request)
     items = _load_action_items(redis_client)
     if status:
         allowed = {part.strip() for part in status.split(",") if part.strip()}
@@ -67,7 +54,7 @@ def list_actions(
     }
 
 
-def _load_action_items(redis_client) -> list[dict[str, object]]:
+def _load_action_items(redis_client) -> list[JsonObject]:
     try:
         raw_items = redis_client.hvals(ACTION_REDIS_KEY)
     except AttributeError:

@@ -12,8 +12,6 @@ import time
 from pathlib import Path
 
 import psycopg
-import redis as redis_lib
-import yaml
 from dotenv import load_dotenv
 
 from core.action import create_action_manager, pop_action_controls
@@ -23,8 +21,10 @@ from core.memory.identity import load_identity
 from core.memory.long_term import LongTermMemory
 from core.memory.short_term import ShortTermMemory
 from core.perception import PerceptionManager
+from core.runtime import connect_redis_from_env, load_yaml_config
 from core.stimulus import Stimulus, StimulusQueue, append_conversation_history
 from core.thought_parser import Thought
+from core.types import EventPayload, PerceptionStimulusPayload
 
 # Terminal colors
 C_RESET = "\033[0m"
@@ -267,20 +267,7 @@ def _maybe_reconnect_pg(
 
 def _connect_redis():
     """Try to connect to Redis using env vars. Returns None on failure."""
-    host = os.environ.get("REDIS_HOST", "localhost")
-    port = int(os.environ.get("REDIS_PORT", "6379"))
-    try:
-        client = redis_lib.Redis(
-            host=host,
-            port=port,
-            decode_responses=True,
-            socket_connect_timeout=1.0,
-            socket_timeout=1.0,
-        )
-        client.ping()
-        return client
-    except Exception:
-        return None
+    return connect_redis_from_env()
 
 
 def _connect_pg():
@@ -354,7 +341,7 @@ def _publish_reply_event(redis_client, stimuli: list[Stimulus], thoughts: list[T
     })
 
 
-def _push_passive_stimuli(stimulus_queue: StimulusQueue, stimuli: list[dict[str, object]]) -> None:
+def _push_passive_stimuli(stimulus_queue: StimulusQueue, stimuli: list[PerceptionStimulusPayload]) -> None:
     for stimulus in stimuli:
         stimulus_queue.push(
             str(stimulus["type"]),
@@ -380,7 +367,7 @@ def _print_error(log_file, cycle_id: int, error: Exception, retry_delay: float) 
         log_file.flush()
 
 
-def _publish_event(redis_client, event_type: str, payload: dict[str, object]) -> None:
+def _publish_event(redis_client, event_type: str, payload: EventPayload) -> None:
     if redis_client is None:
         return
     try:
@@ -404,12 +391,11 @@ def _select_reply_text(thoughts: list[Thought]) -> str | None:
 # -- Utilities -------------------------------------------------------------
 
 def _load_config(path: str) -> dict:
-    config_path = Path(path)
-    if not config_path.exists():
+    try:
+        return load_yaml_config(path, required=True)
+    except FileNotFoundError:
         print(f"配置文件不存在: {path}", file=sys.stderr)
         sys.exit(1)
-    with open(config_path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
 
 
 def _parse_args() -> argparse.Namespace:

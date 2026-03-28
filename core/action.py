@@ -11,6 +11,13 @@ from threading import Lock
 from core.perception import collect_system_status_snapshot
 from core.stimulus import StimulusQueue
 from core.thought_parser import Thought
+from core.types import (
+    ActionControl,
+    ActionRequestPayload,
+    ActionResultEnvelope,
+    JsonObject,
+    NewsItem,
+)
 
 ACTION_REDIS_KEY = "seedwake:actions"
 ACTION_CONTROL_KEY = "seedwake:action_control"
@@ -32,14 +39,14 @@ class ActionPlan:
 class ActionRecord:
     action_id: str
     type: str
-    request: dict[str, object]
+    request: ActionRequestPayload
     executor: str
     status: str
     source_thought_id: str
     source_content: str
     submitted_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     timeout_seconds: int = 300
-    result: dict[str, object] | None = None
+    result: ActionResultEnvelope | None = None
     run_id: str | None = None
     session_key: str | None = None
     awaiting_confirmation: bool = False
@@ -148,7 +155,7 @@ class ActionManager:
 
         return created
 
-    def apply_controls(self, controls: list[dict[str, object]]) -> None:
+    def apply_controls(self, controls: list[ActionControl]) -> None:
         for control in controls:
             action_id = str(control.get("action_id") or "").strip()
             if not action_id:
@@ -259,7 +266,7 @@ class ActionManager:
         status = "succeeded" if result.get("ok", True) else "failed"
         self._finalize_action(action_id, status=status, result=result)
 
-    def _finalize_action(self, action_id: str, *, status: str, result: dict[str, object]) -> None:
+    def _finalize_action(self, action_id: str, *, status: str, result: ActionResultEnvelope) -> None:
         action = self._get_action(action_id)
         result = _normalize_action_result(result, action)
         status, result, should_emit_stimulus = self._prepare_result_for_stimulus(action, status, result)
@@ -322,7 +329,7 @@ class ActionManager:
         self,
         action: ActionRecord,
         status: str,
-        result: dict[str, object],
+        result: ActionResultEnvelope,
     ) -> None:
         stimulus_type = _infer_stimulus_type(action, status, result)
         if stimulus_type not in {"time", "system_status", "news", "weather", "reading"}:
@@ -334,8 +341,8 @@ class ActionManager:
         self,
         action: ActionRecord,
         status: str,
-        result: dict[str, object],
-    ) -> tuple[str, dict[str, object], bool]:
+        result: ActionResultEnvelope,
+    ) -> tuple[str, ActionResultEnvelope, bool]:
         if status != "succeeded" or action.type != "news" or not bool(result.get("ok", True)):
             return status, result, True
         if not _is_structured_news_result(result):
@@ -349,7 +356,7 @@ class ActionManager:
             return "failed", deduped_result, True
         return status, deduped_result, should_emit
 
-    def _dedupe_news_result(self, result: dict[str, object]) -> tuple[dict[str, object], bool]:
+    def _dedupe_news_result(self, result: ActionResultEnvelope) -> tuple[ActionResultEnvelope, bool]:
         data = result.get("data")
         items = data.get("items") if isinstance(data, dict) else None
         if not isinstance(items, list):
@@ -796,7 +803,7 @@ def _fallback_plan(
     return None
 
 
-def _run_native_action(action: ActionRecord) -> dict[str, object]:
+def _run_native_action(action: ActionRecord) -> ActionResultEnvelope:
     if action.type == "get_time":
         now = datetime.now().astimezone()
         return {
@@ -903,7 +910,7 @@ def _action_to_dict(action: ActionRecord) -> dict:
     return payload
 
 
-def _normalize_action_result(result: dict[str, object], action: ActionRecord) -> dict[str, object]:
+def _normalize_action_result(result: ActionResultEnvelope, action: ActionRecord) -> ActionResultEnvelope:
     summary = str(result.get("summary") or "行动完成")
     data = result.get("data")
     return {
@@ -922,12 +929,12 @@ def _normalize_action_result(result: dict[str, object], action: ActionRecord) ->
     }
 
 
-def _is_structured_news_result(result: dict[str, object]) -> bool:
+def _is_structured_news_result(result: ActionResultEnvelope) -> bool:
     data = result.get("data")
     return isinstance(data, dict) and isinstance(data.get("items"), list)
 
 
-def _normalize_news_item(item: dict[str, object]) -> dict[str, object]:
+def _normalize_news_item(item: JsonObject) -> NewsItem:
     normalized = dict(item)
     for key in ("feed_url", "guid", "link", "title", "published_at", "summary"):
         value = normalized.get(key)
@@ -935,7 +942,7 @@ def _normalize_news_item(item: dict[str, object]) -> dict[str, object]:
     return normalized
 
 
-def _news_item_key(item: dict[str, object]) -> str | None:
+def _news_item_key(item: NewsItem) -> str | None:
     feed_url = str(item.get("feed_url") or "").strip()
     guid = str(item.get("guid") or "").strip()
     link = str(item.get("link") or "").strip()
@@ -954,7 +961,7 @@ def _news_item_key(item: dict[str, object]) -> str | None:
     return f"hash::{digest}"
 
 
-def _summarize_news_items(items: list[dict[str, object]]) -> str:
+def _summarize_news_items(items: list[NewsItem]) -> str:
     if not items:
         return "RSS 没有新的条目"
     labels = []
@@ -978,8 +985,8 @@ def _summarize_news_items(items: list[dict[str, object]]) -> str:
 def _build_result_stimulus(
     action: ActionRecord,
     status: str,
-    result: dict[str, object],
-) -> dict[str, object]:
+    result: ActionResultEnvelope,
+) -> JsonObject:
     stimulus_type = _infer_stimulus_type(action, status, result)
     return {
         "type": stimulus_type,
@@ -997,7 +1004,7 @@ def _build_result_stimulus(
 def _infer_stimulus_type(
     action: ActionRecord,
     status: str,
-    result: dict[str, object],
+    result: ActionResultEnvelope,
 ) -> str:
     if status != "succeeded" or not bool(result.get("ok", True)):
         return "action_result"
@@ -1010,7 +1017,7 @@ def _infer_stimulus_type(
     return "action_result"
 
 
-def _stimulus_priority(stimulus_type: str, result: dict[str, object]) -> int:
+def _stimulus_priority(stimulus_type: str, result: ActionResultEnvelope) -> int:
     if stimulus_type == "action_result":
         return 2
     if stimulus_type == "system_status":
@@ -1023,7 +1030,7 @@ def _stimulus_content(
     stimulus_type: str,
     action: ActionRecord,
     status: str,
-    result: dict[str, object],
+    result: ActionResultEnvelope,
 ) -> str:
     summary = str(result.get("summary") or "行动完成")
     if stimulus_type == "action_result":
@@ -1055,7 +1062,7 @@ def push_action_control(
     return True
 
 
-def pop_action_controls(redis_client, limit: int = 20) -> list[dict[str, object]]:
+def pop_action_controls(redis_client, limit: int = 20) -> list[ActionControl]:
     if redis_client is None or limit <= 0:
         return []
     controls = []

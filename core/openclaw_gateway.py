@@ -10,6 +10,8 @@ from pathlib import Path
 from urllib import error, request
 from uuid import uuid4
 
+from core.types import ActionResultEnvelope, JsonObject
+
 ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 CONNECT_TIMEOUT_SECONDS = 10
 RESULT_SYSTEM_PROMPT = """\
@@ -42,7 +44,7 @@ class OpenClawGatewayExecutor:
         self._use_http_fallback = use_http_fallback
         self._device_identity_path = device_identity_path or "data/openclaw/device.json"
 
-    def execute(self, action) -> dict[str, object]:
+    def execute(self, action) -> ActionResultEnvelope:
         if not self._gateway_url:
             raise RuntimeError("OPENCLAW_GATEWAY_URL 未配置")
         if not self._gateway_token:
@@ -55,7 +57,7 @@ class OpenClawGatewayExecutor:
                 raise
             return self._execute_http(action, exc)
 
-    async def _execute_ws(self, action) -> dict[str, object]:
+    async def _execute_ws(self, action) -> ActionResultEnvelope:
         websockets = _import_websockets()
         identity = _load_or_create_device_identity(self._device_identity_path)
 
@@ -134,7 +136,7 @@ class OpenClawGatewayExecutor:
             finally:
                 await client.close()
 
-    def _execute_http(self, action, ws_error: Exception) -> dict[str, object]:
+    def _execute_http(self, action, ws_error: Exception) -> ActionResultEnvelope:
         if not self._http_base_url:
             raise RuntimeError(f"WS 失败且未配置 HTTP fallback: {ws_error}") from ws_error
 
@@ -305,7 +307,7 @@ async def _abort_session(client: _GatewayRpcClient, session_key: str, run_id: st
         return
 
 
-def _normalize_agent_final(frame: dict, *, run_id: str | None, session_key: str) -> dict[str, object]:
+def _normalize_agent_final(frame: JsonObject, *, run_id: str | None, session_key: str) -> ActionResultEnvelope:
     payload = frame.get("payload") or {}
     if not frame.get("ok"):
         return {
@@ -348,7 +350,7 @@ def _extract_openresponses_text(response_body: dict) -> str:
     return "\n\n".join(texts).strip()
 
 
-def _normalize_worker_text(text: str) -> dict[str, object]:
+def _normalize_worker_text(text: str) -> ActionResultEnvelope:
     parsed = _extract_json_object(text)
     if isinstance(parsed, dict):
         return {
@@ -367,7 +369,7 @@ def _normalize_worker_text(text: str) -> dict[str, object]:
     }
 
 
-def _extract_json_object(text: str) -> dict | None:
+def _extract_json_object(text: str) -> JsonObject | None:
     candidate = text.strip()
     if not candidate:
         return None
