@@ -1,2 +1,15 @@
 postgresql
 Postgre
+hnsw
+ivfflat
+lpop
+pgvector
+rpush
+zadd
+zcard
+zrange
+zrem
+zremrangebyrank
+zremrangebyscore
+hset
+hvals

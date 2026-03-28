@@ -24,7 +24,7 @@ CREATE TABLE long_term_memory (
 );
 
 -- Vector index omitted: qwen3-embedding outputs 4096 dimensions,
--- exceeding pgvector's 2000-dim limit for ivfflat/hnsw indexes.
+-- exceeding the pgvector 2000-dimension limit for IVFFlat and HNSW indexes.
 -- Full-table scan is acceptable at current data scale.
 -- Options when data grows: truncate dimensions via Ollama API, or use PCA.
 CREATE INDEX idx_ltm_entity_tags ON long_term_memory USING GIN (entity_tags);

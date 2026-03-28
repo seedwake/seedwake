@@ -170,7 +170,7 @@ class OpenClawGatewayExecutor:
                 "session_key": session_key,
             }
 
-        text = _extract_openresponses_text(body)
+        text = _extract_responses_api_text(body)
         normalized = _normalize_worker_text(text)
         normalized["session_key"] = session_key
         normalized["transport"] = "http"
@@ -339,7 +339,7 @@ def _extract_payload_text(result_payload: dict) -> str:
     return "\n\n".join(texts).strip()
 
 
-def _extract_openresponses_text(response_body: dict) -> str:
+def _extract_responses_api_text(response_body: dict) -> str:
     output = response_body.get("output") or []
     texts = []
     for item in output:
