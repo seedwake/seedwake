@@ -28,5 +28,5 @@ def connect_redis_from_env():
         )
         client.ping()
         return client
-    except Exception:
+    except (redis_lib.RedisError, OSError, ValueError):
         return None

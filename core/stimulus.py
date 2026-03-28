@@ -4,6 +4,7 @@ import json
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from redis import exceptions as redis_exceptions
 from uuid import uuid4
 
 from core.types import ConversationEntry, JsonObject, StimulusRecord
@@ -11,6 +12,16 @@ from core.types import ConversationEntry, JsonObject, StimulusRecord
 REDIS_KEY = "seedwake:stimuli"
 CONVERSATION_HISTORY_KEY = "seedwake:conversation_history"
 CONVERSATION_HISTORY_LIMIT = 500
+STIMULUS_REDIS_EXCEPTIONS = (
+    redis_exceptions.RedisError,
+    ConnectionError,
+    TimeoutError,
+    OSError,
+    RuntimeError,
+    json.JSONDecodeError,
+    TypeError,
+    ValueError,
+)
 
 
 @dataclass
@@ -65,7 +76,7 @@ class StimulusQueue:
                         metadata=stimulus.metadata,
                         timestamp=stimulus.timestamp,
                     )
-            except Exception:
+            except STIMULUS_REDIS_EXCEPTIONS:
                 self._redis = None
         return stimulus
 
@@ -75,7 +86,7 @@ class StimulusQueue:
         if self._redis:
             try:
                 return self._redis_pop_many(limit)
-            except Exception:
+            except STIMULUS_REDIS_EXCEPTIONS:
                 self._redis = None
         return self._shadow_pop_many(limit)
 
@@ -88,7 +99,7 @@ class StimulusQueue:
             try:
                 payloads = [_stimulus_to_json(stimulus) for stimulus in reversed(stimuli)]
                 self._redis.lpush(REDIS_KEY, *payloads)
-            except Exception:
+            except STIMULUS_REDIS_EXCEPTIONS:
                 self._redis = None
 
     @property
@@ -99,7 +110,7 @@ class StimulusQueue:
         self._redis = redis_client
         try:
             self._sync_to_redis()
-        except Exception:
+        except STIMULUS_REDIS_EXCEPTIONS:
             self._redis = None
         return self.redis_available
 

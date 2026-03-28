@@ -2,10 +2,13 @@
 
 import asyncio
 import json
+import logging
 from contextlib import suppress
 
+import redis as redis_lib
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -17,6 +20,7 @@ from telegram.ext import (
 )
 
 from core.action import ACTION_REDIS_KEY, push_action_control
+from core.logging import setup_logging
 from core.runtime import connect_redis_from_env, load_yaml_config
 from core.stimulus import StimulusQueue
 from core.types import (
@@ -29,6 +33,22 @@ from core.types import (
 
 EVENT_CHANNEL = "seedwake:events"
 REDIS_RECONNECT_DELAY_SECONDS = 2.0
+BOT_REDIS_EXCEPTIONS = (
+    redis_lib.RedisError,
+    ConnectionError,
+    TimeoutError,
+    OSError,
+    json.JSONDecodeError,
+    RuntimeError,
+    TypeError,
+    ValueError,
+)
+BOT_SEND_EXCEPTIONS = (
+    TelegramError,
+    RuntimeError,
+    OSError,
+)
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
@@ -39,6 +59,7 @@ def main() -> None:
 def create_application(config: dict | None = None, redis_client=None) -> Application:
     load_dotenv()
     cfg = config or load_yaml_config("config.yml")
+    setup_logging(cfg, component="bot")
     token = _read_env("TELEGRAM_BOT_TOKEN").strip()
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN 未配置")
@@ -102,7 +123,7 @@ async def _handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     try:
         actions = _load_actions(redis_client)
-    except Exception:
+    except RuntimeError:
         _mark_redis_unavailable(context.application)
         await _reply_text(update, "Redis: unavailable\n进行中行动: 0")
         return
@@ -123,7 +144,7 @@ async def _handle_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     try:
         actions = _load_actions(redis_client)
-    except Exception:
+    except RuntimeError:
         _mark_redis_unavailable(context.application)
         await _reply_text(update, "Redis 不可用，无法查询行动状态。")
         return
@@ -206,7 +227,7 @@ async def _handle_action_callback(update: Update, context: ContextTypes.DEFAULT_
     )
     if pushed:
         await query.answer("已提交")
-        with suppress(Exception):
+        with suppress(*BOT_SEND_EXCEPTIONS):
             await query.edit_message_reply_markup(reply_markup=None)
         return
     _mark_redis_unavailable(context.application)
@@ -236,12 +257,16 @@ async def _forward_events(application: Application) -> None:
                 await _dispatch_event(application, envelope)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except BOT_REDIS_EXCEPTIONS:
             _mark_redis_unavailable(application)
+            await asyncio.sleep(REDIS_RECONNECT_DELAY_SECONDS)
+        # noinspection PyBroadException
+        except Exception:
+            logger.exception("unexpected telegram event forwarder failure")
             await asyncio.sleep(REDIS_RECONNECT_DELAY_SECONDS)
         finally:
             if pubsub is not None:
-                with suppress(Exception):
+                with suppress(redis_lib.RedisError, RuntimeError, OSError):
                     await asyncio.to_thread(pubsub.close)
 
 
@@ -399,7 +424,7 @@ def _load_actions(redis_client) -> list[JsonObject]:
         raw_items = redis_client.hvals(ACTION_REDIS_KEY)
     except AttributeError:
         raw_items = list(redis_client.hgetall(ACTION_REDIS_KEY).values())
-    except Exception as exc:
+    except BOT_REDIS_EXCEPTIONS as exc:
         raise RuntimeError("redis unavailable") from exc
     return [json.loads(item) for item in raw_items]
 
@@ -413,7 +438,11 @@ async def _safe_send_message(
 ) -> bool:
     try:
         await application.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+    except BOT_SEND_EXCEPTIONS:
+        return False
+    # noinspection PyBroadException
     except Exception:
+        logger.exception("unexpected telegram send failure for chat %s", chat_id)
         return False
     return True
 

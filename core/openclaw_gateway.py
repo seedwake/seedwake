@@ -10,10 +10,36 @@ from pathlib import Path
 from urllib import error, request
 from uuid import uuid4
 
+from ollama import RequestError as OllamaRequestError, ResponseError as OllamaResponseError
 from core.types import ActionResultEnvelope, JsonObject
+
+try:
+    from websockets import exceptions as ws_exceptions
+except ImportError:
+    ws_exceptions = None
 
 ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 CONNECT_TIMEOUT_SECONDS = 10
+OPENCLAW_TRANSPORT_EXCEPTIONS = (
+    OllamaRequestError,
+    OllamaResponseError,
+    OSError,
+    RuntimeError,
+    TimeoutError,
+    ValueError,
+    json.JSONDecodeError,
+)
+if ws_exceptions is not None:
+    OPENCLAW_TRANSPORT_EXCEPTIONS = (
+        *OPENCLAW_TRANSPORT_EXCEPTIONS,
+        ws_exceptions.ConnectionClosed,
+        ws_exceptions.ConcurrencyError,
+        ws_exceptions.NegotiationError,
+        ws_exceptions.ProtocolError,
+        ws_exceptions.ProxyError,
+        ws_exceptions.SecurityError,
+        ws_exceptions.WebSocketProtocolError,
+    )
 RESULT_SYSTEM_PROMPT = """\
 You are a worker for Seedwake.
 Finish the task and return JSON only:
@@ -52,7 +78,7 @@ class OpenClawGatewayExecutor:
 
         try:
             return asyncio.run(self._execute_ws(action))
-        except Exception as exc:
+        except OPENCLAW_TRANSPORT_EXCEPTIONS as exc:
             if not self._use_http_fallback:
                 raise
             return self._execute_http(action, exc)
@@ -282,7 +308,7 @@ class _GatewayRpcClient:
                     await queue.put(frame)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except OPENCLAW_TRANSPORT_EXCEPTIONS as exc:
             self._reader_error = exc
         finally:
             for queue in [*self._responses.values(), *self._events.values()]:
@@ -303,7 +329,7 @@ async def _abort_session(client: _GatewayRpcClient, session_key: str, run_id: st
     )
     try:
         await client.recv_response(request_id, timeout_seconds)
-    except Exception:
+    except OPENCLAW_TRANSPORT_EXCEPTIONS:
         return
 
 
@@ -425,7 +451,7 @@ def _load_or_create_device_identity(path_str: str) -> dict[str, str]:
                 "public_key_pem": public_key_pem,
                 "private_key_pem": private_key_pem,
             }
-        except Exception:
+        except (json.JSONDecodeError, KeyError, OSError, TypeError, ValueError):
             pass
 
     serialization, ed25519 = _import_crypto()

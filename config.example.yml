@@ -31,6 +31,12 @@ long_term_memory:
 runtime:
   error_retry_delay_seconds: 1.0
   max_error_retry_delay_seconds: 10.0
+  logging:
+    directory: "data/logs"
+    level: "INFO"
+    rotate_when: "midnight"
+    backup_count: 30
+    console: false
 
 actions:
   default_timeout_seconds: 300
@@ -47,7 +53,9 @@ perception:
   passive_system_status_interval_cycles: 24
   news_cue_interval_cycles: 90
   news_feed_urls:
-    - "https://replace-me.example/rss.xml"
+    - "https://replace-me.example/rss1.xml"
+    - "https://replace-me.example/rss2.xml"
+    - "https://replace-me.example/rss3.xml"
   news_seen_ttl_hours: 720
   news_seen_max_items: 5000
   weather_cue_interval_cycles: 60

@@ -2,6 +2,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import redis as redis_lib
+from telegram.error import TelegramError
+
 from bot.main import (
     _dispatch_event,
     _ensure_redis_client,
@@ -158,7 +161,7 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_dispatch_action_event_continues_after_send_failure(self) -> None:
         context = _make_context(FakeRedis(), allowed_user_ids={1, 2})
-        context.application.bot.send_message = AsyncMock(side_effect=[RuntimeError("boom"), None])
+        context.application.bot.send_message = AsyncMock(side_effect=[TelegramError("boom"), None])
 
         await _dispatch_event(
             context.application,
@@ -207,7 +210,7 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_handle_actions_marks_redis_unavailable_on_read_error(self) -> None:
         class FailingRedis(FakeRedis):
             def hvals(self, key):
-                raise RuntimeError("boom")
+                raise redis_lib.exceptions.ConnectionError("boom")
 
         update = _make_update()
         context = _make_context(FailingRedis(), allowed_user_ids={1})
@@ -220,7 +223,7 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_handle_text_message_reports_redis_write_failure(self) -> None:
         class FailingRedis(FakeRedis):
             def rpush(self, key, value):
-                raise RuntimeError("boom")
+                raise redis_lib.exceptions.ConnectionError("boom")
 
         update = _make_update()
         context = _make_context(FailingRedis(), allowed_user_ids={1})

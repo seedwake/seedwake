@@ -31,6 +31,7 @@ services:
       REDIS_PORT: 6379
     volumes:
       - ./config.yml:/app/config.yml:ro
+      - ./data/logs:/app/data/logs
 
   bot:
     build:
@@ -44,3 +45,4 @@ services:
       REDIS_PORT: 6379
     volumes:
       - ./config.yml:/app/config.yml:ro
+      - ./data/logs:/app/data/logs

@@ -1,5 +1,8 @@
 """Conversation history and action confirmation routes."""
 
+import json
+
+import redis as redis_lib
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
@@ -9,6 +12,12 @@ from core.stimulus import load_conversation_history
 from core.types import ActionConfirmResponse, ConversationHistoryResponse
 
 router = APIRouter(prefix="/api")
+REDIS_ROUTE_EXCEPTIONS = (
+    redis_lib.RedisError,
+    json.JSONDecodeError,
+    TypeError,
+    ValueError,
+)
 
 
 class ActionConfirmBody(BaseModel):
@@ -26,7 +35,7 @@ def get_conversation_history(
     redis_client = require_redis(request)
     try:
         items = load_conversation_history(redis_client, limit)
-    except Exception as exc:
+    except REDIS_ROUTE_EXCEPTIONS as exc:
         raise HTTPException(status_code=503, detail=f"redis read failed: {exc}") from exc
     return {
         "ok": True,

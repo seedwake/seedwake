@@ -10,10 +10,21 @@ import json
 from collections import deque
 from datetime import datetime
 
+import redis as redis_lib
+
 from core.thought_parser import Thought
 
 REDIS_KEY = "seedwake:thoughts"
 REDIS_CHANNEL = "seedwake:stream"
+SHORT_TERM_REDIS_EXCEPTIONS = (
+    redis_lib.RedisError,
+    ConnectionError,
+    TimeoutError,
+    OSError,
+    json.JSONDecodeError,
+    TypeError,
+    ValueError,
+)
 
 
 class ShortTermMemory:
@@ -45,7 +56,7 @@ class ShortTermMemory:
                     self._redis_append(t)
                 self._trim()
                 self._publish(thoughts)
-            except Exception:
+            except SHORT_TERM_REDIS_EXCEPTIONS:
                 self._redis = None
 
     def get_context(self) -> list[Thought]:
@@ -54,7 +65,7 @@ class ShortTermMemory:
         if self._redis:
             try:
                 return self._redis_recent(limit)
-            except Exception:
+            except SHORT_TERM_REDIS_EXCEPTIONS:
                 self._redis = None
         return list(self._deque)[-limit:]
 
@@ -71,7 +82,7 @@ class ShortTermMemory:
         self._redis = redis_client
         try:
             self._sync_to_redis()
-        except Exception:
+        except SHORT_TERM_REDIS_EXCEPTIONS:
             self._redis = None
         return self.redis_available
 

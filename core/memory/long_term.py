@@ -7,6 +7,8 @@ Gracefully degrades when PostgreSQL is unavailable.
 from datetime import datetime
 from dataclasses import dataclass
 
+import psycopg
+
 
 @dataclass
 class LongTermEntry:
@@ -60,7 +62,7 @@ class LongTermMemory:
                 row = cur.fetchone()
             self._conn.commit()
             return row[0] if row else None
-        except Exception:
+        except psycopg.Error:
             self._conn.rollback()
             raise
 
@@ -106,7 +108,7 @@ class LongTermMemory:
             with self._conn.cursor() as cur:
                 cur.execute(query, params)
                 rows = cur.fetchall()
-        except Exception:
+        except psycopg.Error:
             self._conn.rollback()
             raise
 
@@ -135,7 +137,7 @@ class LongTermMemory:
                     (memory_ids,),
                 )
             self._conn.commit()
-        except Exception:
+        except psycopg.Error:
             self._conn.rollback()
             raise
 
@@ -147,7 +149,7 @@ class LongTermMemory:
             return
         try:
             self._conn.close()
-        except Exception:
+        except (psycopg.Error, OSError):
             pass
         self._conn = None
 

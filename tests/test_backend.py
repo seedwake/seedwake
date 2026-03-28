@@ -3,6 +3,7 @@ import json
 import unittest
 from types import SimpleNamespace
 
+import redis as redis_lib
 from fastapi.testclient import TestClient
 
 from backend.main import create_app
@@ -157,7 +158,7 @@ class BackendTests(unittest.TestCase):
     def test_action_confirm_returns_503_when_enqueue_fails(self) -> None:
         class FailingRedis(FakeRedis):
             def rpush(self, key, value):
-                raise RuntimeError("boom")
+                raise redis_lib.exceptions.ConnectionError("boom")
 
         app = create_app(
             config={"admins": [{"username": "alice", "token": "token_alice"}]},

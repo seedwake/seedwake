@@ -2,11 +2,15 @@
 
 import hashlib
 import json
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
+
+from ollama import RequestError as OllamaRequestError, ResponseError as OllamaResponseError
+from redis import exceptions as redis_exceptions
 
 from core.perception import collect_system_status_snapshot
 from core.stimulus import StimulusQueue
@@ -24,6 +28,36 @@ ACTION_CONTROL_KEY = "seedwake:action_control"
 NEWS_SEEN_REDIS_KEY = "seedwake:news_seen"
 OPENCLAW_ACTION_TYPES = {"search", "web_fetch", "system_change", "custom", "news", "weather", "reading"}
 PERCEPTION_AUTO_EXECUTE_TYPES = {"news", "weather", "reading"}
+ACTION_REDIS_EXCEPTIONS = (
+    redis_exceptions.RedisError,
+    ConnectionError,
+    TimeoutError,
+    OSError,
+    RuntimeError,
+    json.JSONDecodeError,
+    TypeError,
+    ValueError,
+)
+PLANNER_EXCEPTIONS = (
+    OllamaRequestError,
+    OllamaResponseError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    KeyError,
+    json.JSONDecodeError,
+)
+ACTION_EXECUTION_EXCEPTIONS = (
+    OllamaRequestError,
+    OllamaResponseError,
+    RuntimeError,
+    OSError,
+    ValueError,
+    TypeError,
+    KeyError,
+    json.JSONDecodeError,
+)
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -95,7 +129,7 @@ class ActionManager:
 
             try:
                 plan = self._planner.plan(thought)
-            except Exception as exc:
+            except PLANNER_EXCEPTIONS as exc:
                 self._emit(f"行动规划失败 {thought.thought_id}: {exc}")
                 continue
             if not plan:
@@ -210,7 +244,7 @@ class ActionManager:
         self._redis = redis_client
         try:
             self._sync_to_redis()
-        except Exception:
+        except ACTION_REDIS_EXCEPTIONS:
             self._redis = None
         return self.redis_available
 
@@ -228,17 +262,17 @@ class ActionManager:
         self._pool.submit(self._run_action, action_id)
 
     def _run_action(self, action_id: str) -> None:
-        action = self._get_action(action_id)
-        self._update_action(action_id, status="running")
-        self._publish_action_event(action, "running", "执行中")
-
         try:
+            action = self._get_action(action_id)
+            self._update_action(action_id, status="running")
+            self._publish_action_event(action, "running", "执行中")
+
             if action.executor == "native":
                 result = _run_native_action(action)
             else:
                 result = self._openclaw_executor.execute(action)
         except TimeoutError:
-            self._finalize_action(
+            self._safe_finalize_action(
                 action_id,
                 status="timeout",
                 result={
@@ -249,8 +283,8 @@ class ActionManager:
                 },
             )
             return
-        except Exception as exc:
-            self._finalize_action(
+        except ACTION_EXECUTION_EXCEPTIONS as exc:
+            self._safe_finalize_action(
                 action_id,
                 status="failed",
                 result={
@@ -261,10 +295,15 @@ class ActionManager:
                 },
             )
             return
+        # noinspection PyBroadException
+        except Exception as exc:
+            logger.exception("unexpected action worker failure: %s", action_id)
+            self._force_fail_action(action_id, f"行动内部错误：{exc}")
+            return
 
         result = _normalize_action_result(result, action)
         status = "succeeded" if result.get("ok", True) else "failed"
-        self._finalize_action(action_id, status=status, result=result)
+        self._safe_finalize_action(action_id, status=status, result=result)
 
     def _finalize_action(self, action_id: str, *, status: str, result: ActionResultEnvelope) -> None:
         action = self._get_action(action_id)
@@ -305,6 +344,47 @@ class ActionManager:
         if self._auto_execute and action.type not in self._auto_execute:
             return "rejected"
         return "auto"
+
+    def _safe_finalize_action(
+        self,
+        action_id: str,
+        *,
+        status: str,
+        result: ActionResultEnvelope,
+    ) -> None:
+        try:
+            self._finalize_action(action_id, status=status, result=result)
+        # noinspection PyBroadException
+        except Exception as exc:
+            logger.exception("unexpected action finalization failure: %s", action_id)
+            self._force_fail_action(action_id, f"行动收尾失败：{exc}")
+
+    def _force_fail_action(self, action_id: str, summary: str) -> None:
+        fallback_result = {
+            "ok": False,
+            "summary": summary,
+            "data": {},
+            "error": summary,
+        }
+        try:
+            self._finalize_action(action_id, status="failed", result=fallback_result)
+            return
+        # noinspection PyBroadException
+        except Exception:
+            logger.exception("failed to finalize forced action failure: %s", action_id)
+
+        with self._lock:
+            action = self._actions.get(action_id)
+            if action is None:
+                return
+            action.status = "failed"
+            action.result = _normalize_action_result(fallback_result, action)
+            self._actions[action_id] = action
+        try:
+            self._upsert_action(action)
+        # noinspection PyBroadException
+        except Exception:
+            logger.exception("failed to persist forced action failure: %s", action_id)
 
     def _emit(self, text: str) -> None:
         if self._log_callback:
@@ -430,7 +510,7 @@ class ActionManager:
                     self._trim_news_seen_shadow_locked()
                     self._prune_news_seen_redis(now_ts)
                     return True
-                except Exception:
+                except ACTION_REDIS_EXCEPTIONS:
                     self._redis = None
             self._news_seen_shadow[item_key] = expires_at
             self._trim_news_seen_shadow_locked()
@@ -444,7 +524,7 @@ class ActionManager:
         if self._redis:
             try:
                 self._prune_news_seen_redis(now_ts)
-            except Exception:
+            except ACTION_REDIS_EXCEPTIONS:
                 self._redis = None
 
     def _prune_news_seen_shadow_locked(self, now_ts: float) -> None:
@@ -497,7 +577,7 @@ class ActionManager:
         try:
             payload = json.dumps(_action_to_dict(action), ensure_ascii=False)
             self._redis.hset(ACTION_REDIS_KEY, action.action_id, payload)
-        except Exception:
+        except ACTION_REDIS_EXCEPTIONS:
             self._redis = None
 
     def _sync_to_redis(self) -> None:
@@ -1057,7 +1137,7 @@ def push_action_control(
     }, ensure_ascii=False)
     try:
         redis_client.rpush(ACTION_CONTROL_KEY, payload)
-    except Exception:
+    except ACTION_REDIS_EXCEPTIONS:
         return False
     return True
 
@@ -1069,7 +1149,7 @@ def pop_action_controls(redis_client, limit: int = 20) -> list[ActionControl]:
     for _ in range(limit):
         try:
             raw = redis_client.lpop(ACTION_CONTROL_KEY)
-        except Exception:
+        except ACTION_REDIS_EXCEPTIONS:
             return controls
         if raw is None:
             break

@@ -2,6 +2,7 @@
 
 import json
 
+import redis as redis_lib
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from backend.deps import require_redis, resolve_admin
@@ -10,6 +11,12 @@ from core.memory.short_term import REDIS_KEY as THOUGHT_REDIS_KEY
 from core.types import ActionsResponse, JsonObject, ThoughtsResponse
 
 router = APIRouter(prefix="/api")
+REDIS_ROUTE_EXCEPTIONS = (
+    redis_lib.RedisError,
+    json.JSONDecodeError,
+    TypeError,
+    ValueError,
+)
 
 
 @router.get("/thoughts")
@@ -21,7 +28,7 @@ def list_recent_thoughts(
     redis_client = require_redis(request)
     try:
         raw_items = redis_client.zrange(THOUGHT_REDIS_KEY, -limit, -1)
-    except Exception as exc:
+    except REDIS_ROUTE_EXCEPTIONS as exc:
         raise HTTPException(status_code=503, detail=f"redis read failed: {exc}") from exc
     items = [json.loads(item) for item in raw_items]
     return {
@@ -59,6 +66,6 @@ def _load_action_items(redis_client) -> list[JsonObject]:
         raw_items = redis_client.hvals(ACTION_REDIS_KEY)
     except AttributeError:
         raw_items = list(redis_client.hgetall(ACTION_REDIS_KEY).values())
-    except Exception as exc:
+    except REDIS_ROUTE_EXCEPTIONS as exc:
         raise HTTPException(status_code=503, detail=f"redis read failed: {exc}") from exc
     return [json.loads(item) for item in raw_items]

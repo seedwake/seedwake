@@ -224,7 +224,7 @@ def _read_memory_snapshot() -> MemorySnapshot | None:
                 key, raw_value = line.split(":", 1)
                 value = raw_value.strip().split()[0]
                 values[key] = int(value)
-    except Exception:
+    except (OSError, ValueError, IndexError):
         return None
 
     total_kb = values.get("MemTotal")

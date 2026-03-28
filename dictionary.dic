@@ -13,3 +13,4 @@ zremrangebyrank
 zremrangebyscore
 hset
 hvals
+seedwake

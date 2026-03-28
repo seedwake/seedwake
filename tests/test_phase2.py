@@ -1,6 +1,9 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+import psycopg
+import redis as redis_lib
+
 # noinspection PyProtectedMember
 from core.main import _maybe_reconnect_pg, _maybe_reconnect_redis
 from core.memory.identity import load_identity
@@ -48,7 +51,7 @@ class ShortTermMemoryRedisDegradationTests(unittest.TestCase):
 
     def test_append_degrades_on_redis_error(self) -> None:
         mock_redis = MagicMock()
-        mock_redis.zadd.side_effect = ConnectionError("Redis gone")
+        mock_redis.zadd.side_effect = redis_lib.exceptions.ConnectionError("Redis gone")
         stm = ShortTermMemory(redis_client=mock_redis, context_window=10)
 
         thoughts = [_make_thought(1, 1, "should survive")]
@@ -61,7 +64,7 @@ class ShortTermMemoryRedisDegradationTests(unittest.TestCase):
 
     def test_get_context_degrades_on_redis_error(self) -> None:
         mock_redis = MagicMock()
-        mock_redis.zrange.side_effect = ConnectionError("Redis gone")
+        mock_redis.zrange.side_effect = redis_lib.exceptions.ConnectionError("Redis gone")
         stm = ShortTermMemory(redis_client=mock_redis, context_window=10)
 
         # Pre-populate deque
@@ -140,7 +143,7 @@ class IdentityTests(unittest.TestCase):
     def test_fallback_to_bootstrap_on_db_error(self) -> None:
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
-        mock_cursor.execute.side_effect = Exception("table does not exist")
+        mock_cursor.execute.side_effect = psycopg.DatabaseError("table does not exist")
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cursor
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
 
@@ -160,12 +163,12 @@ class LongTermMemoryTests(unittest.TestCase):
     def test_store_rolls_back_on_error(self) -> None:
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
-        mock_cursor.execute.side_effect = Exception("insert failed")
+        mock_cursor.execute.side_effect = psycopg.DatabaseError("insert failed")
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cursor
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
         ltm = LongTermMemory(mock_conn)
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(psycopg.Error):
             ltm.store("test", "episodic", [0.1])
 
         mock_conn.rollback.assert_called_once()
@@ -173,12 +176,12 @@ class LongTermMemoryTests(unittest.TestCase):
     def test_search_rolls_back_on_error(self) -> None:
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
-        mock_cursor.execute.side_effect = Exception("select failed")
+        mock_cursor.execute.side_effect = psycopg.DatabaseError("select failed")
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cursor
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
         ltm = LongTermMemory(mock_conn)
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(psycopg.Error):
             ltm.search([0.1, 0.2])
 
         mock_conn.rollback.assert_called_once()

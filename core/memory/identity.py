@@ -5,6 +5,8 @@ On subsequent runs, loads from PostgreSQL (which may have evolved).
 Falls back to config bootstrap when PostgreSQL is unavailable or broken.
 """
 
+import psycopg
+
 
 def load_identity(pg_conn, bootstrap: dict[str, str]) -> dict[str, str]:
     """Load identity from PostgreSQL, bootstrap if empty, fallback to config.
@@ -32,7 +34,7 @@ def _read_from_db(conn) -> dict[str, str]:
             cur.execute("SELECT section, content FROM identity ORDER BY id")
             rows = cur.fetchall()
         return {section: content for section, content in rows} if rows else {}
-    except Exception:
+    except psycopg.Error:
         conn.rollback()
         return {}
 
@@ -51,5 +53,5 @@ def _bootstrap_to_db(conn, bootstrap: dict[str, str]) -> None:
                     (section, content.strip()),
                 )
         conn.commit()
-    except Exception:
+    except psycopg.Error:
         conn.rollback()

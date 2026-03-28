@@ -1,6 +1,7 @@
 """SSE stream route."""
 
 import json
+import logging
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
@@ -11,6 +12,7 @@ from core.types import EventEnvelope, EventPayload
 
 router = APIRouter(prefix="/api")
 EVENT_CHANNEL = "seedwake:events"
+logger = logging.getLogger(__name__)
 
 
 def _resolve_admin_query(
@@ -38,18 +40,26 @@ def stream_events(
         try:
             yield _format_sse("status", {"message": "stream_connected", "username": admin_username})
             while True:
-                message = pubsub.get_message(timeout=15.0)
-                if message is None:
-                    yield ": keepalive\n\n"
+                try:
+                    message = pubsub.get_message(timeout=15.0)
+                    if message is None:
+                        yield ": keepalive\n\n"
+                        continue
+                    channel = _decode_channel(message.get("channel"))
+                    data = _decode_data(message.get("data"))
+                    if channel == THOUGHT_CHANNEL:
+                        yield _raw_sse("thought", data)
+                        continue
+                    if channel == EVENT_CHANNEL:
+                        envelope = _parse_event_envelope(data)
+                        yield _format_sse(envelope["type"], envelope["payload"])
+                except (json.JSONDecodeError, TypeError, ValueError, KeyError):
+                    logger.exception("malformed SSE event payload")
                     continue
-                channel = _decode_channel(message.get("channel"))
-                data = _decode_data(message.get("data"))
-                if channel == THOUGHT_CHANNEL:
-                    yield _raw_sse("thought", data)
-                    continue
-                if channel == EVENT_CHANNEL:
-                    envelope = _parse_event_envelope(data)
-                    yield _format_sse(envelope["type"], envelope["payload"])
+        # noinspection PyBroadException
+        except Exception:
+            logger.exception("unexpected SSE stream failure")
+            yield _format_sse("status", {"message": "stream_error"})
         finally:
             pubsub.close()
 

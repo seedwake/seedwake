@@ -5,18 +5,22 @@ Usage: python -m core.main [--config config.yml] [--log data/test.txt]
 
 import argparse
 import json
+import logging
 import os
 import signal
 import sys
 import time
 from pathlib import Path
 
+from ollama import RequestError as OllamaRequestError, ResponseError as OllamaResponseError
 import psycopg
+import redis as redis_lib
 from dotenv import load_dotenv
 
 from core.action import create_action_manager, pop_action_controls
 from core.cycle import create_client, run_cycle
 from core.embedding import embed_text
+from core.logging import setup_logging
 from core.memory.identity import load_identity
 from core.memory.long_term import LongTermMemory
 from core.memory.short_term import ShortTermMemory
@@ -35,12 +39,51 @@ C_TYPE = {
     "反应": "\033[32m",    # green
 }
 EVENT_CHANNEL = "seedwake:events"
+MAIN_LOOP_EXCEPTIONS = (
+    OllamaRequestError,
+    OllamaResponseError,
+    redis_lib.RedisError,
+    psycopg.Error,
+    RuntimeError,
+    OSError,
+    ValueError,
+    TypeError,
+    KeyError,
+    json.JSONDecodeError,
+)
+EMBEDDING_EXCEPTIONS = (
+    OllamaRequestError,
+    OllamaResponseError,
+    RuntimeError,
+    OSError,
+    ValueError,
+    TypeError,
+)
+LTM_EXCEPTIONS = (
+    psycopg.Error,
+    RuntimeError,
+    OSError,
+    ValueError,
+    TypeError,
+)
+PG_CONNECT_EXCEPTIONS = (
+    psycopg.Error,
+    OSError,
+    ValueError,
+)
+REDIS_EVENT_EXCEPTIONS = (
+    redis_lib.RedisError,
+    TypeError,
+    ValueError,
+)
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
     load_dotenv()
     args = _parse_args()
     config = _load_config(args.config)
+    setup_logging(config, component="core")
     log_file = _open_log(args.log)
 
     # Connections — each may be None (graceful degradation)
@@ -154,9 +197,17 @@ def main() -> None:
             action_manager.submit_from_thoughts(new_thoughts)
         except KeyboardInterrupt:
             raise
-        except Exception as e:
+        except MAIN_LOOP_EXCEPTIONS as e:
             stimulus_queue.requeue_front(stimuli)
             _print_error(log_file, cycle_id, e, current_retry_delay)
+            time.sleep(current_retry_delay)
+            current_retry_delay = min(current_retry_delay * 2, max_retry_delay)
+            continue
+        # noinspection PyBroadException
+        except Exception:
+            stimulus_queue.requeue_front(stimuli)
+            logger.exception("unexpected main loop failure at cycle %s", cycle_id)
+            _print_error(log_file, cycle_id, RuntimeError("unexpected main loop failure"), current_retry_delay)
             time.sleep(current_retry_delay)
             current_retry_delay = min(current_retry_delay * 2, max_retry_delay)
             continue
@@ -189,7 +240,7 @@ def _retrieve_associations(
     anchor = context[-1]
     try:
         vec = embed_text(ollama_client, anchor.content, embedding_model)
-    except Exception:
+    except EMBEDDING_EXCEPTIONS:
         return None
     try:
         entries = ltm.search(vec)
@@ -197,7 +248,7 @@ def _retrieve_associations(
             return None
         ltm.mark_accessed([e.id for e in entries])
         return [e.content for e in entries]
-    except Exception:
+    except LTM_EXCEPTIONS:
         ltm.disconnect()
         return None
 
@@ -215,7 +266,7 @@ def _store_to_ltm(
     for t in thoughts:
         try:
             vec = embed_text(ollama_client, t.content, embedding_model)
-        except Exception:
+        except EMBEDDING_EXCEPTIONS:
             continue
         try:
             ltm.store(
@@ -224,7 +275,7 @@ def _store_to_ltm(
                 embedding=vec,
                 source_cycle_id=cycle_id,
             )
-        except Exception:
+        except LTM_EXCEPTIONS:
             ltm.disconnect()
             return
 
@@ -284,7 +335,7 @@ def _connect_pg():
             password=db_password,
         )
         return conn
-    except Exception:
+    except PG_CONNECT_EXCEPTIONS:
         return None
 
 
@@ -361,6 +412,7 @@ def _output(log_file, text: str) -> None:
 
 def _print_error(log_file, cycle_id: int, error: Exception, retry_delay: float) -> None:
     msg = f"── C{cycle_id} ERROR: {error} (retry in {retry_delay:.1f}s)"
+    logger.warning(msg, exc_info=True)
     print(f"\n\033[31m{msg}\033[0m", file=sys.stderr)
     if log_file:
         log_file.write(f"\n{msg}\n")
@@ -375,7 +427,7 @@ def _publish_event(redis_client, event_type: str, payload: EventPayload) -> None
             "type": event_type,
             "payload": payload,
         }, ensure_ascii=False))
-    except Exception:
+    except REDIS_EVENT_EXCEPTIONS:
         return
 
 
