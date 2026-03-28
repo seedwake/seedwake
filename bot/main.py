@@ -69,12 +69,12 @@ def create_application(config: dict | None = None, redis_client=None) -> Applica
     if not allowed_user_ids:
         raise RuntimeError("config.yml 缺少 telegram.allowed_user_ids")
 
-    async def post_init(application: Application) -> None:
-        task = asyncio.create_task(_forward_events(application), name="seedwake-telegram-events")
-        application.bot_data["event_forwarder"] = task
+    async def post_init(app: Application) -> None:
+        task = asyncio.create_task(_forward_events(app), name="seedwake-telegram-events")
+        app.bot_data["event_forwarder"] = task
 
-    async def post_shutdown(application: Application) -> None:
-        task = application.bot_data.get("event_forwarder")
+    async def post_shutdown(app: Application) -> None:
+        task = app.bot_data.get("event_forwarder")
         if task is None:
             return
         task.cancel()

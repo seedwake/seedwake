@@ -141,8 +141,8 @@ class PerceptionManager:
     def _is_due(self, stimulus_type: str, cycle_id: int, interval_cycles: int) -> bool:
         return self._is_due_from(self._last_seen_cycle, stimulus_type, cycle_id, interval_cycles)
 
+    @staticmethod
     def _is_due_from(
-        self,
         store: dict[str, int],
         stimulus_type: str,
         cycle_id: int,

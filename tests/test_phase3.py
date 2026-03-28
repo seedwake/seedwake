@@ -375,7 +375,8 @@ class ActionManagerTests(unittest.TestCase):
         barrier = Barrier(2)
 
         class Executor:
-            def execute(self, action):
+            @staticmethod
+            def execute(action):
                 barrier.wait(timeout=1)
                 return _action_result(
                     summary="新闻已读取",

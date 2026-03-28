@@ -29,7 +29,8 @@ class FakePubSub:
     def __init__(self, messages):
         self._messages = messages
 
-    def subscribe(self, *channels):
+    @staticmethod
+    def subscribe(*channels):
         _ = channels
         return None
 
@@ -39,7 +40,8 @@ class FakePubSub:
             return None
         return self._messages.pop(0)
 
-    def close(self):
+    @staticmethod
+    def close():
         return None
 
 
@@ -50,7 +52,8 @@ class FakeRedis:
         self.sorted_sets = {}
         self.hashes = {}
 
-    def ping(self):
+    @staticmethod
+    def ping():
         return True
 
     def rpush(self, key, value):
@@ -80,7 +83,8 @@ class FakeRedis:
     def hvals(self, key):
         return list(self.hashes.get(key, {}).values())
 
-    def pubsub(self, ignore_subscribe_messages=True):
+    @staticmethod
+    def pubsub(ignore_subscribe_messages=True):
         _ = ignore_subscribe_messages
         return FakePubSub([
             {

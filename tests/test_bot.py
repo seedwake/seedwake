@@ -194,6 +194,7 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_dispatch_reply_event_sends_to_source_chat(self) -> None:
         context = _make_context(FakeRedis(), allowed_user_ids={1})
+        self.assertIsNotNone(context.application)
 
         await _dispatch_event(context.application, _reply_envelope("telegram:99", "你好"))
 
