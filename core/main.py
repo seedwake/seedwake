@@ -598,7 +598,9 @@ def _publish_event(redis_client, event_type: str, payload: EventPayload) -> None
 def _status_payload(message: str) -> StatusEventPayload:
     return {"message": message}
 
+
 # -- Utilities -------------------------------------------------------------
+
 
 def _load_config(path: str) -> dict:
     try:

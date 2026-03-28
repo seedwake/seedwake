@@ -16,7 +16,7 @@ from redis import exceptions as redis_exceptions
 
 from core.openclaw_gateway import OpenClawUnavailableError
 from core.perception import collect_system_status_snapshot
-from core.rss import RSS_READ_EXCEPTIONS, read_news_result
+from core.rss import RSS_READ_EXCEPTIONS, read_news_result, summarize_news_items
 from core.stimulus import Stimulus, StimulusQueue, append_conversation_history
 from core.thought_parser import Thought
 from core.types import (
@@ -25,6 +25,7 @@ from core.types import (
     ActionResultEnvelope,
     JsonObject,
     NewsItem,
+    RawActionRequest,
 )
 
 ACTION_REDIS_KEY = "seedwake:actions"
@@ -402,7 +403,7 @@ class ActionManager:
                 "target_entity": target_entity,
                 "message": message_text,
             },
-            error=None,
+            error_detail=None,
             run_id=None,
             session_key=None,
             transport="native",
@@ -595,7 +596,7 @@ class ActionManager:
                 result,
                 ok=False,
                 summary="新闻结果缺少结构化 RSS 条目",
-                error="malformed_news_result",
+                error_detail="malformed_news_result",
             )
             return "failed", malformed, True
         deduped_result, should_emit = self._dedupe_news_result(result)
@@ -644,7 +645,7 @@ class ActionManager:
             deduped_result["summary"] = "新闻条目缺少可识别字段"
             deduped_result["error"] = "malformed_news_items"
             return deduped_result, True
-        deduped_result["summary"] = _summarize_news_items(new_items)
+        deduped_result["summary"] = summarize_news_items(new_items)
         if not new_items:
             return deduped_result, False
         return deduped_result, True
@@ -1011,7 +1012,10 @@ def _planner_tools() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "native_send_message",
-                "description": "Send a Telegram message to the current conversation target, explicit telegram target, or resolved entity contact.",
+                "description": (
+                    "Send a Telegram message to the current conversation target, "
+                    "explicit telegram target, or resolved entity contact."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1203,7 +1207,7 @@ def _run_native_action(
                 "local_iso": now.isoformat(),
                 "utc_iso": datetime.now(timezone.utc).isoformat(),
             },
-            error=None,
+            error_detail=None,
             run_id=None,
             session_key=None,
             transport="native",
@@ -1226,7 +1230,7 @@ def _run_native_action(
                 "target_entity": target_entity,
                 "message": message_text,
             },
-            error=None,
+            error_detail=None,
             run_id=None,
             session_key=None,
             transport="native",
@@ -1237,7 +1241,7 @@ def _run_native_action(
             ok=True,
             summary=str(snapshot.get("summary") or "系统状态已更新"),
             data=dict(snapshot),
-            error=None,
+            error_detail=None,
             run_id=None,
             session_key=None,
             transport="native",
@@ -1354,7 +1358,7 @@ def _build_action_result(
     ok: bool,
     summary: str,
     data: JsonObject,
-    error,
+    error_detail,
     run_id: str | None,
     session_key: str | None,
     transport: str,
@@ -1364,7 +1368,7 @@ def _build_action_result(
         "ok": ok,
         "summary": summary,
         "data": data,
-        "error": error,
+        "error": error_detail,
         "run_id": run_id,
         "session_key": session_key,
         "transport": transport,
@@ -1374,12 +1378,12 @@ def _build_action_result(
     return result
 
 
-def _failure_result(summary: str, error, *, transport: str) -> ActionResultEnvelope:
+def _failure_result(summary: str, error_detail, *, transport: str) -> ActionResultEnvelope:
     return _build_action_result(
         ok=False,
         summary=summary,
         data={},
-        error=error,
+        error_detail=error_detail,
         run_id=None,
         session_key=None,
         transport=transport,
@@ -1392,14 +1396,14 @@ def _copy_action_result(
     ok: bool | None = None,
     summary: str | None = None,
     data: JsonObject | None = None,
-    error=None,
+    error_detail=None,
 ) -> ActionResultEnvelope:
     copied_data = _result_data_or_default(result, data)
     copied = _build_action_result(
         ok=bool(result.get("ok", True)) if ok is None else ok,
         summary=str(result.get("summary") or "") if summary is None else summary,
         data=copied_data,
-        error=result.get("error") if error is None else error,
+        error_detail=result.get("error") if error_detail is None else error_detail,
         run_id=result.get("run_id") if isinstance(result.get("run_id"), str) else None,
         session_key=result.get("session_key") if isinstance(result.get("session_key"), str) else None,
         transport=str(result.get("transport") or ""),
@@ -1439,7 +1443,7 @@ def _normalize_action_result(result: ActionResultEnvelope, action: ActionRecord)
         ok=bool(result.get("ok", True)),
         summary=summary,
         data=data if isinstance(data, dict) else {},
-        error=result.get("error"),
+        error_detail=result.get("error"),
         run_id=result.get("run_id") if isinstance(result.get("run_id"), str) else action.run_id,
         session_key=(
             result.get("session_key")
@@ -1681,27 +1685,6 @@ def _news_item_key(item: NewsItem) -> str | None:
     return f"hash::{digest}"
 
 
-def _summarize_news_items(items: list[NewsItem]) -> str:
-    if not items:
-        return "RSS 没有新的条目"
-    labels = []
-    for item in items[:3]:
-        title = str(item.get("title") or "").strip()
-        feed_url = str(item.get("feed_url") or "").strip()
-        if title and feed_url:
-            labels.append(f"{title} ({feed_url})")
-            continue
-        if title:
-            labels.append(title)
-            continue
-        summary = str(item.get("summary") or "").strip()
-        if summary:
-            labels.append(summary)
-    if not labels:
-        return f"RSS 新条目 {len(items)} 条"
-    return f"RSS 新条目 {len(items)} 条：{'；'.join(labels)}"
-
-
 def _build_result_stimulus(
     action: ActionRecord,
     status: str,
@@ -1841,14 +1824,14 @@ def _action_from_json_object(item: JsonObject, *, now: datetime) -> ActionRecord
     source_thought_id = _stringify_json_field(item.get("source_thought_id"))
     source_content = _stringify_json_field(item.get("source_content"))
     status = _stringify_json_field(item.get("status")) or "pending"
-    request = item.get("request")
+    raw_request = item.get("request")
     if not (
         action_id
         and action_type
         and executor
         and source_thought_id
         and source_content
-        and isinstance(request, dict)
+        and isinstance(raw_request, dict)
     ):
         logger.warning("skipping incomplete action record: %s", action_id or "<unknown>")
         return None
@@ -1856,11 +1839,11 @@ def _action_from_json_object(item: JsonObject, *, now: datetime) -> ActionRecord
     if status not in {"pending", "running"} and not awaiting_confirmation:
         return None
 
-    request_payload = _coerce_action_request_payload(request, source_content)
+    request_payload = _coerce_action_request_payload(raw_request, source_content)
     submitted_at = _parse_action_datetime(item.get("submitted_at")) or now
     dispatch_started_at = _parse_action_datetime(item.get("dispatch_started_at"))
     restored_status = "pending" if status == "running" else status
-    restored_result = result if isinstance((result := item.get("result")), dict) else None
+    restored_result = _coerce_restored_action_result(item.get("result"))
     if status == "running" and action_type == "send_message" and dispatch_started_at is not None:
         restored_status = "failed"
         restored_result = _failure_result(
@@ -1884,7 +1867,7 @@ def _action_from_json_object(item: JsonObject, *, now: datetime) -> ActionRecord
         retry_after=_parse_action_datetime(item.get("retry_after")),
         dispatch_started_at=dispatch_started_at,
     )
-    if isinstance(restored_result, dict):
+    if restored_result is not None:
         action.result = _normalize_action_result(restored_result, action)
     if action.status == "pending" and not action.awaiting_confirmation and action.executor == "openclaw":
         action.retry_after = action.retry_after or now
@@ -1892,11 +1875,11 @@ def _action_from_json_object(item: JsonObject, *, now: datetime) -> ActionRecord
 
 
 def _coerce_action_request_payload(value: JsonObject, source_content: str) -> ActionRequestPayload:
-    raw_action = value.get("raw_action")
+    raw_action = _coerce_raw_action_request(value.get("raw_action"))
     payload: ActionRequestPayload = {
         "task": _stringify_json_field(value.get("task")) or source_content,
         "reason": _stringify_json_field(value.get("reason")) or "restored",
-        "raw_action": raw_action if isinstance(raw_action, dict) else None,
+        "raw_action": raw_action,
     }
     news_feed_urls = _coerce_news_feed_urls(value.get("news_feed_urls"))
     if news_feed_urls:
@@ -1916,6 +1899,39 @@ def _coerce_action_request_payload(value: JsonObject, source_content: str) -> Ac
     return payload
 
 
+def _coerce_restored_action_result(value) -> ActionResultEnvelope | None:
+    if not isinstance(value, dict):
+        return None
+    restored_data = _coerce_json_object(value.get("data"))
+    restored: ActionResultEnvelope = {
+        "ok": bool(value.get("ok", False)),
+        "summary": _stringify_json_field(value.get("summary")) or "",
+        "data": restored_data,
+        "error": value.get("error"),
+        "run_id": _stringify_json_field(value.get("run_id")) or None,
+        "session_key": _stringify_json_field(value.get("session_key")) or None,
+        "transport": _stringify_json_field(value.get("transport")) or "",
+    }
+    raw_text = value.get("raw_text")
+    if isinstance(raw_text, str):
+        restored["raw_text"] = raw_text
+    return restored
+
+
+def _coerce_raw_action_request(value) -> RawActionRequest | None:
+    if not isinstance(value, dict):
+        return None
+    action_type = _stringify_json_field(value.get("type"))
+    params = _stringify_json_field(value.get("params"))
+    if not action_type or params is None:
+        return None
+    raw_action: RawActionRequest = {
+        "type": action_type,
+        "params": params,
+    }
+    return raw_action
+
+
 def _parse_action_datetime(value) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -1923,3 +1939,9 @@ def _parse_action_datetime(value) -> datetime | None:
         return datetime.fromisoformat(value)
     except ValueError:
         return None
+
+
+def _coerce_json_object(value) -> JsonObject:
+    if not isinstance(value, dict):
+        return {}
+    return value

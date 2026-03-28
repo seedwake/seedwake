@@ -49,7 +49,10 @@ def read_news_result(feed_urls: list[str], timeout_seconds: int = 30) -> ActionR
             if remaining <= 0:
                 failures.append("rss_timeout_budget_exhausted")
                 break
-            xml_text = _fetch_feed_text(feed_url, timeout_seconds=min(FEED_TIMEOUT_SECONDS, max(1.0, remaining)))
+            xml_text = _fetch_feed_text(
+                feed_url,
+                timeout_seconds=min(float(FEED_TIMEOUT_SECONDS), max(1.0, remaining)),
+            )
             for item in _parse_feed_items(feed_url, xml_text):
                 items.append((item, _sort_timestamp(item.get("published_at", "")), sequence))
                 sequence += 1
@@ -67,7 +70,7 @@ def read_news_result(feed_urls: list[str], timeout_seconds: int = 30) -> ActionR
     if ordered_items:
         return _build_result(
             ok=True,
-            summary=_summarize_items(ordered_items),
+            summary=summarize_news_items(ordered_items),
             data=data,
             error_detail=None,
         )
@@ -242,7 +245,7 @@ def _sort_timestamp(value: str) -> float | None:
     return parsed.timestamp()
 
 
-def _order_items(items: list[tuple[NewsItem, float | None, int]]) -> list[JsonObject]:
+def _order_items(items: list[tuple[NewsItem, float | None, int]]) -> list[NewsItem]:
     ranked = sorted(
         items,
         key=lambda item: (
@@ -252,10 +255,10 @@ def _order_items(items: list[tuple[NewsItem, float | None, int]]) -> list[JsonOb
         ),
         reverse=True,
     )
-    return [dict(item) for item, _, _ in ranked[:MAX_TOTAL_ITEMS]]
+    return [item for item, _, _ in ranked[:MAX_TOTAL_ITEMS]]
 
 
-def _summarize_items(items: list[JsonObject]) -> str:
+def summarize_news_items(items: list[NewsItem]) -> str:
     if not items:
         return "RSS 没有新的条目"
     labels = []

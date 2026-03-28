@@ -26,6 +26,26 @@ def _as_request(value: object) -> Request:
     return cast(Request, value)
 
 
+def _conversation_history_entry(
+    *,
+    entry_id: str,
+    role: str,
+    content: str,
+    source: str = "telegram:1",
+    timestamp: str = "2026-03-27T12:00:00+00:00",
+    stimulus_id: str = "stim_1",
+) -> str:
+    return json.dumps({
+        "entry_id": entry_id,
+        "role": role,
+        "source": source,
+        "content": content,
+        "timestamp": timestamp,
+        "stimulus_id": stimulus_id,
+        "metadata": {},
+    }, ensure_ascii=False)
+
+
 class FakePubSub:
     def __init__(self, messages):
         self._messages = messages
@@ -126,27 +146,16 @@ class BackendTests(unittest.TestCase):
     def test_conversation_history_query(self) -> None:
         self.redis.rpush(
             CONVERSATION_HISTORY_KEY,
-            json.dumps({
-                "entry_id": "conv_1",
-                "role": "user",
-                "source": "telegram:1",
-                "content": "你好",
-                "timestamp": "2026-03-27T12:00:00+00:00",
-                "stimulus_id": "stim_1",
-                "metadata": {},
-            }, ensure_ascii=False),
+            _conversation_history_entry(entry_id="conv_1", role="user", content="你好"),
         )
         self.redis.rpush(
             CONVERSATION_HISTORY_KEY,
-            json.dumps({
-                "entry_id": "conv_2",
-                "role": "assistant",
-                "source": "telegram:1",
-                "content": "你好，我在。",
-                "timestamp": "2026-03-27T12:00:01+00:00",
-                "stimulus_id": "stim_1",
-                "metadata": {},
-            }, ensure_ascii=False),
+            _conversation_history_entry(
+                entry_id="conv_2",
+                role="assistant",
+                content="你好，我在。",
+                timestamp="2026-03-27T12:00:01+00:00",
+            ),
         )
 
         response = self.client.get(
@@ -164,15 +173,12 @@ class BackendTests(unittest.TestCase):
         self.redis.rpush(CONVERSATION_HISTORY_KEY, "{bad json")
         self.redis.rpush(
             CONVERSATION_HISTORY_KEY,
-            json.dumps({
-                "entry_id": "conv_2",
-                "role": "assistant",
-                "source": "telegram:1",
-                "content": "你好，我在。",
-                "timestamp": "2026-03-27T12:00:01+00:00",
-                "stimulus_id": "stim_1",
-                "metadata": {},
-            }, ensure_ascii=False),
+            _conversation_history_entry(
+                entry_id="conv_2",
+                role="assistant",
+                content="你好，我在。",
+                timestamp="2026-03-27T12:00:01+00:00",
+            ),
         )
 
         response = self.client.get(

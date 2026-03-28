@@ -148,6 +148,36 @@ def _action_envelope() -> EventEnvelope:
     return {"type": "action", "payload": payload}
 
 
+def _store_running_action(redis_client: FakeRedis, action_id: str = "act_1") -> None:
+    redis_client.hset(
+        "seedwake:actions",
+        action_id,
+        (
+            f'{{"action_id":"{action_id}","type":"search","executor":"openclaw","status":"running",'
+            '"submitted_at":"2026-03-27T00:00:00+00:00"}'
+        ),
+    )
+
+
+async def _assert_live_actions_output(
+    test_case: unittest.TestCase,
+    redis_client: FakeRedis,
+    *,
+    include_malformed: bool = False,
+) -> None:
+    if include_malformed:
+        redis_client.hset("seedwake:actions", "bad", "{bad json")
+    _store_running_action(redis_client)
+    update = _make_update()
+    context = _make_context(redis_client, allowed_user_ids={1}, admin_user_ids={1})
+
+    await _handle_actions(update, context)
+
+    reply_mock = _reply_text_mock(update)
+    reply_mock.assert_awaited_once()
+    test_case.assertIn("act_1", reply_mock.await_args.args[0])
+
+
 class TelegramBotHelpersTests(unittest.TestCase):
     def test_load_allowed_user_ids(self) -> None:
         config = {"telegram": {"allowed_user_ids": [123, "456", "bad", 123]}}
@@ -285,38 +315,11 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_handle_actions_reads_live_actions(self) -> None:
         redis_client = FakeRedis()
-        redis_client.hset(
-            "seedwake:actions",
-            "act_1",
-            ('{"action_id":"act_1","type":"search","executor":"openclaw","status":"running",'
-             '"submitted_at":"2026-03-27T00:00:00+00:00"}'),
-        )
-        update = _make_update()
-        context = _make_context(redis_client, allowed_user_ids={1}, admin_user_ids={1})
-
-        await _handle_actions(update, context)
-
-        reply_mock = _reply_text_mock(update)
-        reply_mock.assert_awaited_once()
-        self.assertIn("act_1", reply_mock.await_args.args[0])
+        await _assert_live_actions_output(self, redis_client)
 
     async def test_handle_actions_skips_malformed_action_record(self) -> None:
         redis_client = FakeRedis()
-        redis_client.hset("seedwake:actions", "bad", "{bad json")
-        redis_client.hset(
-            "seedwake:actions",
-            "act_1",
-            ('{"action_id":"act_1","type":"search","executor":"openclaw","status":"running",'
-             '"submitted_at":"2026-03-27T00:00:00+00:00"}'),
-        )
-        update = _make_update()
-        context = _make_context(redis_client, allowed_user_ids={1}, admin_user_ids={1})
-
-        await _handle_actions(update, context)
-
-        reply_mock = _reply_text_mock(update)
-        reply_mock.assert_awaited_once()
-        self.assertIn("act_1", reply_mock.await_args.args[0])
+        await _assert_live_actions_output(self, redis_client, include_malformed=True)
 
     async def test_handle_actions_marks_redis_unavailable_on_read_error(self) -> None:
         class FailingRedis(FakeRedis):

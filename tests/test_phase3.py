@@ -1,5 +1,6 @@
 import json
 import unittest
+from email.message import Message
 from threading import Barrier
 from unittest.mock import MagicMock, patch
 from urllib import error
@@ -22,7 +23,7 @@ from core.prompt_builder import build_prompt
 from core.rss import read_news_result
 from core.stimulus import CONVERSATION_HISTORY_KEY, Stimulus, StimulusQueue
 from core.thought_parser import Thought
-from core.types import ActionControl, ActionResultEnvelope
+from core.types import ActionControl, ActionResultEnvelope, NewsItem
 from test_support import ListRedisStub
 
 
@@ -117,7 +118,7 @@ def _action_result(
     summary: str,
     data: dict,
     ok: bool = True,
-    error=None,
+    error_detail=None,
     run_id: str | None = None,
     session_key: str | None = None,
     transport: str = "openclaw",
@@ -126,7 +127,7 @@ def _action_result(
         "ok": ok,
         "summary": summary,
         "data": data,
-        "error": error,
+        "error": error_detail,
         "run_id": run_id,
         "session_key": session_key,
         "transport": transport,
@@ -149,6 +150,52 @@ def _constant_news_reader(result: ActionResultEnvelope):
         return result
 
     return reader
+
+
+def _news_items(result: ActionResultEnvelope) -> list[NewsItem]:
+    raw_items = result["data"].get("items")
+    assert isinstance(raw_items, list)
+    items: list[NewsItem] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        items.append({
+            "feed_url": str(item.get("feed_url") or ""),
+            "guid": str(item.get("guid") or ""),
+            "link": str(item.get("link") or ""),
+            "title": str(item.get("title") or ""),
+            "published_at": str(item.get("published_at") or ""),
+            "summary": str(item.get("summary") or ""),
+        })
+    return items
+
+
+def _target_entity_message_params() -> str:
+    return 'target_entity:"person:alice", message:"你好"'
+
+
+def _telegram_http_error() -> error.HTTPError:
+    return error.HTTPError(
+        url="https://api.telegram.org",
+        code=403,
+        msg="forbidden",
+        hdrs=Message(),
+        fp=None,
+    )
+
+
+def _submit_send_message_success(
+    manager: ActionManager,
+    thoughts: list[Thought],
+    *,
+    stimuli: list[Stimulus] | None = None,
+) -> list:
+    with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
+        with patch("core.action.request.urlopen") as mock_urlopen:
+            response = MagicMock()
+            response.read.return_value = b'{"ok": true}'
+            mock_urlopen.return_value.__enter__.return_value = response
+            return manager.submit_from_thoughts(thoughts, stimuli=stimuli)
 
 
 def _build_action_manager(
@@ -183,6 +230,18 @@ def _build_action_manager(
 def _submit_and_shutdown(manager: ActionManager, thoughts: list[Thought]) -> list:
     try:
         return manager.submit_from_thoughts(thoughts)
+    finally:
+        manager.shutdown()
+
+
+def _submit_and_shutdown_with_stimuli(
+    manager: ActionManager,
+    thoughts: list[Thought],
+    *,
+    stimuli: list[Stimulus],
+) -> list:
+    try:
+        return _submit_send_message_success(manager, thoughts, stimuli=stimuli)
     finally:
         manager.shutdown()
 
@@ -356,6 +415,7 @@ class StimulusQueueTests(unittest.TestCase):
         self.assertEqual(len(second_round), 1)
         self.assertEqual(second_round[0].source, "telegram:2")
 
+
 class PromptBuilderPhase3Tests(unittest.TestCase):
     def test_prompt_includes_stimuli_and_running_actions(self) -> None:
         queue = StimulusQueue(redis_client=None)
@@ -407,7 +467,7 @@ class NativeNewsReaderTests(unittest.TestCase):
             result = read_news_result(["https://example.com/rss.xml"])
 
         self.assertTrue(result["ok"])
-        items = result["data"]["items"]
+        items = _news_items(result)
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["feed_url"], "https://example.com/rss.xml")
         self.assertEqual(items[0]["guid"], "item-1")
@@ -821,19 +881,15 @@ class ActionManagerTests(unittest.TestCase):
             event_callback=lambda event_type, payload: events.append((event_type, payload)),
         )
 
-        try:
-            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
-                with patch("core.action.request.urlopen") as mock_urlopen:
-                    response = MagicMock()
-                    response.read.return_value = b'{"ok": true}'
-                    mock_urlopen.return_value.__enter__.return_value = response
-                    created = manager.submit_from_thoughts(
-                        [_make_thought(action_request={"type": "send_message", "params": 'message:"我在。"'})],
-                        stimuli=[_conversation_stimulus()],
-                    )
-            manager.shutdown()
-        finally:
-            manager.shutdown()
+        created = _submit_and_shutdown_with_stimuli(
+            manager,
+            [
+                _make_thought(
+                    action_request={"type": "send_message", "params": 'message:"我在。"'}
+                )
+            ],
+            stimuli=[_conversation_stimulus()],
+        )
 
         self.assertEqual(created[0].status, "succeeded")
         self.assertEqual(events[-1][0], "reply")
@@ -957,14 +1013,14 @@ class ActionManagerTests(unittest.TestCase):
         )
 
         try:
-            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
-                with patch("core.action.request.urlopen") as mock_urlopen:
-                    response = MagicMock()
-                    response.read.return_value = b'{"ok": true}'
-                    mock_urlopen.return_value.__enter__.return_value = response
-                    created = manager.submit_from_thoughts([
-                        _make_thought(action_request={"type": "send_message", "params": 'target_entity:"person:alice", message:"你好"'})
-                    ])
+            created = _submit_send_message_success(
+                manager,
+                [
+                    _make_thought(
+                        action_request={"type": "send_message", "params": _target_entity_message_params()}
+                    )
+                ],
+            )
             manager.shutdown()
         finally:
             manager.shutdown()
@@ -991,16 +1047,13 @@ class ActionManagerTests(unittest.TestCase):
         )
 
         try:
+            telegram_error = _telegram_http_error()
             with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
-                with patch("core.action.request.urlopen", side_effect=error.HTTPError(
-                    url="https://api.telegram.org",
-                    code=403,
-                    msg="forbidden",
-                    hdrs=None,
-                    fp=None,
-                )):
+                with patch("core.action.request.urlopen", side_effect=telegram_error):
                     created = manager.submit_from_thoughts([
-                        _make_thought(action_request={"type": "send_message", "params": 'chat_id:"42", message:"你好"'})
+                        _make_thought(
+                            action_request={"type": "send_message", "params": 'chat_id:"42", message:"你好"'}
+                        )
                     ])
             manager.shutdown()
         finally:
@@ -1032,7 +1085,9 @@ class ActionManagerTests(unittest.TestCase):
 
         try:
             created = manager.submit_from_thoughts([
-                _make_thought(action_request={"type": "send_message", "params": 'target_entity:"person:alice", message:"你好"'})
+                _make_thought(
+                    action_request={"type": "send_message", "params": _target_entity_message_params()}
+                )
             ])
             manager.shutdown()
         finally:
@@ -1061,19 +1116,15 @@ class ActionManagerTests(unittest.TestCase):
             auto_execute=["send_message"],
         )
 
-        try:
-            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
-                with patch("core.action.request.urlopen") as mock_urlopen:
-                    response = MagicMock()
-                    response.read.return_value = b'{"ok": true}'
-                    mock_urlopen.return_value.__enter__.return_value = response
-                    created = manager.submit_from_thoughts(
-                        [_make_thought(action_request={"type": "send_message", "params": 'message:"我在。"'})],
-                        stimuli=[_conversation_stimulus()],
-                    )
-            manager.shutdown()
-        finally:
-            manager.shutdown()
+        created = _submit_and_shutdown_with_stimuli(
+            manager,
+            [
+                _make_thought(
+                    action_request={"type": "send_message", "params": 'message:"我在。"'}
+                )
+            ],
+            stimuli=[_conversation_stimulus()],
+        )
 
         self.assertEqual(created[0].status, "succeeded")
         self.assertEqual(events[-1][0], "reply")
@@ -1377,7 +1428,10 @@ class ActionControlQueueTests(unittest.TestCase):
             def __init__(self):
                 self.items = [
                     "{bad json",
-                    '{"action_id":"act_2","approved":true,"actor":"alice","note":"","timestamp":"2026-03-28T00:00:00+00:00"}',
+                    json.dumps(
+                        _action_control("act_2", approved=True, actor="alice", note=""),
+                        ensure_ascii=False,
+                    ),
                 ]
 
             def lrange(self, key, start, stop):
