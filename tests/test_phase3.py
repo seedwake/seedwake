@@ -2,11 +2,11 @@ import json
 import unittest
 from threading import Barrier
 from unittest.mock import MagicMock, patch
+from urllib import error
 
 # noinspection PyProtectedMember
-from core.main import _publish_reply_event
-# noinspection PyProtectedMember
 from core.action import (
+    ACTION_REDIS_KEY,
     ActionManager,
     ActionPlan,
     NEWS_SEEN_REDIS_KEY,
@@ -14,11 +14,13 @@ from core.action import (
     pop_action_controls,
     push_action_control,
 )
+# noinspection PyProtectedMember
+from core.main import _select_cycle_stimuli
 from core.openclaw_gateway import OpenClawUnavailableError
 from core.perception import PerceptionManager
 from core.prompt_builder import build_prompt
 from core.rss import read_news_result
-from core.stimulus import CONVERSATION_HISTORY_KEY, StimulusQueue
+from core.stimulus import CONVERSATION_HISTORY_KEY, Stimulus, StimulusQueue
 from core.thought_parser import Thought
 from core.types import ActionControl, ActionResultEnvelope
 from test_support import ListRedisStub
@@ -41,11 +43,22 @@ def _make_thought(
     )
 
 
+def _conversation_stimulus(source: str = "telegram:1", content: str = "你好") -> Stimulus:
+    return Stimulus(
+        stimulus_id="stim_conv_1",
+        type="conversation",
+        priority=1,
+        source=source,
+        content=content,
+    )
+
+
 class _Planner:
     def __init__(self, plan: ActionPlan | None):
         self._plan = plan
 
-    def plan(self, _thought: Thought) -> ActionPlan | None:
+    def plan(self, _thought: Thought, *, conversation_source: str | None = None) -> ActionPlan | None:
+        _ = conversation_source
         return self._plan
 
 
@@ -145,6 +158,8 @@ def _build_action_manager(
     redis_client=None,
     openclaw_executor=None,
     news_reader=None,
+    contact_resolver=None,
+    event_callback=None,
     auto_execute=None,
     require_confirmation=None,
     forbidden=None,
@@ -160,6 +175,8 @@ def _build_action_manager(
         forbidden=forbidden or [],
         news_seen_max_items=news_seen_max_items,
         news_reader=news_reader,
+        contact_resolver=contact_resolver,
+        event_callback=event_callback,
     )
 
 
@@ -326,16 +343,18 @@ class StimulusQueueTests(unittest.TestCase):
         restored = queue.pop_many(limit=2)
         self.assertEqual([stimulus.stimulus_id for stimulus in restored], [first.stimulus_id, second.stimulus_id])
 
-    def test_reply_event_is_recorded_in_history(self) -> None:
-        redis_stub = ListRedisStub()
+    def test_select_cycle_stimuli_keeps_single_conversation_per_round(self) -> None:
         queue = StimulusQueue(redis_client=None)
-        stimulus = queue.push("conversation", 1, "telegram:1", "你好")
+        queue.push("conversation", 1, "telegram:1", "Alice")
+        queue.push("conversation", 1, "telegram:2", "Bob")
 
-        _publish_reply_event(redis_stub, [stimulus], [_make_thought(thought_type="反应", content="你好，我在。")])
+        first_round = _select_cycle_stimuli(queue)
+        second_round = _select_cycle_stimuli(queue)
 
-        self.assertIn(CONVERSATION_HISTORY_KEY, redis_stub.lists)
-        self.assertIn('"role": "assistant"', redis_stub.lists[CONVERSATION_HISTORY_KEY][0])
-
+        self.assertEqual(len(first_round), 1)
+        self.assertEqual(first_round[0].source, "telegram:1")
+        self.assertEqual(len(second_round), 1)
+        self.assertEqual(second_round[0].source, "telegram:2")
 
 class PromptBuilderPhase3Tests(unittest.TestCase):
     def test_prompt_includes_stimuli_and_running_actions(self) -> None:
@@ -786,6 +805,43 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(stimulus.type, "system_status")
         self.assertIn("summary", stimulus.metadata["result"]["data"])
 
+    def test_native_send_message_uses_current_conversation_source(self) -> None:
+        redis_stub = ListRedisStub()
+        queue = StimulusQueue(redis_client=None)
+        events = []
+        planner = _Planner(ActionPlan("send_message", "native", "发送消息", 30, "测试", message_text="我在。"))
+        manager = ActionManager(
+            redis_client=redis_stub,
+            stimulus_queue=queue,
+            planner=planner,
+            openclaw_executor=_OpenClawExecutor(),
+            auto_execute=["send_message"],
+            require_confirmation=[],
+            forbidden=[],
+            event_callback=lambda event_type, payload: events.append((event_type, payload)),
+        )
+
+        try:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
+                with patch("core.action.request.urlopen") as mock_urlopen:
+                    response = MagicMock()
+                    response.read.return_value = b'{"ok": true}'
+                    mock_urlopen.return_value.__enter__.return_value = response
+                    created = manager.submit_from_thoughts(
+                        [_make_thought(action_request={"type": "send_message", "params": 'message:"我在。"'})],
+                        stimuli=[_conversation_stimulus()],
+                    )
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(created[0].status, "succeeded")
+        self.assertEqual(events[-1][0], "reply")
+        self.assertEqual(events[-1][1]["source"], "telegram:1")
+        self.assertEqual(events[-1][1]["message"], "我在。")
+        self.assertIn(CONVERSATION_HISTORY_KEY, redis_stub.lists)
+        self.assertIn('"role": "assistant"', redis_stub.lists[CONVERSATION_HISTORY_KEY][0])
+
     def test_perception_action_auto_executes_without_auto_execute_list(self) -> None:
         queue = StimulusQueue(redis_client=None)
         planner = _Planner(ActionPlan("weather", "openclaw", "查询当前天气", 30, "测试"))
@@ -837,6 +893,271 @@ class ActionManagerTests(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertEqual(plan.executor, "openclaw")
         self.assertIn("塔林", plan.task)
+
+    def test_send_message_fallback_uses_conversation_source(self) -> None:
+        thought = _make_thought(
+            thought_type="意图",
+            content="告诉她我已经收到 {action:send_message, message:\"我已经收到\"}",
+            action_request={"type": "send_message", "params": 'message:"我已经收到"'},
+        )
+
+        plan = _fallback_plan(
+            raw_action_type="send_message",
+            thought=thought,
+            default_timeout_seconds=30,
+            default_weather_location="",
+            news_feed_urls=[],
+            conversation_source="telegram:42",
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.executor, "native")
+        self.assertEqual(plan.target_source, "telegram:42")
+        self.assertEqual(plan.message_text, "我已经收到")
+
+    def test_send_message_fallback_preserves_target_entity(self) -> None:
+        thought = _make_thought(
+            thought_type="意图",
+            content="告诉 Alice 我已经看到 {action:send_message, target_entity:\"person:alice\", message:\"我已经看到\"}",
+            action_request={"type": "send_message", "params": 'target_entity:"person:alice", message:"我已经看到"'},
+        )
+
+        plan = _fallback_plan(
+            raw_action_type="send_message",
+            thought=thought,
+            default_timeout_seconds=30,
+            default_weather_location="",
+            news_feed_urls=[],
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.executor, "native")
+        self.assertEqual(plan.target_entity, "person:alice")
+        self.assertEqual(plan.message_text, "我已经看到")
+
+    def test_native_send_message_resolves_target_entity(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        events = []
+        planner = _Planner(ActionPlan(
+            "send_message",
+            "native",
+            "发送消息",
+            30,
+            "测试",
+            target_entity="person:alice",
+            message_text="你好",
+        ))
+        manager = _build_action_manager(
+            queue,
+            planner,
+            redis_client=ListRedisStub(),
+            contact_resolver=lambda entity: "telegram:99" if entity == "person:alice" else None,
+            event_callback=lambda event_type, payload: events.append((event_type, payload)),
+            auto_execute=["send_message"],
+        )
+
+        try:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
+                with patch("core.action.request.urlopen") as mock_urlopen:
+                    response = MagicMock()
+                    response.read.return_value = b'{"ok": true}'
+                    mock_urlopen.return_value.__enter__.return_value = response
+                    created = manager.submit_from_thoughts([
+                        _make_thought(action_request={"type": "send_message", "params": 'target_entity:"person:alice", message:"你好"'})
+                    ])
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(created[0].status, "succeeded")
+        self.assertEqual(events[-1][1]["source"], "telegram:99")
+
+    def test_native_send_message_fails_when_telegram_send_fails(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        planner = _Planner(ActionPlan(
+            "send_message",
+            "native",
+            "发送消息",
+            30,
+            "测试",
+            target_source="telegram:42",
+            message_text="你好",
+        ))
+        manager = _build_action_manager(
+            queue,
+            planner,
+            redis_client=ListRedisStub(),
+            auto_execute=["send_message"],
+        )
+
+        try:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
+                with patch("core.action.request.urlopen", side_effect=error.HTTPError(
+                    url="https://api.telegram.org",
+                    code=403,
+                    msg="forbidden",
+                    hdrs=None,
+                    fp=None,
+                )):
+                    created = manager.submit_from_thoughts([
+                        _make_thought(action_request={"type": "send_message", "params": 'chat_id:"42", message:"你好"'})
+                    ])
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(created[0].status, "failed")
+        stimulus = queue.pop_many(limit=1)[0]
+        self.assertEqual(stimulus.type, "action_result")
+        self.assertIn("Telegram 发送失败", stimulus.content)
+
+    def test_native_send_message_fails_when_target_entity_cannot_be_resolved(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        planner = _Planner(ActionPlan(
+            "send_message",
+            "native",
+            "发送消息",
+            30,
+            "测试",
+            target_entity="person:alice",
+            message_text="你好",
+        ))
+        manager = _build_action_manager(
+            queue,
+            planner,
+            redis_client=None,
+            contact_resolver=lambda entity: None,
+            auto_execute=["send_message"],
+        )
+
+        try:
+            created = manager.submit_from_thoughts([
+                _make_thought(action_request={"type": "send_message", "params": 'target_entity:"person:alice", message:"你好"'})
+            ])
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(created[0].status, "failed")
+        stimulus = queue.pop_many(limit=1)[0]
+        self.assertEqual(stimulus.type, "action_result")
+        self.assertIn("无法解析实体 person:alice", stimulus.content)
+
+    def test_native_send_message_history_failure_keeps_action_succeeded(self) -> None:
+        class HistoryFailingRedis(ListRedisStub):
+            def rpush(self, key, payload):
+                if key == CONVERSATION_HISTORY_KEY:
+                    raise OSError("history down")
+                super().rpush(key, payload)
+
+        redis_stub = HistoryFailingRedis()
+        events = []
+        queue = StimulusQueue(redis_client=None)
+        manager = _build_action_manager(
+            queue,
+            _Planner(ActionPlan("send_message", "native", "发送消息", 30, "测试", message_text="我在。")),
+            redis_client=redis_stub,
+            event_callback=lambda event_type, payload: events.append((event_type, payload)),
+            auto_execute=["send_message"],
+        )
+
+        try:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
+                with patch("core.action.request.urlopen") as mock_urlopen:
+                    response = MagicMock()
+                    response.read.return_value = b'{"ok": true}'
+                    mock_urlopen.return_value.__enter__.return_value = response
+                    created = manager.submit_from_thoughts(
+                        [_make_thought(action_request={"type": "send_message", "params": 'message:"我在。"'})],
+                        stimuli=[_conversation_stimulus()],
+                    )
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(created[0].status, "succeeded")
+        self.assertEqual(events[-1][0], "reply")
+        self.assertNotIn(CONVERSATION_HISTORY_KEY, redis_stub.lists)
+
+    def test_native_send_message_does_not_send_when_dispatch_marker_cannot_persist(self) -> None:
+        class DispatchStateFailingRedis(ListRedisStub):
+            def hset(self, key, field, value):
+                _ = field, value
+                if key == ACTION_REDIS_KEY:
+                    raise OSError("action redis down")
+                super().hset(key, field, value)
+
+        queue = StimulusQueue(redis_client=None)
+        manager = _build_action_manager(
+            queue,
+            _Planner(ActionPlan("send_message", "native", "发送消息", 30, "测试", message_text="我在。")),
+            redis_client=DispatchStateFailingRedis(),
+            auto_execute=["send_message"],
+        )
+
+        try:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
+                with patch("core.action.request.urlopen") as mock_urlopen:
+                    created = manager.submit_from_thoughts(
+                        [_make_thought(action_request={"type": "send_message", "params": 'message:"我在。"'})],
+                        stimuli=[_conversation_stimulus()],
+                    )
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        mock_urlopen.assert_not_called()
+        self.assertEqual(created[0].status, "failed")
+        stimulus = queue.pop_many(limit=1)[0]
+        self.assertEqual(stimulus.type, "action_result")
+        self.assertIn("消息发送前无法持久化状态", stimulus.content)
+
+    def test_restore_running_send_message_with_started_dispatch_does_not_resend(self) -> None:
+        redis_stub = ListRedisStub()
+        redis_stub.hset(
+            ACTION_REDIS_KEY,
+            "act_C1-1",
+            json.dumps({
+                "action_id": "act_C1-1",
+                "type": "send_message",
+                "executor": "native",
+                "status": "running",
+                "source_thought_id": "C1-1",
+                "source_content": "告诉她我在",
+                "submitted_at": "2026-03-29T12:00:00+00:00",
+                "timeout_seconds": 30,
+                "result": None,
+                "run_id": None,
+                "session_key": None,
+                "awaiting_confirmation": False,
+                "retry_after": None,
+                "dispatch_started_at": "2026-03-29T12:00:01+00:00",
+                "request": {
+                    "task": "向 telegram:42 发送消息：我在。",
+                    "reason": "测试",
+                    "raw_action": {"type": "send_message", "params": 'chat_id:"42", message:"我在。"'},
+                    "target_source": "telegram:42",
+                    "message_text": "我在。",
+                },
+            }, ensure_ascii=False),
+        )
+
+        with patch("core.action.request.urlopen") as mock_urlopen:
+            manager = _build_action_manager(
+                StimulusQueue(redis_client=None),
+                _Planner(None),
+                redis_client=redis_stub,
+            )
+            try:
+                manager.retry_deferred_actions()
+                manager.shutdown()
+            finally:
+                manager.shutdown()
+
+        mock_urlopen.assert_not_called()
+        restored = json.loads(redis_stub.hvals(ACTION_REDIS_KEY)[0])
+        self.assertEqual(restored["status"], "failed")
+        self.assertEqual(restored["result"]["error"], "delivery_status_unknown")
 
     def test_news_fallback_uses_fixed_rss_feeds(self) -> None:
         thought = _make_thought(
@@ -894,6 +1215,28 @@ class ActionManagerTests(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertEqual(plan.executor, "openclaw")
         self.assertIn("用户反馈 近一周", plan.task)
+
+    def test_file_modify_fallback_routes_to_ops_worker(self) -> None:
+        thought = _make_thought(
+            thought_type="意图",
+            content="我想改一下配置文件",
+            action_request={"type": "file_modify", "params": 'path:"config.yml", instruction:"把日志级别改成 DEBUG"'},
+        )
+
+        plan = _fallback_plan(
+            raw_action_type="file_modify",
+            thought=thought,
+            default_timeout_seconds=30,
+            default_weather_location="",
+            news_feed_urls=[],
+            worker_agent_id="seedwake-worker",
+            ops_worker_agent_id="seedwake-ops",
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.executor, "openclaw")
+        self.assertEqual(plan.worker_agent_id, "seedwake-ops")
+        self.assertIn("config.yml", plan.task)
 
     def test_reading_fallback_preserves_seedwake_query(self) -> None:
         thought = _make_thought(

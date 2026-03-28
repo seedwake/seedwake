@@ -186,6 +186,35 @@ class LongTermMemoryTests(unittest.TestCase):
 
         mock_conn.rollback.assert_called_once()
 
+    def test_resolve_telegram_target_for_entity(self) -> None:
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [
+            ('关系: 管理员。Telegram chat id: 123456。',),
+        ]
+        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cursor
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        ltm = LongTermMemory(mock_conn)
+
+        target = ltm.resolve_telegram_target_for_entity("person:alice")
+
+        self.assertEqual(target, "telegram:123456")
+
+    def test_resolve_telegram_target_accepts_legacy_entity_prefix(self) -> None:
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.side_effect = [
+            [],
+            [('关系: 管理员。telegram:123456。',)],
+        ]
+        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cursor
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        ltm = LongTermMemory(mock_conn)
+
+        target = ltm.resolve_telegram_target_for_entity("person:alice")
+
+        self.assertEqual(target, "telegram:123456")
+
 
 class RecoveryTests(unittest.TestCase):
     @patch("core.main._connect_redis")

@@ -12,6 +12,7 @@ def slice_window(items: list, start: int, end: int) -> list:
 class ListRedisStub:
     def __init__(self):
         self.lists = {}
+        self.hashes = {}
 
     def rpush(self, key, payload):
         self.lists.setdefault(key, []).append(payload)
@@ -27,6 +28,15 @@ class ListRedisStub:
 
     def ltrim(self, key, start, end):
         self.lists[key] = slice_window(self.lists.get(key, []), start, end)
+
+    def hset(self, key, field, value):
+        self.hashes.setdefault(key, {})[field] = value
+
+    def hvals(self, key):
+        return list(self.hashes.get(key, {}).values())
+
+    def hgetall(self, key):
+        return dict(self.hashes.get(key, {}))
 
     @staticmethod
     def publish(_channel, _payload):

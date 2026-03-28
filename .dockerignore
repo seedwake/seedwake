@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+.env.*
+config.yml
+data
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.ruff_cache
+.idea
+inspections

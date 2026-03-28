@@ -27,6 +27,7 @@ services:
     ports:
       - "8000:8000"
     environment:
+      BACKEND_API_TOKEN: ${BACKEND_API_TOKEN}
       REDIS_HOST: redis
       REDIS_PORT: 6379
     volumes:

@@ -27,9 +27,9 @@ from core.memory.long_term import LongTermMemory
 from core.memory.short_term import ShortTermMemory
 from core.perception import PerceptionManager
 from core.runtime import connect_redis_from_env, load_yaml_config
-from core.stimulus import Stimulus, StimulusQueue, append_conversation_history
+from core.stimulus import Stimulus, StimulusQueue
 from core.thought_parser import Thought
-from core.types import EventPayload, PerceptionStimulusPayload, ReplyEventPayload, StatusEventPayload
+from core.types import EventPayload, PerceptionStimulusPayload, StatusEventPayload
 
 # Terminal colors
 C_RESET = "\033[0m"
@@ -148,6 +148,7 @@ def _build_runtime_components(
         ollama_client,
         model_config,
         config.get("actions", {}),
+        contact_resolver=ltm.resolve_telegram_target_for_entity,
         news_feed_urls=list((config.get("perception", {}) or {}).get("news_feed_urls", [])),
         news_seen_ttl_hours=int((config.get("perception", {}) or {}).get("news_seen_ttl_hours", 720)),
         news_seen_max_items=int((config.get("perception", {}) or {}).get("news_seen_max_items", 5000)),
@@ -259,7 +260,7 @@ def _run_engine_loop(log_file, runtime: EngineRuntime, identity: dict[str, str])
             )
             continue
 
-        _finish_cycle(log_file, cycle_id, runtime.stm.redis_client, stimuli, new_thoughts)
+        _finish_cycle(log_file, cycle_id, stimuli, new_thoughts)
         current_retry_delay = runtime.retry_delay
 
 
@@ -288,12 +289,25 @@ def _prepare_cycle(
     controls = pop_action_controls(runtime.stm.redis_client)
     runtime.action_manager.apply_controls(controls)
     runtime.action_manager.retry_deferred_actions()
-    stimuli = runtime.stimulus_queue.pop_many(limit=2)
+    stimuli = _select_cycle_stimuli(runtime.stimulus_queue)
     runtime.perception.observe_stimuli(cycle_id, stimuli)
     runtime.perception.observe_types(cycle_id, runtime.action_manager.pop_perception_observations())
     running_actions = runtime.action_manager.running_actions()
     perception_cues = runtime.perception.build_prompt_cues(cycle_id, running_actions)
     return identity, last_redis_reconnect, last_pg_reconnect, stimuli, running_actions, perception_cues
+
+
+def _select_cycle_stimuli(stimulus_queue: StimulusQueue) -> list[Stimulus]:
+    stimuli = stimulus_queue.pop_many(limit=2)
+    if len(stimuli) <= 1:
+        return stimuli
+    first = stimuli[0]
+    if first.type != "conversation":
+        return stimuli
+    deferred = stimuli[1:]
+    if deferred:
+        stimulus_queue.requeue_front(deferred)
+    return [first]
 
 
 def _recover_runtime_services(
@@ -365,7 +379,7 @@ def _execute_cycle(
     )
     runtime.stm.append(thoughts)
     _store_to_ltm(runtime.ltm, runtime.ollama_client, thoughts, runtime.embedding_model, cycle_id)
-    runtime.action_manager.submit_from_thoughts(thoughts)
+    runtime.action_manager.submit_from_thoughts(thoughts, stimuli=stimuli)
     return thoughts
 
 
@@ -384,10 +398,9 @@ def _handle_cycle_failure(
     return min(retry_delay * 2, max_retry_delay)
 
 
-def _finish_cycle(log_file, cycle_id: int, redis_client, stimuli: list[Stimulus], thoughts: list[Thought]) -> None:
+def _finish_cycle(log_file, cycle_id: int, stimuli: list[Stimulus], thoughts: list[Thought]) -> None:
     _print_stimuli(log_file, stimuli)
     _print_cycle(log_file, cycle_id, thoughts)
-    _publish_reply_event(redis_client, stimuli, thoughts)
 
 
 # -- Long-term memory read/write ------------------------------------------
@@ -543,27 +556,6 @@ def _print_stimuli(log_file, stimuli: list[Stimulus]) -> None:
         log_file.flush()
 
 
-def _publish_reply_event(redis_client, stimuli: list[Stimulus], thoughts: list[Thought]) -> None:
-    conversation = next((stimulus for stimulus in stimuli if stimulus.type == "conversation"), None)
-    if conversation is None:
-        return
-    reply = _select_reply_text(thoughts)
-    if not reply:
-        return
-    append_conversation_history(
-        redis_client,
-        role="assistant",
-        source=conversation.source,
-        content=reply,
-        stimulus_id=conversation.stimulus_id,
-    )
-    _publish_event(redis_client, "reply", _reply_payload(
-        source=conversation.source,
-        message=reply,
-        stimulus_id=conversation.stimulus_id,
-    ))
-
-
 def _push_passive_stimuli(stimulus_queue: StimulusQueue, stimuli: list[PerceptionStimulusPayload]) -> None:
     for stimulus in stimuli:
         stimulus_queue.push(
@@ -605,24 +597,6 @@ def _publish_event(redis_client, event_type: str, payload: EventPayload) -> None
 
 def _status_payload(message: str) -> StatusEventPayload:
     return {"message": message}
-
-
-def _reply_payload(*, source: str, message: str, stimulus_id: str | None) -> ReplyEventPayload:
-    return {
-        "source": source,
-        "message": message,
-        "stimulus_id": stimulus_id,
-    }
-
-
-def _select_reply_text(thoughts: list[Thought]) -> str | None:
-    reactive = next((thought for thought in thoughts if thought.type == "反应"), None)
-    if reactive:
-        return reactive.content
-    if thoughts:
-        return thoughts[0].content
-    return None
-
 
 # -- Utilities -------------------------------------------------------------
 

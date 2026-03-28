@@ -3,11 +3,13 @@
 import hashlib
 import json
 import logging
+import os
 import re
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from threading import Lock
+from urllib import error, request
 
 from ollama import RequestError as OllamaRequestError, ResponseError as OllamaResponseError
 from redis import exceptions as redis_exceptions
@@ -15,7 +17,7 @@ from redis import exceptions as redis_exceptions
 from core.openclaw_gateway import OpenClawUnavailableError
 from core.perception import collect_system_status_snapshot
 from core.rss import RSS_READ_EXCEPTIONS, read_news_result
-from core.stimulus import StimulusQueue
+from core.stimulus import Stimulus, StimulusQueue, append_conversation_history
 from core.thought_parser import Thought
 from core.types import (
     ActionControl,
@@ -28,8 +30,9 @@ from core.types import (
 ACTION_REDIS_KEY = "seedwake:actions"
 ACTION_CONTROL_KEY = "seedwake:action_control"
 NEWS_SEEN_REDIS_KEY = "seedwake:news_seen"
-OPENCLAW_ACTION_TYPES = {"search", "web_fetch", "system_change", "custom", "weather", "reading"}
+OPENCLAW_ACTION_TYPES = {"search", "web_fetch", "system_change", "custom", "weather", "reading", "file_modify"}
 PERCEPTION_AUTO_EXECUTE_TYPES = {"news", "weather", "reading"}
+OPS_ACTION_TYPES = {"system_change", "file_modify"}
 ACTION_REDIS_EXCEPTIONS = (
     redis_exceptions.RedisError,
     ConnectionError,
@@ -60,7 +63,15 @@ ACTION_EXECUTION_EXCEPTIONS = (
     KeyError,
     json.JSONDecodeError,
 )
+TELEGRAM_SEND_EXCEPTIONS = (
+    OSError,
+    TimeoutError,
+    ValueError,
+    TypeError,
+    json.JSONDecodeError,
+)
 logger = logging.getLogger(__name__)
+ACTION_MARKER_PATTERN = re.compile(r"\s*\{action:[^}]+}\s*$")
 
 
 @dataclass
@@ -71,6 +82,10 @@ class ActionPlan:
     timeout_seconds: int
     reason: str
     news_feed_urls: list[str] = field(default_factory=list)
+    worker_agent_id: str = ""
+    target_source: str = ""
+    target_entity: str = ""
+    message_text: str = ""
 
 
 @dataclass
@@ -89,6 +104,7 @@ class ActionRecord:
     session_key: str | None = None
     awaiting_confirmation: bool = False
     retry_after: datetime | None = None
+    dispatch_started_at: datetime | None = None
 
 
 class ActionManager:
@@ -107,6 +123,7 @@ class ActionManager:
         news_seen_ttl_hours: int = 720,
         news_seen_max_items: int = 5000,
         news_reader=read_news_result,
+        contact_resolver=None,
         openclaw_retry_delay_seconds: float = 5.0,
         log_callback=None,
         event_callback=None,
@@ -121,6 +138,7 @@ class ActionManager:
         self._news_seen_ttl_hours = max(1, news_seen_ttl_hours)
         self._news_seen_max_items = max(1, news_seen_max_items)
         self._news_reader = news_reader
+        self._contact_resolver = contact_resolver
         self._openclaw_retry_delay_seconds = max(0.0, openclaw_retry_delay_seconds)
         self._log_callback = log_callback
         self._event_callback = event_callback
@@ -136,19 +154,29 @@ class ActionManager:
             except ACTION_REDIS_EXCEPTIONS:
                 self._redis = None
 
-    def submit_from_thoughts(self, thoughts: list[Thought]) -> list[ActionRecord]:
+    def submit_from_thoughts(
+        self,
+        thoughts: list[Thought],
+        *,
+        stimuli: list[Stimulus] | None = None,
+    ) -> list[ActionRecord]:
         created: list[ActionRecord] = []
+        conversation_source = _latest_conversation_source(stimuli or [])
         for thought in thoughts:
             if not thought.action_request:
                 continue
 
             try:
-                plan = self._planner.plan(thought)
+                plan = self._planner.plan(thought, conversation_source=conversation_source)
             except PLANNER_EXCEPTIONS as exc:
                 self._emit(f"行动规划失败 {thought.thought_id}: {exc}")
                 continue
             if not plan:
                 continue
+            target_source = plan.target_source
+            target_entity = plan.target_entity
+            if plan.action_type == "send_message" and not target_source and not target_entity:
+                target_source = conversation_source or ""
 
             action = ActionRecord(
                 action_id=f"act_{thought.thought_id}",
@@ -158,6 +186,10 @@ class ActionManager:
                     reason=plan.reason,
                     raw_action=thought.action_request,
                     news_feed_urls=plan.news_feed_urls,
+                    worker_agent_id=plan.worker_agent_id,
+                    target_source=target_source,
+                    target_entity=target_entity,
+                    message_text=plan.message_text,
                 ),
                 executor=plan.executor,
                 status="pending",
@@ -303,10 +335,7 @@ class ActionManager:
             self._publish_action_event(action, "running", "执行中")
 
             if action.executor == "native":
-                result = _run_native_action(
-                    action,
-                    news_reader=self._news_reader,
-                )
+                result = self._run_native_action(action_id)
             else:
                 result = self._openclaw_executor.execute(action)
         except OpenClawUnavailableError as exc:
@@ -336,11 +365,59 @@ class ActionManager:
         status = "succeeded" if result.get("ok", True) else "failed"
         self._safe_finalize_action(action_id, status=status, result=result)
 
+    def _run_native_action(self, action_id: str) -> ActionResultEnvelope:
+        action = self._get_action(action_id)
+        if action.type != "send_message":
+            return _run_native_action(
+                action,
+                news_reader=self._news_reader,
+                contact_resolver=self._contact_resolver,
+            )
+
+        target_source, target_entity, message_text, failure = _prepare_send_message(
+            action,
+            contact_resolver=self._contact_resolver,
+        )
+        if failure is not None:
+            return failure
+        if not self._mark_dispatch_started(action_id):
+            return _failure_result(
+                "消息发送前无法持久化状态",
+                "delivery_state_unavailable",
+                transport="native",
+            )
+        send_error = _send_telegram_message(
+            target_source,
+            message_text,
+            timeout_seconds=action.timeout_seconds,
+        )
+        if send_error:
+            self._update_action(action_id, dispatch_started_at=None)
+            return _failure_result(f"Telegram 发送失败：{send_error}", send_error, transport="native")
+        return _build_action_result(
+            ok=True,
+            summary=f"已发送消息到 {target_source}",
+            data={
+                "source": target_source,
+                "target_entity": target_entity,
+                "message": message_text,
+            },
+            error=None,
+            run_id=None,
+            session_key=None,
+            transport="native",
+        )
+
     def _finalize_action(self, action_id: str, *, status: str, result: ActionResultEnvelope) -> None:
         action = self._get_action(action_id)
         result = _normalize_action_result(result, action)
         status, result, should_emit_stimulus = self._prepare_result_for_stimulus(action, status, result)
-        action = self._update_action(action_id, status=status, result=result)
+        action = self._update_action(
+            action_id,
+            status=status,
+            result=result,
+            dispatch_started_at=None,
+        )
         if isinstance(result.get("run_id"), str):
             action.run_id = str(result["run_id"])
         if isinstance(result.get("session_key"), str):
@@ -350,6 +427,7 @@ class ActionManager:
         summary = str(result.get("summary") or "行动完成")
         self._emit(f"行动结束 {action.action_id} [{status}] {summary}")
         self._publish_action_event(action, status, summary)
+        self._publish_native_message(action, status, result)
         self._record_perception_observation(action, status, result)
         if not should_emit_stimulus:
             return
@@ -444,6 +522,45 @@ class ActionManager:
             "session_key": action.session_key,
             "awaiting_confirmation": action.awaiting_confirmation,
         })
+
+    def _publish_native_message(
+        self,
+        action: ActionRecord,
+        status: str,
+        result: ActionResultEnvelope,
+    ) -> None:
+        if action.type != "send_message" or status != "succeeded" or not bool(result.get("ok", True)):
+            return
+        data = result.get("data")
+        if not isinstance(data, dict):
+            return
+        source = str(data.get("source") or "").strip()
+        message = str(data.get("message") or "").strip()
+        if not source or not message:
+            return
+        try:
+            append_conversation_history(
+                self._redis,
+                role="assistant",
+                source=source,
+                content=message,
+                metadata={"action_id": action.action_id},
+            )
+        except ACTION_REDIS_EXCEPTIONS as exc:
+            logger.warning("failed to persist native message history for %s: %s", action.action_id, exc)
+            self._redis = None
+        except Exception as exc:
+            logger.exception("unexpected native message history failure for %s: %s", action.action_id, exc)
+        if not self._event_callback:
+            return
+        try:
+            self._event_callback("reply", {
+                "source": source,
+                "message": message,
+                "stimulus_id": None,
+            })
+        except Exception as exc:
+            logger.exception("unexpected native message event failure for %s: %s", action.action_id, exc)
 
     def _snapshot_futures(self) -> list[Future]:
         with self._lock:
@@ -629,6 +746,26 @@ class ActionManager:
         except ACTION_REDIS_EXCEPTIONS:
             self._redis = None
 
+    def _mark_dispatch_started(self, action_id: str) -> bool:
+        dispatch_started_at = datetime.now(timezone.utc)
+        with self._lock:
+            action = self._actions[action_id]
+            action.dispatch_started_at = dispatch_started_at
+            redis_client = self._redis
+        if redis_client is None:
+            with self._lock:
+                self._actions[action_id].dispatch_started_at = None
+            return False
+        try:
+            payload = json.dumps(_action_to_dict(action), ensure_ascii=False)
+            redis_client.hset(ACTION_REDIS_KEY, action.action_id, payload)
+        except ACTION_REDIS_EXCEPTIONS:
+            with self._lock:
+                self._actions[action_id].dispatch_started_at = None
+                self._redis = None
+            return False
+        return True
+
     def _sync_to_redis(self) -> None:
         with self._lock:
             actions = list(self._actions.values())
@@ -648,6 +785,8 @@ class ActionManager:
                 if action.action_id in self._actions:
                     continue
                 self._actions[action.action_id] = action
+            if str(item.get("status") or "") != action.status:
+                self._persist_action(action)
 
     def _sync_news_seen_to_redis(self, seen_items: dict[str, float]) -> None:
         if not seen_items:
@@ -674,22 +813,26 @@ class OllamaActionPlanner:
         default_timeout_seconds: int,
         default_weather_location: str,
         news_feed_urls: list[str],
+        worker_agent_id: str,
+        ops_worker_agent_id: str,
     ):
         self._client = client
         self._model_name = model_config["name"]
         self._default_timeout_seconds = default_timeout_seconds
         self._default_weather_location = default_weather_location.strip()
         self._news_feed_urls = [item.strip() for item in news_feed_urls if item.strip()]
+        self._worker_agent_id = worker_agent_id.strip()
+        self._ops_worker_agent_id = ops_worker_agent_id.strip()
         self._options = {
             "num_ctx": model_config.get("num_ctx", 32768),
             "temperature": 0.1,
         }
 
-    def plan(self, thought: Thought) -> ActionPlan | None:
+    def plan(self, thought: Thought, *, conversation_source: str | None = None) -> ActionPlan | None:
         action_request = thought.action_request or {}
         response = self._client.chat(
             model=self._model_name,
-            messages=_planner_messages(thought),
+            messages=_planner_messages(thought, conversation_source=conversation_source),
             tools=_planner_tools(),
             think=False,
             options=self._options,
@@ -703,6 +846,9 @@ class OllamaActionPlanner:
                 self._default_timeout_seconds,
                 self._default_weather_location,
                 self._news_feed_urls,
+                self._worker_agent_id,
+                self._ops_worker_agent_id,
+                conversation_source,
             )
         return _fallback_plan(
             raw_action_type=str(action_request.get("type") or "custom"),
@@ -710,6 +856,9 @@ class OllamaActionPlanner:
             default_timeout_seconds=self._default_timeout_seconds,
             default_weather_location=self._default_weather_location,
             news_feed_urls=self._news_feed_urls,
+            worker_agent_id=self._worker_agent_id,
+            ops_worker_agent_id=self._ops_worker_agent_id,
+            conversation_source=conversation_source,
         )
 
 
@@ -720,6 +869,7 @@ def create_action_manager(
     model_config: dict,
     action_config: dict,
     *,
+    contact_resolver=None,
     news_feed_urls: list[str] | None = None,
     news_seen_ttl_hours: int = 720,
     news_seen_max_items: int = 5000,
@@ -732,6 +882,8 @@ def create_action_manager(
         int(action_config.get("default_timeout_seconds", 300)),
         str(action_config.get("default_weather_location", "")),
         list(news_feed_urls or []),
+        str(action_config.get("worker_agent_id", "seedwake-worker")),
+        str(action_config.get("ops_worker_agent_id", "seedwake-ops")),
     )
     from core.openclaw_gateway import OpenClawGatewayExecutor
 
@@ -739,6 +891,7 @@ def create_action_manager(
         gateway_url=_read_env("OPENCLAW_GATEWAY_URL"),
         gateway_token=_read_env("OPENCLAW_GATEWAY_TOKEN"),
         worker_agent_id=str(action_config.get("worker_agent_id", "seedwake-worker")),
+        ops_worker_agent_id=str(action_config.get("ops_worker_agent_id", "seedwake-ops")),
         session_key_prefix=str(action_config.get("session_key_prefix", "seedwake:action")),
         http_base_url=_read_env("OPENCLAW_HTTP_BASE_URL"),
         use_http_fallback=bool(action_config.get("use_openclaw_http_fallback", False)),
@@ -754,13 +907,14 @@ def create_action_manager(
         news_seen_ttl_hours=news_seen_ttl_hours,
         news_seen_max_items=news_seen_max_items,
         news_reader=read_news_result,
+        contact_resolver=contact_resolver,
         openclaw_retry_delay_seconds=float(action_config.get("openclaw_retry_delay_seconds", 5.0)),
         log_callback=log_callback,
         event_callback=event_callback,
     )
 
 
-def _planner_messages(thought: Thought) -> list[dict[str, str]]:
+def _planner_messages(thought: Thought, *, conversation_source: str | None = None) -> list[dict[str, str]]:
     action_request = thought.action_request or {}
     user_prompt = "\n".join([
         f"thought_id: {thought.thought_id}",
@@ -768,6 +922,7 @@ def _planner_messages(thought: Thought) -> list[dict[str, str]]:
         f"thought_content: {thought.content}",
         f"raw_action_type: {action_request.get('type', '')}",
         f"raw_action_params: {action_request.get('params', '')}",
+        f"conversation_source: {conversation_source or ''}",
     ])
     return [
         {
@@ -775,12 +930,16 @@ def _planner_messages(thought: Thought) -> list[dict[str, str]]:
             "content": (
                 "你是 Seedwake 的前额叶行动规划器。"
                 "不要执行动作，只能通过一个 tool call 返回结构化决定。"
-                "纯本地、无副作用、一次函数调用即可完成的时间读取、系统状态读取和固定 RSS 新闻读取可选 native。"
-                "天气、阅读、网页搜索、网页抓取、系统变更、浏览器/命令行/文件修改或多步探索一律委托 OpenClaw。"
+                "纯本地、无副作用、一次函数调用即可完成的时间读取、系统状态读取、固定 RSS 新闻读取，以及 Telegram 消息发送可选 native。"
+                "天气、阅读、网页搜索、网页抓取、浏览器和多步探索委托普通 OpenClaw worker。"
+                "系统变更和文件修改委托 OpenClaw ops worker。"
                 "news 只读取配置里的固定 RSS feed 列表，不需要 topic，也不委托 OpenClaw。"
                 "reading 的阅读方向由 Seedwake 自己决定；如果原始 action 带了 query/topic/keywords，就保留它。"
                 "如果 reading 没带参数，也应围绕原始念头内容组织任务，不要把阅读主题交给 OpenClaw 自己决定。"
                 "weather 不写 location 时使用配置中的默认位置；只有想查特定地点时才带 location。"
+                "send_message 只有在真的想发消息时才使用，不需要因为收到对话刺激而强制回复。"
+                "send_message 优先发送到当前 conversation_source；只有明确给了 target/chat_id/source 时才覆盖。"
+                "如果想联系某个已知实体，可以使用 target_entity，例如 person:alice。"
             ),
         },
         {"role": "user", "content": user_prompt},
@@ -851,6 +1010,23 @@ def _planner_tools() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "native_send_message",
+                "description": "Send a Telegram message to the current conversation target, explicit telegram target, or resolved entity contact.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string"},
+                        "target": {"type": "string"},
+                        "target_entity": {"type": "string"},
+                        "timeout_seconds": {"type": "integer"},
+                        "reason": {"type": "string"},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "ignore_action",
                 "description": "Do not execute any action for this thought.",
                 "parameters": {
@@ -871,6 +1047,9 @@ def _plan_from_tool_call(
     default_timeout_seconds: int,
     default_weather_location: str,
     news_feed_urls: list[str],
+    worker_agent_id: str = "seedwake-worker",
+    ops_worker_agent_id: str = "seedwake-ops",
+    conversation_source: str | None = None,
 ) -> ActionPlan | None:
     if tool_name == "ignore_action":
         return None
@@ -899,7 +1078,19 @@ def _plan_from_tool_call(
             reason=reason,
             news_feed_urls=news_feed_urls,
         )
+    if tool_name == "native_send_message":
+        return _native_send_message_plan(
+            raw_params=str((thought.action_request or {}).get("params") or ""),
+            thought=thought,
+            timeout_seconds=timeout_seconds,
+            reason=reason,
+            conversation_source=conversation_source,
+            explicit_message=str(arguments.get("message") or "").strip(),
+            explicit_target=str(arguments.get("target") or "").strip(),
+            explicit_target_entity=str(arguments.get("target_entity") or "").strip(),
+        )
     if tool_name == "delegate_openclaw":
+        explicit_task = str(arguments.get("task") or "").strip()
         action_type = str(
             arguments.get("action_type")
             or (thought.action_request or {}).get("type")
@@ -911,7 +1102,16 @@ def _plan_from_tool_call(
                 reason=reason,
                 news_feed_urls=news_feed_urls,
             )
-        explicit_task = str(arguments.get("task") or "").strip()
+        if action_type == "send_message":
+            return _native_send_message_plan(
+                raw_params=str((thought.action_request or {}).get("params") or ""),
+                thought=thought,
+                timeout_seconds=timeout_seconds,
+                reason=reason,
+                conversation_source=conversation_source,
+                explicit_message=explicit_task,
+                explicit_target_entity=str(arguments.get("target_entity") or "").strip(),
+            )
         task = _build_openclaw_task(
             action_type=action_type,
             explicit_task=explicit_task,
@@ -924,6 +1124,7 @@ def _plan_from_tool_call(
             task=task,
             timeout_seconds=timeout_seconds,
             reason=reason,
+            worker_agent_id=_resolve_worker_agent_id(action_type, worker_agent_id, ops_worker_agent_id),
         )
     return None
 
@@ -935,6 +1136,9 @@ def _fallback_plan(
     default_timeout_seconds: int,
     default_weather_location: str,
     news_feed_urls: list[str],
+    worker_agent_id: str = "seedwake-worker",
+    ops_worker_agent_id: str = "seedwake-ops",
+    conversation_source: str | None = None,
 ) -> ActionPlan | None:
     action_type = raw_action_type or "custom"
     if action_type == "time":
@@ -959,6 +1163,14 @@ def _fallback_plan(
             timeout_seconds=default_timeout_seconds,
             reason="fallback",
         )
+    if action_type == "send_message":
+        return _native_send_message_plan(
+            raw_params=str((thought.action_request or {}).get("params") or ""),
+            thought=thought,
+            timeout_seconds=default_timeout_seconds,
+            reason="fallback",
+            conversation_source=conversation_source,
+        )
     if action_type in OPENCLAW_ACTION_TYPES or action_type:
         return ActionPlan(
             action_type=action_type,
@@ -971,11 +1183,17 @@ def _fallback_plan(
             ),
             timeout_seconds=default_timeout_seconds,
             reason="fallback",
+            worker_agent_id=_resolve_worker_agent_id(action_type, worker_agent_id, ops_worker_agent_id),
         )
     return None
 
 
-def _run_native_action(action: ActionRecord, *, news_reader=read_news_result) -> ActionResultEnvelope:
+def _run_native_action(
+    action: ActionRecord,
+    *,
+    news_reader=read_news_result,
+    contact_resolver=None,
+) -> ActionResultEnvelope:
     if action.type == "get_time":
         now = datetime.now().astimezone()
         return _build_action_result(
@@ -993,6 +1211,26 @@ def _run_native_action(action: ActionRecord, *, news_reader=read_news_result) ->
     if action.type == "news":
         feed_urls = _coerce_news_feed_urls(action.request.get("news_feed_urls"))
         return news_reader(feed_urls, timeout_seconds=action.timeout_seconds)
+    if action.type == "send_message":
+        target_source, target_entity, message_text, failure = _prepare_send_message(
+            action,
+            contact_resolver=contact_resolver,
+        )
+        if failure is not None:
+            return failure
+        return _build_action_result(
+            ok=True,
+            summary=f"准备发送消息到 {target_source}",
+            data={
+                "source": target_source,
+                "target_entity": target_entity,
+                "message": message_text,
+            },
+            error=None,
+            run_id=None,
+            session_key=None,
+            transport="native",
+        )
     if action.type == "get_system_status":
         snapshot = collect_system_status_snapshot()
         return _build_action_result(
@@ -1027,6 +1265,10 @@ def _build_openclaw_task(
         return _build_reading_task(raw_params, explicit_task, thought)
     if action_type == "weather":
         return _build_weather_task(raw_params, default_weather_location)
+    if action_type == "file_modify":
+        return _build_file_modify_task(raw_params, explicit_task, thought)
+    if action_type == "system_change":
+        return _build_system_change_task(raw_params, explicit_task, thought)
     if explicit_task:
         return explicit_task
     return thought.content
@@ -1057,6 +1299,27 @@ def _build_weather_task(raw_params: str, default_weather_location: str) -> str:
     return "查询默认位置的当前天气；如果缺少默认位置，请明确说明无法确定位置。"
 
 
+def _build_file_modify_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
+    path = _extract_action_first_param(raw_params, "path", "file")
+    instruction = _extract_action_first_param(raw_params, "instruction", "edit", "change")
+    if path and instruction:
+        return f"修改文件 {path}。修改要求：{instruction}。只做必要改动，并返回修改摘要。"
+    if path:
+        return f"修改文件 {path}。修改要求围绕这条念头展开：{thought.content}"
+    if explicit_task:
+        return explicit_task
+    return thought.content
+
+
+def _build_system_change_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
+    instruction = _extract_action_first_param(raw_params, "instruction", "task", "change")
+    if instruction:
+        return f"执行系统变更：{instruction}。返回变更摘要、影响范围和结果。"
+    if explicit_task:
+        return explicit_task
+    return thought.content
+
+
 def _extract_action_first_param(raw_params: str, *keys: str) -> str | None:
     for key in keys:
         value = _extract_action_param(raw_params, key)
@@ -1078,6 +1341,12 @@ def _read_env(name: str) -> str:
     import os
 
     return os.environ.get(name, "")
+
+
+def _resolve_worker_agent_id(action_type: str, worker_agent_id: str, ops_worker_agent_id: str) -> str:
+    if action_type in OPS_ACTION_TYPES:
+        return ops_worker_agent_id
+    return worker_agent_id
 
 
 def _build_action_result(
@@ -1154,6 +1423,11 @@ def _action_to_dict(action: ActionRecord) -> dict:
     payload = asdict(action)
     payload["submitted_at"] = action.submitted_at.isoformat()
     payload["retry_after"] = action.retry_after.isoformat() if action.retry_after else None
+    payload["dispatch_started_at"] = (
+        action.dispatch_started_at.isoformat()
+        if action.dispatch_started_at
+        else None
+    )
     return payload
 
 
@@ -1203,6 +1477,10 @@ def _build_action_request_payload(
     reason: str,
     raw_action,
     news_feed_urls: list[str],
+    worker_agent_id: str = "",
+    target_source: str = "",
+    target_entity: str = "",
+    message_text: str = "",
 ) -> ActionRequestPayload:
     payload: ActionRequestPayload = {
         "task": task,
@@ -1211,6 +1489,14 @@ def _build_action_request_payload(
     }
     if news_feed_urls:
         payload["news_feed_urls"] = list(news_feed_urls)
+    if worker_agent_id:
+        payload["worker_agent_id"] = worker_agent_id
+    if target_source:
+        payload["target_source"] = target_source
+    if target_entity:
+        payload["target_entity"] = target_entity
+    if message_text:
+        payload["message_text"] = message_text
     return payload
 
 
@@ -1228,6 +1514,146 @@ def _native_news_plan(
         reason=reason,
         news_feed_urls=list(news_feed_urls),
     )
+
+
+def _latest_conversation_source(stimuli: list[Stimulus]) -> str | None:
+    for stimulus in reversed(stimuli):
+        if stimulus.type == "conversation":
+            return stimulus.source
+    return None
+
+
+def _native_send_message_plan(
+    *,
+    raw_params: str,
+    thought: Thought,
+    timeout_seconds: int,
+    reason: str,
+    conversation_source: str | None,
+    explicit_message: str = "",
+    explicit_target: str = "",
+    explicit_target_entity: str = "",
+) -> ActionPlan:
+    message_text = explicit_message or _build_send_message_text(raw_params, thought)
+    target_source = explicit_target or _build_send_message_target(raw_params)
+    target_entity = explicit_target_entity or _build_send_message_target_entity(raw_params)
+    if not target_source and not target_entity:
+        target_source = str(conversation_source or "").strip()
+    target_label = target_source or target_entity or "当前 Telegram 对话"
+    task = f"向 {target_label} 发送消息：{message_text or thought.content}"
+    return ActionPlan(
+        action_type="send_message",
+        executor="native",
+        task=task,
+        timeout_seconds=timeout_seconds,
+        reason=reason,
+        target_source=target_source,
+        target_entity=target_entity,
+        message_text=message_text,
+    )
+
+
+def _build_send_message_target(raw_params: str) -> str:
+    target = _extract_action_first_param(raw_params, "target", "source", "chat_id", "chat")
+    if target:
+        if target.startswith("telegram:"):
+            return target
+        if target.isdigit() or (target.startswith("-") and target[1:].isdigit()):
+            return f"telegram:{target}"
+    return ""
+
+
+def _build_send_message_target_entity(raw_params: str) -> str:
+    return _extract_action_first_param(raw_params, "target_entity", "entity") or ""
+
+
+def _build_send_message_text(raw_params: str, thought: Thought) -> str:
+    explicit = _extract_action_first_param(raw_params, "message", "text", "body", "content")
+    if explicit:
+        return explicit
+    return _strip_action_marker(thought.content)
+
+
+def _strip_action_marker(content: str) -> str:
+    return ACTION_MARKER_PATTERN.sub("", content).strip()
+
+
+def _send_telegram_message(target_source: str, message_text: str, *, timeout_seconds: int) -> str | None:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        return "telegram_token_missing"
+    chat_id = _telegram_chat_id_from_source(target_source)
+    if chat_id is None:
+        return "invalid_telegram_target"
+    body = json.dumps({
+        "chat_id": chat_id,
+        "text": message_text,
+    }).encode("utf-8")
+    req = request.Request(
+        url=f"https://api.telegram.org/bot{token}/sendMessage",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=max(1, timeout_seconds)) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        return f"http_{exc.code}"
+    except TELEGRAM_SEND_EXCEPTIONS as exc:
+        return str(exc)
+    if not isinstance(payload, dict) or not bool(payload.get("ok")):
+        description = ""
+        if isinstance(payload, dict):
+            description = str(payload.get("description") or "").strip()
+        return description or "telegram_send_failed"
+    return None
+
+
+def _telegram_chat_id_from_source(source: str) -> str | None:
+    if not source.startswith("telegram:"):
+        return None
+    chat_id = source.removeprefix("telegram:").strip()
+    if chat_id.isdigit() or (chat_id.startswith("-") and chat_id[1:].isdigit()):
+        return chat_id
+    return None
+
+
+def _prepare_send_message(
+    action: ActionRecord,
+    *,
+    contact_resolver=None,
+) -> tuple[str, str, str, ActionResultEnvelope | None]:
+    target_source = str(action.request.get("target_source") or "").strip()
+    target_entity = str(action.request.get("target_entity") or "").strip()
+    message_text = str(action.request.get("message_text") or "").strip()
+    if not target_source and target_entity and contact_resolver:
+        target_source = str(contact_resolver(target_entity) or "").strip()
+    if not target_source:
+        if target_entity:
+            return "", target_entity, message_text, _failure_result(
+                f"无法解析实体 {target_entity} 的 Telegram 联系方式",
+                "unresolved_target_entity",
+                transport="native",
+            )
+        return "", target_entity, message_text, _failure_result(
+            "缺少消息目标",
+            "missing_target",
+            transport="native",
+        )
+    if not target_source.startswith("telegram:"):
+        return target_source, target_entity, message_text, _failure_result(
+            "仅支持 Telegram 原生发送",
+            "unsupported_target",
+            transport="native",
+        )
+    if not message_text:
+        return target_source, target_entity, message_text, _failure_result(
+            "缺少消息内容",
+            "missing_message",
+            transport="native",
+        )
+    return target_source, target_entity, message_text, None
 
 
 def _coerce_news_feed_urls(value) -> list[str]:
@@ -1432,7 +1858,16 @@ def _action_from_json_object(item: JsonObject, *, now: datetime) -> ActionRecord
 
     request_payload = _coerce_action_request_payload(request, source_content)
     submitted_at = _parse_action_datetime(item.get("submitted_at")) or now
+    dispatch_started_at = _parse_action_datetime(item.get("dispatch_started_at"))
     restored_status = "pending" if status == "running" else status
+    restored_result = result if isinstance((result := item.get("result")), dict) else None
+    if status == "running" and action_type == "send_message" and dispatch_started_at is not None:
+        restored_status = "failed"
+        restored_result = _failure_result(
+            "消息发送状态未知，为避免重复发送，未自动重试",
+            "delivery_status_unknown",
+            transport=executor,
+        )
     action = ActionRecord(
         action_id=action_id,
         type=action_type,
@@ -1447,10 +1882,10 @@ def _action_from_json_object(item: JsonObject, *, now: datetime) -> ActionRecord
         session_key=_stringify_json_field(item.get("session_key")) or None,
         awaiting_confirmation=awaiting_confirmation,
         retry_after=_parse_action_datetime(item.get("retry_after")),
+        dispatch_started_at=dispatch_started_at,
     )
-    result = item.get("result")
-    if isinstance(result, dict):
-        action.result = _normalize_action_result(result, action)
+    if isinstance(restored_result, dict):
+        action.result = _normalize_action_result(restored_result, action)
     if action.status == "pending" and not action.awaiting_confirmation and action.executor == "openclaw":
         action.retry_after = action.retry_after or now
     return action
@@ -1466,6 +1901,18 @@ def _coerce_action_request_payload(value: JsonObject, source_content: str) -> Ac
     news_feed_urls = _coerce_news_feed_urls(value.get("news_feed_urls"))
     if news_feed_urls:
         payload["news_feed_urls"] = news_feed_urls
+    worker_agent_id = _stringify_json_field(value.get("worker_agent_id"))
+    if worker_agent_id:
+        payload["worker_agent_id"] = worker_agent_id
+    target_source = _stringify_json_field(value.get("target_source"))
+    if target_source:
+        payload["target_source"] = target_source
+    target_entity = _stringify_json_field(value.get("target_entity"))
+    if target_entity:
+        payload["target_entity"] = target_entity
+    message_text = _stringify_json_field(value.get("message_text"))
+    if message_text:
+        payload["message_text"] = message_text
     return payload
 
 

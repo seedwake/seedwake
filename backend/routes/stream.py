@@ -4,30 +4,23 @@ import json
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
-from backend.auth import resolve_admin_from_query
+from backend.deps import resolve_api_client
 from core.memory.short_term import REDIS_CHANNEL as THOUGHT_CHANNEL
 from core.types import EventEnvelope, EventPayload, StatusEventPayload
 
 router = APIRouter(prefix="/api")
 EVENT_CHANNEL = "seedwake:events"
 logger = logging.getLogger(__name__)
-AdminQueryToken = Annotated[str | None, Query()]
-
-
-def _resolve_admin_query(
-    request: Request,
-    token: AdminQueryToken = None,
-) -> str:
-    return resolve_admin_from_query(request.app.state.config, token)
+ApiClient = Annotated[str, Depends(resolve_api_client)]
 
 
 @router.get("/stream")
 def stream_events(
     request: Request,
-    admin_username: Annotated[str, Depends(_resolve_admin_query)],
+    api_client: ApiClient,
 ) -> StreamingResponse:
     redis_client = request.app.state.redis
     if redis_client is None:
@@ -40,7 +33,7 @@ def stream_events(
 
     def generate():
         try:
-            yield _format_sse("status", _stream_status_payload("stream_connected", admin_username))
+            yield _format_sse("status", _stream_status_payload("stream_connected", api_client))
             while True:
                 try:
                     yield _stream_next_chunk(pubsub)

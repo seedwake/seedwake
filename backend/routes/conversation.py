@@ -7,7 +7,7 @@ import redis as redis_lib
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from backend.deps import require_redis, resolve_admin
+from backend.deps import require_redis, resolve_admin, resolve_api_client
 from core.action import push_action_control
 from core.stimulus import load_conversation_history
 from core.types import ActionConfirmResponse, ConversationHistoryResponse
@@ -20,6 +20,7 @@ REDIS_ROUTE_EXCEPTIONS = (
     ValueError,
 )
 AdminUsername = Annotated[str, Depends(resolve_admin)]
+ApiClient = Annotated[str, Depends(resolve_api_client)]
 ConversationLimit = Annotated[int, Query(ge=1, le=300)]
 REDIS_UNAVAILABLE_RESPONSE = {
     503: {"description": "Redis unavailable or action control unavailable"},
@@ -35,7 +36,7 @@ class ActionConfirmBody(BaseModel):
 @router.get("/conversation", responses=REDIS_UNAVAILABLE_RESPONSE)
 def get_conversation_history(
     request: Request,
-    admin_username: AdminUsername,
+    api_client: ApiClient,
     limit: ConversationLimit = 100,
 ) -> ConversationHistoryResponse:
     redis_client = require_redis(request)
@@ -47,7 +48,7 @@ def get_conversation_history(
         "ok": True,
         "items": items,
         "count": len(items),
-        "requested_by": admin_username,
+        "requested_by": api_client,
     }
 
 
@@ -55,8 +56,10 @@ def get_conversation_history(
 def confirm_action(
     body: ActionConfirmBody,
     request: Request,
+    api_client: ApiClient,
     admin_username: AdminUsername,
 ) -> ActionConfirmResponse:
+    _ = api_client
     redis_client = require_redis(request)
     pushed = push_action_control(
         redis_client,

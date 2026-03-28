@@ -4,8 +4,9 @@ Handles semantic vector retrieval and memory lifecycle.
 Gracefully degrades when PostgreSQL is unavailable.
 """
 
-from datetime import datetime
 from dataclasses import dataclass
+from datetime import datetime
+import re
 
 import psycopg
 
@@ -141,6 +142,37 @@ class LongTermMemory:
             self._conn.rollback()
             raise
 
+    def resolve_telegram_target_for_entity(self, entity_tag: str) -> str | None:
+        """Resolve a Telegram chat target from semantic/impression entity memories."""
+        if not self.available or not entity_tag:
+            return None
+        candidate_tags = _entity_tag_candidates(entity_tag)
+        try:
+            rows = []
+            with self._conn.cursor() as cur:
+                for candidate_tag in candidate_tags:
+                    cur.execute(
+                        """
+                        SELECT content
+                        FROM long_term_memory
+                        WHERE is_active = TRUE
+                          AND %s = ANY(entity_tags)
+                          AND memory_type = ANY(%s)
+                        ORDER BY created_at DESC
+                        LIMIT 20
+                        """,
+                        (candidate_tag, ["semantic", "impression"]),
+                    )
+                    rows.extend(cur.fetchall())
+        except psycopg.Error:
+            self._conn.rollback()
+            raise
+        for row in rows:
+            target = _extract_telegram_target(str(row[0] or ""))
+            if target:
+                return target
+        return None
+
     def attach_connection(self, pg_conn) -> None:
         self._conn = pg_conn
 
@@ -157,3 +189,35 @@ class LongTermMemory:
 def _format_vector(vec: list[float]) -> str:
     """Format a Python list as a pgvector literal '[0.1,0.2,...]'."""
     return "[" + ",".join(f"{v:.8f}" for v in vec) + "]"
+
+
+def _extract_telegram_target(content: str) -> str | None:
+    for pattern in TELEGRAM_TARGET_PATTERNS:
+        match = pattern.search(content)
+        if not match:
+            continue
+        chat_id = match.group(1).strip()
+        if chat_id:
+            return f"telegram:{chat_id}"
+    return None
+
+
+def _entity_tag_candidates(entity_tag: str) -> list[str]:
+    normalized = entity_tag.strip()
+    if not normalized:
+        return []
+    if normalized.startswith("entity:"):
+        legacy = normalized
+        canonical = normalized.removeprefix("entity:")
+        return [canonical, legacy]
+    return [normalized, f"entity:{normalized}"]
+
+
+TELEGRAM_TARGET_PATTERNS = (
+    re.compile(r"telegram:(-?\d+)"),
+    re.compile(r"telegram(?:\s+chat)?(?:\s+id|_id)?\s*[:=]\s*(-?\d+)", re.IGNORECASE),
+    re.compile(r"telegram_chat_id\s*[:=]\s*(-?\d+)", re.IGNORECASE),
+    re.compile(r"chat_id\s*[:=]\s*(-?\d+)", re.IGNORECASE),
+    re.compile(r'"telegram"\s*:\s*"(-?\d+)"', re.IGNORECASE),
+    re.compile(r'"telegram_chat_id"\s*:\s*(-?\d+)', re.IGNORECASE),
+)

@@ -27,6 +27,10 @@ SYSTEM_PROMPT = """\
 - {action:reading}
 - {action:reading, query:"你自己想读的内容"}
 - {action:search, query:"关键词"}
+- {action:send_message, message:"你想发出的内容"}
+- {action:send_message, chat_id:"123456", message:"你想发出的内容"}
+- {action:send_message, target_entity:"person:alice", message:"你想发出的内容"}
+- {action:file_modify, path:"文件路径", instruction:"修改要求"}
 
 ## 示例
 
@@ -50,6 +54,7 @@ SYSTEM_PROMPT = """\
 - 只输出念头本身，不要解释、总结或加任何额外内容
 - 不要使用 <think> 标签
 - 只有在念头里真的自然出现行动冲动时才写 {action:...}，不要为了形式强行添加
+- 收到对话刺激时不必一定回复；只有在你真的想发消息时才写 {action:send_message}
 """
 
 

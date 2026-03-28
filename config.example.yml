@@ -41,6 +41,7 @@ runtime:
 actions:
   default_timeout_seconds: 300
   worker_agent_id: "seedwake-worker"      # dedicated remote OpenClaw agent
+  ops_worker_agent_id: "seedwake-ops"     # dedicated remote OpenClaw ops agent for system/file changes
   session_key_prefix: "seedwake:action"   # each action gets an isolated OpenClaw session
   use_openclaw_http_fallback: false
   default_weather_location: "replace_me_city"
@@ -65,10 +66,11 @@ perception:
   system_status_warn_disk_ratio: 0.9
 
 telegram:
-  allowed_user_ids: [123456789]    # Telegram users allowed to chat and confirm actions
+  allowed_user_ids: [123456789]    # Telegram users allowed to chat in private
+  admin_user_ids: [123456789]      # Telegram users allowed to receive action/status updates and approve actions
 
 admins:
-  - username: alice                # backend / frontend admin identity
+  - username: alice                # admin / audit identity
     token: "replace_me_admin_token"
 
 prompt:

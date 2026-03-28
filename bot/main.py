@@ -20,9 +20,9 @@ from telegram.ext import (
 )
 
 from bot.helpers import (
-    extract_telegram_chat_id,
     format_action_event,
     format_status_event,
+    load_admin_user_ids,
     load_allowed_user_ids,
 )
 from core.action import load_action_items, push_action_control
@@ -34,7 +34,6 @@ from core.types import (
     AuthorizedTelegramUser,
     EventEnvelope,
     JsonObject,
-    ReplyEventPayload,
     StatusEventPayload,
 )
 
@@ -74,6 +73,7 @@ def create_application(config: dict | None = None, redis_client=None) -> Applica
     allowed_user_ids = load_allowed_user_ids(cfg)
     if not allowed_user_ids:
         raise RuntimeError("config.yml 缺少 telegram.allowed_user_ids")
+    admin_user_ids = load_admin_user_ids(cfg)
 
     async def post_init(app: Application) -> None:
         await _start_event_forwarder(app)
@@ -96,8 +96,9 @@ def create_application(config: dict | None = None, redis_client=None) -> Applica
     application.bot_data.update({
         "config": cfg,
         "redis": redis_client if redis_client is not None else connect_redis_from_env(),
-        "allowed_user_ids": allowed_user_ids,
-        "notification_user_ids": allowed_user_ids,
+        "allowed_user_ids": set(allowed_user_ids),
+        "admin_user_ids": set(admin_user_ids),
+        "notification_user_ids": admin_user_ids,
     })
     application.add_handler(CommandHandler("start", _handle_start))
     application.add_handler(CommandHandler("status", _handle_status))
@@ -110,18 +111,20 @@ def create_application(config: dict | None = None, redis_client=None) -> Applica
 
 
 async def _handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _ensure_authorized(update, context):
+    user = await _ensure_chat_user(update, context)
+    if not user:
         return
-    await _reply_text(
-        update,
-        "Seedwake Telegram 通道已连接。\n"
-        "直接发送文本即可对话。\n"
-        "命令：/status /actions /approve <action_id> /reject <action_id>",
-    )
+    lines = [
+        "Seedwake Telegram 通道已连接。",
+        "直接发送文本即可对话。",
+    ]
+    if _is_admin_user(context.application, user["user_id"]):
+        lines.append("管理命令：/status /actions /approve <action_id> /reject <action_id>")
+    await _reply_text(update, "\n".join(lines))
 
 
 async def _handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _ensure_authorized(update, context):
+    if not await _ensure_admin_user(update, context):
         return
     redis_client = _ensure_redis_client(context.application)
     if redis_client is None:
@@ -142,7 +145,7 @@ async def _handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def _handle_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _ensure_authorized(update, context):
+    if not await _ensure_admin_user(update, context):
         return
     redis_client = _ensure_redis_client(context.application)
     if redis_client is None:
@@ -172,19 +175,19 @@ async def _handle_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def _handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _ensure_authorized(update, context):
+    if not await _ensure_admin_user(update, context):
         return
     await _handle_control_command(update, context, approved=True)
 
 
 async def _handle_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _ensure_authorized(update, context):
+    if not await _ensure_admin_user(update, context):
         return
     await _handle_control_command(update, context, approved=False)
 
 
 async def _handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = await _ensure_authorized(update, context)
+    user = await _ensure_chat_user(update, context)
     if not user:
         return
     redis_client = _ensure_redis_client(context.application)
@@ -212,11 +215,10 @@ async def _handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
         _mark_redis_unavailable(context.application)
         await _reply_text(update, "Redis 不可用，当前无法与 Seedwake 对话。")
         return
-    await _reply_text(update, "已收到，稍后回复。")
 
 
 async def _handle_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = await _ensure_authorized(update, context)
+    user = await _ensure_admin_user(update, context)
     if not user:
         return
     query = update.callback_query
@@ -271,9 +273,6 @@ async def _dispatch_event(application: Application, envelope: EventEnvelope) -> 
     payload = envelope.get("payload")
     if not isinstance(payload, dict):
         return
-    if event_type == "reply":
-        await _dispatch_reply_event(application, payload)
-        return
     if event_type == "action":
         await _dispatch_action_update(application, payload)
         return
@@ -312,17 +311,6 @@ async def _read_event_envelope(pubsub) -> EventEnvelope | None:
     if not raw:
         return None
     return json.loads(raw)
-
-
-async def _dispatch_reply_event(application: Application, payload: JsonObject) -> None:
-    reply_payload = _coerce_reply_payload(payload)
-    if reply_payload is None:
-        return
-    chat_id = extract_telegram_chat_id(reply_payload["source"])
-    text = reply_payload["message"].strip()
-    if chat_id is None or not text:
-        return
-    await _safe_send_message(application, chat_id=chat_id, text=text)
 
 
 async def _dispatch_action_update(application: Application, payload: JsonObject) -> None:
@@ -391,17 +379,39 @@ async def _handle_control_command(
     await _reply_text(update, f"{'批准' if approved else '拒绝'}已提交：{action_id}")
 
 
-async def _ensure_authorized(
+async def _ensure_chat_user(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> AuthorizedTelegramUser | None:
+    user = await _ensure_private_user(update)
+    if user is None:
+        return None
+    if user["user_id"] in context.application.bot_data["allowed_user_ids"]:
+        return user
+    await _reply_text(update, "无权限。")
+    return None
+
+
+async def _ensure_admin_user(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> AuthorizedTelegramUser | None:
+    user = await _ensure_private_user(update)
+    if user is None:
+        return None
+    if user["user_id"] in context.application.bot_data["admin_user_ids"]:
+        return user
+    await _reply_text(update, "无管理权限。")
+    return None
+
+
+async def _ensure_private_user(update: Update) -> AuthorizedTelegramUser | None:
     user = update.effective_user
     chat = update.effective_chat
     if user is None or chat is None:
         return None
-    allowed = context.application.bot_data["allowed_user_ids"]
-    if user.id not in allowed:
-        await _reply_text(update, "无权限。")
+    if str(getattr(chat, "type", "")) != "private":
+        await _reply_text(update, "仅支持私聊。")
         return None
     authorized_user: AuthorizedTelegramUser = {
         "user_id": user.id,
@@ -410,6 +420,10 @@ async def _ensure_authorized(
         "full_name": user.full_name,
     }
     return authorized_user
+
+
+def _is_admin_user(application: Application, user_id: int) -> bool:
+    return user_id in application.bot_data["admin_user_ids"]
 
 
 async def _reply_text(update: Update, text: str) -> None:
@@ -472,20 +486,6 @@ async def _safe_send_message(
         logger.exception("unexpected telegram send failure for chat %s: %s", chat_id, exc)
         return False
     return True
-
-
-def _coerce_reply_payload(payload: JsonObject) -> ReplyEventPayload | None:
-    source = payload.get("source")
-    message = payload.get("message")
-    if not isinstance(source, str) or not isinstance(message, str):
-        return None
-    stimulus_id = payload.get("stimulus_id")
-    reply_payload: ReplyEventPayload = {
-        "source": source,
-        "message": message,
-        "stimulus_id": stimulus_id if isinstance(stimulus_id, str) else None,
-    }
-    return reply_payload
 
 
 def _coerce_action_payload(payload: JsonObject) -> ActionEventPayload | None:

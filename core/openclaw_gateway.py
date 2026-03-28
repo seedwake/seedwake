@@ -61,6 +61,7 @@ class OpenClawGatewayExecutor:
         gateway_url: str,
         gateway_token: str,
         worker_agent_id: str,
+        ops_worker_agent_id: str,
         session_key_prefix: str,
         *,
         http_base_url: str = "",
@@ -70,6 +71,7 @@ class OpenClawGatewayExecutor:
         self._gateway_url = gateway_url.strip()
         self._gateway_token = gateway_token.strip()
         self._worker_agent_id = worker_agent_id.strip()
+        self._ops_worker_agent_id = ops_worker_agent_id.strip()
         self._session_key_prefix = session_key_prefix.strip()
         self._http_base_url = http_base_url.strip()
         self._use_http_fallback = use_http_fallback
@@ -115,13 +117,14 @@ class OpenClawGatewayExecutor:
 
                 request_id = uuid4().hex
                 session_key = f"{self._session_key_prefix}:{action.action_id}"
+                worker_agent_id = self._resolve_worker_agent_id(action)
                 timeout_seconds = int(getattr(action, "timeout_seconds", 300))
                 await client.send_request(
                     request_id,
                     "agent",
                     {
                         "message": str(action.request.get("task") or action.source_content),
-                        "agentId": self._worker_agent_id,
+                        "agentId": worker_agent_id,
                         "sessionKey": session_key,
                         "idempotencyKey": action.action_id,
                         "timeout": timeout_seconds,
@@ -175,8 +178,9 @@ class OpenClawGatewayExecutor:
             raise RuntimeError(f"WS 失败且未配置 HTTP fallback: {ws_error}") from ws_error
 
         session_key = f"{self._session_key_prefix}:{action.action_id}"
+        worker_agent_id = self._resolve_worker_agent_id(action)
         payload = {
-            "model": f"openclaw/{self._worker_agent_id}",
+            "model": f"openclaw/{worker_agent_id}",
             "instructions": RESULT_SYSTEM_PROMPT,
             "input": str(action.request.get("task") or action.source_content),
         }
@@ -211,6 +215,14 @@ class OpenClawGatewayExecutor:
         normalized["session_key"] = session_key
         normalized["transport"] = "http"
         return normalized
+
+    def _resolve_worker_agent_id(self, action) -> str:
+        request_worker = str(action.request.get("worker_agent_id") or "").strip()
+        if request_worker:
+            return request_worker
+        if getattr(action, "type", "") in {"system_change", "file_modify"} and self._ops_worker_agent_id:
+            return self._ops_worker_agent_id
+        return self._worker_agent_id
 
     def _build_connect_params(self, identity: dict[str, str], nonce: str) -> dict:
         signed_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)

@@ -1,6 +1,7 @@
 """Stimulus queue for external events and action results."""
 
 import json
+import logging
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -23,6 +24,7 @@ STIMULUS_REDIS_EXCEPTIONS = (
     TypeError,
     ValueError,
 )
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -214,7 +216,18 @@ def load_conversation_history(redis_client, limit: int = 100) -> list[Conversati
     if redis_client is None or limit <= 0:
         return []
     raw_items = redis_client.lrange(CONVERSATION_HISTORY_KEY, -limit, -1)
-    return [json.loads(item) for item in raw_items]
+    items = []
+    for raw in raw_items:
+        try:
+            item = json.loads(raw)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            logger.warning("skipping malformed conversation history record: %s", exc)
+            continue
+        if not isinstance(item, dict):
+            logger.warning("skipping non-object conversation history record")
+            continue
+        items.append(item)
+    return items
 
 
 def _select_ranked(items: list[Stimulus], limit: int) -> list[tuple[int, Stimulus]]:

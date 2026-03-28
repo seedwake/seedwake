@@ -25,7 +25,7 @@
 
 ### 2.1 组件划分
 
-项目由四个主要组件构成，各自位于独立文件夹中。基础设施（PostgreSQL、Redis）和外围服务（backend、bot、frontend）通过 `docker-compose.yml` 编排；核心引擎直接运行在宿主机上，以便自由访问 Ollama、行动执行器（包括 OpenClaw）和本地文件系统。
+当前已实现三个主要组件：`core`、`backend`、`bot`。基础设施（PostgreSQL、Redis）和外围服务（backend、bot）通过 `docker-compose.yml` 编排；核心引擎直接运行在宿主机上，以便自由访问 Ollama、行动执行器（包括 OpenClaw）和本地文件系统。`frontend` 属于第五阶段，届时将使用 Nuxt 单独实现。
 
 ```
 seedwake/
@@ -67,10 +67,6 @@ seedwake/
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── main.py                 # python-telegram-bot 入口
-├── frontend/                   # 前端（意识流展示）
-│   ├── Dockerfile
-│   ├── package.json
-│   └── src/
 └── data/                       # 所有数据资产（gitignore）
     ├── postgresql/
     ├── redis/
@@ -115,11 +111,6 @@ services:
     volumes:
       - ./config.yml:/app/config.yml:ro
 
-  frontend:
-    build: ./frontend
-    depends_on: [backend]
-    ports:
-      - "3000:3000"
 ```
 
 **架构说明**：core 引擎直接运行在宿主机上（`cd core && python main.py`），不在 Docker 容器中。原因：
@@ -250,7 +241,7 @@ Redis 中的短期记忆是一个三层结构：
 数据结构：Redis Sorted Set，score 为时间戳。每个条目的 value 是 JSON 序列化的念头数据。
 
 额外使用：
-- Redis Pub/Sub：核心进程发布新念头和事件，backend 订阅后通过 SSE 推送前端，bot 订阅后向管理员推送回复/行动状态
+- Redis Pub/Sub：核心进程发布新念头和事件，backend 订阅后通过 SSE 推送前端，bot 订阅后向管理员推送行动状态与确认请求
 - Redis List/Stream：StimulusQueue，外部刺激的缓冲队列（对话类刺激由 Telegram Bot 写入）
 
 ### 4.2 长期记忆（PostgreSQL + pgvector）
@@ -474,14 +465,16 @@ CREATE TABLE identity (
 
 ```env
 TELEGRAM_BOT_TOKEN=<telegram-bot-token>
+BACKEND_API_TOKEN=<backend-api-token>
 ```
 
 ```yaml
 telegram:
   allowed_user_ids: [123456789, 987654321]
+  admin_user_ids: [123456789]
 ```
 
-被允许的用户向 Bot 发送私聊消息后，消息会被写入 StimulusQueue，标记为最高优先级。系统的直接回复、行动确认请求、行动状态更新也优先通过 Telegram 返回。
+被允许的用户向 Bot 发送私聊消息后，消息会被写入 StimulusQueue，标记为最高优先级。系统发出的 Telegram 消息仍优先通过 Telegram 返回。行动确认请求与行动状态更新只会发给 `telegram.admin_user_ids` 中的管理用户。收到消息并不意味着必须立即回复；是否发消息由 `send_message` action 决定。
 
 ### 7.2 Backend 辅助接口
 
@@ -490,7 +483,7 @@ backend 的 REST API 与 SSE 保留，用于管理、调试、前端展示、历
 ```
 GET /api/conversation?limit=100
 Headers:
-  Authorization: Bearer <token>
+  X-API-Token: <backend-api-token>
 ```
 
 返回最近的对话历史，供前端查看人与 Seedwake 的往来消息。行动确认接口仍保留：
@@ -498,7 +491,8 @@ Headers:
 ```
 POST /api/action/confirm
 Headers:
-  Authorization: Bearer <token>
+  X-API-Token: <backend-api-token>
+  Authorization: Bearer <admin-token>
 Body:
   {
     "action_id": "act_20260311_001",
@@ -510,12 +504,14 @@ Body:
 系统的回复通过 SSE 推送：
 
 ```
-GET /api/stream?token=<token>
+GET /api/stream
+Headers:
+  X-API-Token: <backend-api-token>
 ```
 
 SSE 事件类型：
 - `thought`：新念头产生（每轮推送三个）
-- `reply`：系统对用户消息的直接回复（从念头中识别出的回应性内容）
+- `reply`：系统通过 `send_message` 发出的 Telegram 消息（可作为回复，也可主动联系某人）
 - `action`：行动发起/完成通知
 - `status`：系统状态变更（进入浅睡等）
 
@@ -523,10 +519,12 @@ SSE 事件类型：
 
 Telegram 与 backend 使用两套并存的权限边界：
 
-- Telegram：仅 `telegram.allowed_user_ids` 中的用户可直接对话和确认行动
-- backend：仅指定管理员可访问 REST/SSE/查询接口
+- Telegram：仅私聊生效；`telegram.allowed_user_ids` 可直接对话，`telegram.admin_user_ids` 才能接收行动/状态通知并确认行动
+- backend：所有端点都要求 `api_token`；管理/审计端点额外要求管理员 token
 
-backend 侧每个管理员分配一个 API token，映射到 username。配置文件中维护管理员列表：
+backend 的基础鉴权使用独立 `BACKEND_API_TOKEN`。前端通过 SSR 在服务端调用真实 backend API，并带上该 token，因此 token 与真实 backend 地址都不暴露给浏览器。
+
+管理员 token 仅用于额外的管理/审计能力。配置文件中维护管理员列表：
 
 ```yaml
 admins:
@@ -543,6 +541,8 @@ admins:
 ### 7.5 对"人"的记忆
 
 对每个对话过的人维护印象摘要（见 4.2.1 节）。对话时自动检索该人的印象摘要注入上下文，使系统能"记住"这个人的特征和历史互动。印象摘要在浅睡阶段或对话结束后更新。
+
+如果某个人的实体记忆中包含 Telegram 联系方式（例如 chat id），`send_message` 可以通过 `target_entity:"person:alice"` 先解析该实体的联系方式，再发送消息；不需要独立的人物档案子系统。
 
 ---
 
@@ -562,7 +562,9 @@ OpenClaw 的默认接入策略：
 - Seedwake 只通过 Gateway 读写会话与结果；不直接读写 OpenClaw 的 session / transcript 文件
 - `/v1/responses` 仅作为原型、调试或显式无副作用任务的备用入口，不作为主 delegation 总线
 - 不使用 `/tools/invoke` 作为主任务接口；不使用 `openclaw agent` CLI 作为生产集成接口
-- OpenClaw 侧应配置专用 agent（如 `seedwake-worker`），单独的 workspace、工具 allowlist 和权限边界
+- OpenClaw 侧应配置两个专用 agent：
+  - `seedwake-worker`：浏览器 / 搜索 / 抓取 / 阅读 / 天气
+  - `seedwake-ops`：系统修改 / 文件修改
 
 ### 8.1 行动生命周期
 
@@ -577,7 +579,7 @@ pending → running → succeeded / failed / timeout
 ```json
 {
   "action_id": "act_20260311_001",
-  "type": "search | system_change | web_fetch | news | weather | reading | get_time | get_system_status | custom",
+  "type": "search | system_change | web_fetch | news | weather | reading | get_time | get_system_status | send_message | file_modify | custom",
   "request": { "query": "用户反馈 近一周" },
   "executor": "native | openclaw",
   "status": "pending | running | succeeded | failed | timeout",
@@ -587,6 +589,8 @@ pending → running → succeeded / failed / timeout
   "result": null
 }
 ```
+
+其中 `send_message` 的目标既可以是当前对话对象，也可以显式给出 `target/chat_id/source`，或给出 `target_entity:"person:alice"` 让系统从「实体与印象」记忆中解析 Telegram 联系方式。
 
 行动记录存储在 Redis 中（需要存活足够久，直到结果返回），同时写入审计日志。
 
@@ -599,8 +603,9 @@ pending → running → succeeded / failed / timeout
 
 执行层的后端分工：
 
-- native tools：一次结构化调用即可完成的本地能力或已封装 API，例如时间读取、系统状态读取、固定 RSS 新闻读取
-- OpenClaw：需要浏览器、命令行、文件修改、权限控制或多步探索的任务
+- native tools：一次结构化调用即可完成的本地能力或已封装 API，例如时间读取、系统状态读取、固定 RSS 新闻读取、Telegram 原生消息发送
+- OpenClaw worker：浏览器、网页搜索、网页抓取、阅读、天气等外部探索任务
+- OpenClaw ops worker：`system_change` / `file_modify` 等高风险系统操作
 
 OpenClaw 任务默认通过 `agent` 立即拿到 `accepted/runId`，再由后台 worker 使用 `agent.wait` 等待最终完成；后续如需显式取消，可在同一控制面上补接 `sessions.abort`。
 
@@ -618,9 +623,9 @@ action_permissions:
     - news
     - weather
     - reading
+    - send_message
   require_confirmation: # 需要管理员确认
     - system_change
-    - send_message
     - file_modify
   forbidden:            # 完全禁止
     - delete_system_file
@@ -938,9 +943,11 @@ degeneration:
 # 行动
 actions:
   default_timeout_seconds: 300
+  worker_agent_id: "seedwake-worker"
+  ops_worker_agent_id: "seedwake-ops"
   default_weather_location: "replace_me_city"
-  auto_execute: [search, web_fetch, news, weather, reading]
-  require_confirmation: [system_change, send_message, file_modify]
+  auto_execute: [search, web_fetch, news, weather, reading, send_message]
+  require_confirmation: [system_change, file_modify]
   forbidden: [delete_system_file, network_config_change]
 
 # 感知
@@ -1014,7 +1021,7 @@ admins:
 - 退化检测
 
 ### 第五阶段：前端与可观测性
-- 意识流前端
+- Nuxt 意识流前端
 - 审计分析工具
 - 回放能力（从审计数据重放某段循环）
 - 参数调优

@@ -18,6 +18,10 @@ class ActionRequestPayload(TypedDict):
     reason: str
     raw_action: RawActionRequest | None
     news_feed_urls: NotRequired[list[str]]
+    worker_agent_id: NotRequired[str]
+    target_source: NotRequired[str]
+    target_entity: NotRequired[str]
+    message_text: NotRequired[str]
 
 
 class ActionControl(TypedDict):

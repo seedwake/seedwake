@@ -2,14 +2,11 @@ from core.types import ActionEventPayload, StatusEventPayload
 
 
 def load_allowed_user_ids(config: dict) -> list[int]:
-    raw_ids = config.get("telegram", {}).get("allowed_user_ids", [])
-    allowed = []
-    for raw in raw_ids:
-        try:
-            allowed.append(int(raw))
-        except (TypeError, ValueError):
-            continue
-    return sorted(set(allowed))
+    return _load_numeric_user_ids(config, "allowed_user_ids")
+
+
+def load_admin_user_ids(config: dict) -> list[int]:
+    return _load_numeric_user_ids(config, "admin_user_ids")
 
 
 def extract_telegram_chat_id(source: str) -> int | None:
@@ -43,3 +40,14 @@ def format_status_event(payload: StatusEventPayload) -> str:
     if not message:
         return ""
     return f"系统状态：{message}"
+
+
+def _load_numeric_user_ids(config: dict, key: str) -> list[int]:
+    raw_ids = config.get("telegram", {}).get(key, [])
+    user_ids = []
+    for raw in raw_ids:
+        try:
+            user_ids.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(user_ids))
