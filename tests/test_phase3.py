@@ -22,7 +22,7 @@ from core.action import (
     push_action_control,
 )
 # noinspection PyProtectedMember
-from core.main import _select_cycle_stimuli
+from core.main import _sanitize_cycle_trigger_refs, _select_cycle_stimuli
 from core.model_client import ModelClient
 from core.openclaw_gateway import OpenClawGatewayExecutor, OpenClawUnavailableError
 from core.perception import PerceptionManager
@@ -511,7 +511,7 @@ class StimulusQueueTests(unittest.TestCase):
         self.assertEqual(len(selected), 1)
         self.assertEqual(selected[0].source, "telegram:1")
         self.assertEqual(selected[0].stimulus_id, first.stimulus_id)
-        self.assertEqual(selected[0].content, "你好\n你在做什么？\n你是谁？")
+        self.assertEqual(selected[0].content, "你好 / 你在做什么？ / 你是谁？")
         self.assertEqual(selected[0].metadata["merged_count"], 3)
         self.assertEqual(len(selected[0].metadata["merged_stimulus_ids"]), 3)
         self.assertEqual(selected[0].metadata["telegram_message_id"], 103)
@@ -527,7 +527,7 @@ class StimulusQueueTests(unittest.TestCase):
 
         self.assertEqual(len(first_round), 1)
         self.assertEqual(first_round[0].source, "telegram:1")
-        self.assertEqual(first_round[0].content, "Alice 1\nAlice 2")
+        self.assertEqual(first_round[0].content, "Alice 1 / Alice 2")
         self.assertEqual(len(second_round), 1)
         self.assertEqual(second_round[0].source, "telegram:2")
         self.assertEqual(second_round[0].content, "Bob 1")
@@ -543,7 +543,7 @@ class StimulusQueueTests(unittest.TestCase):
         second_round = _select_cycle_stimuli(queue)
 
         self.assertEqual([stimulus.type for stimulus in first_round], ["conversation", "weather"])
-        self.assertEqual(first_round[0].content, "你好\n你在做什么？")
+        self.assertEqual(first_round[0].content, "你好 / 你在做什么？")
         self.assertEqual(first_round[1].content, "塔林，多云，5C")
         self.assertEqual(len(second_round), 1)
         self.assertEqual(second_round[0].source, "telegram:2")
@@ -563,42 +563,146 @@ class StimulusQueueTests(unittest.TestCase):
 
 
 class PromptBuilderPhase3Tests(unittest.TestCase):
-    def test_prompt_includes_stimuli_and_running_actions(self) -> None:
+    def test_prompt_includes_reordered_sections_and_sanitized_action_summaries(self) -> None:
         queue = StimulusQueue(redis_client=None)
         stimulus = queue.push("conversation", 1, "user:alice", "你好")
+        passive = Stimulus(
+            stimulus_id="stim_time",
+            type="time",
+            priority=4,
+            source="system:clock",
+            content="现在是晚上",
+        )
+        action_echo = Stimulus(
+            stimulus_id="stim_search",
+            type="action_result",
+            priority=2,
+            source="action:act_1",
+            content="搜索完成\n1. 标题 (https://example.com) —— 摘要",
+            metadata={"origin": "action", "action_type": "search"},
+        )
         action = MagicMock()
         action.action_id = "act_1"
         action.type = "search"
         action.executor = "openclaw"
         action.status = "running"
-        action.request = {"task": "搜索最近的反馈"}
-        action.source_content = "我想搜一下最近的反馈"
+        action.request = {"task": '不要泄漏 {"results":[{"title":"","url":"","snippet":""}]}'}
+        action.source_content = '我想搜一下最近的反馈 {action:search, query:"反馈"}'
+        recent = [_make_thought(cycle_id=2, index=1, thought_type="思考", content="之前的念头")]
 
         prompt = build_prompt(
             3,
-            {"self_description": "我是 Seedwake"},
-            [],
+            {
+                "self_description": "我是 Seedwake。",
+                "core_goals": "探索和学习。",
+                "self_understanding": "我会在经验里慢慢形成自己。",
+            },
+            recent,
             30,
-            stimuli=[stimulus],
+            long_term_context=["之前某次读到过关于雨后气味的解释。"],
+            stimuli=[stimulus, passive, action_echo],
             running_actions=[action],
             perception_cues=["了解外界动态——最近发生了什么？"],
         )
 
-        self.assertIn("说：", prompt)
-        self.assertIn("你好", prompt)
+        self.assertIn("## 最近的念头", prompt)
+        self.assertIn("## 浮上来的记忆", prompt)
+        self.assertIn("## 好像有一阵子没有……", prompt)
+        self.assertIn("## 我已经发起、正在等回音的事", prompt)
+        self.assertIn("## 此刻我注意到", prompt)
+        self.assertIn("## 行动有了回音", prompt)
+        self.assertIn("## 有人对我说话了", prompt)
+        self.assertIn("## 接下来的念头", prompt)
+        self.assertLess(prompt.index("## 最近的念头"), prompt.index("## 浮上来的记忆"))
+        self.assertLess(prompt.index("## 浮上来的记忆"), prompt.index("## 好像有一阵子没有……"))
+        self.assertLess(prompt.index("## 好像有一阵子没有……"), prompt.index("## 我已经发起、正在等回音的事"))
+        self.assertLess(prompt.index("## 我已经发起、正在等回音的事"), prompt.index("## 此刻我注意到"))
+        self.assertLess(prompt.index("## 此刻我注意到"), prompt.index("## 行动有了回音"))
+        self.assertLess(prompt.index("## 行动有了回音"), prompt.index("## 有人对我说话了"))
+        self.assertIn("user:alice 说：你好", prompt)
         self.assertIn("如果我决定回应，需要用 {action:send_message} 真正把话发出去", prompt)
-        self.assertIn("我正在等待的事", prompt)
-        self.assertIn("search", prompt)
+        self.assertIn("[时间感] 现在是晚上", prompt)
+        self.assertIn("[搜索结果] 搜索完成 1. 标题 (https://example.com) —— 摘要", prompt)
+        self.assertIn("我想搜一下最近的反馈", prompt)
+        self.assertNotIn('{"results":[{"title":"","url":"","snippet":""}]}', prompt)
+        self.assertNotIn('{action:search, query:"反馈"}', prompt)
         self.assertIn("好像有一阵子没有", prompt)
         self.assertIn("外界动态", prompt)
+        self.assertIn("探索和学习。", prompt)
+        self.assertIn("我会在经验里慢慢形成自己。", prompt)
         self.assertIn("{action:web_fetch", prompt)
         self.assertIn("{action:system_change", prompt)
         self.assertIn("不要发明未列出的 action 名称", prompt)
+        self.assertIn("历史里出现的 [思考-CX-Y]、[意图-CX-Y]、[反应-CX-Y] 是系统记录用编号", prompt)
+        self.assertIn("- [思考] — 思维、分析、联想、好奇", prompt)
+        self.assertNotIn("- [思考-CX-Y] — 思维、分析、联想、好奇", prompt)
         self.assertIn("我想说的话", prompt)
         self.assertIn("我自己想读的内容", prompt)
         self.assertIn("这种回应必须外化成 {action:send_message, ...}", prompt)
         self.assertIn("对话是前景，时间感和身体感觉只是背景", prompt)
         self.assertNotIn("你想发出的内容", prompt)
+
+
+class TriggerValidationTests(unittest.TestCase):
+    def test_sanitize_cycle_trigger_refs_strips_forward_reference(self) -> None:
+        recent = [_make_thought(cycle_id=235, index=1, content="之前的念头")]
+        thoughts = [
+            Thought(
+                thought_id="C236-1",
+                cycle_id=236,
+                index=1,
+                type="思考",
+                content="有效引用",
+                trigger_ref="C235-1",
+            ),
+            Thought(
+                thought_id="C236-2",
+                cycle_id=236,
+                index=2,
+                type="反应",
+                content="无效引用",
+                trigger_ref="C237-1",
+            ),
+        ]
+
+        _sanitize_cycle_trigger_refs(thoughts, recent)
+
+        self.assertEqual(thoughts[0].trigger_ref, "C235-1")
+        self.assertIsNone(thoughts[1].trigger_ref)
+
+    def test_sanitize_cycle_trigger_refs_keeps_same_cycle_backward_reference(self) -> None:
+        recent = [_make_thought(cycle_id=235, index=1, content="之前的念头")]
+        thoughts = [
+            Thought(
+                thought_id="C236-1",
+                cycle_id=236,
+                index=1,
+                type="反应",
+                content="第一条",
+            ),
+            Thought(
+                thought_id="C236-2",
+                cycle_id=236,
+                index=2,
+                type="思考",
+                content="第二条",
+                trigger_ref="C236-1",
+            ),
+            Thought(
+                thought_id="C236-3",
+                cycle_id=236,
+                index=3,
+                type="反应",
+                content="第三条",
+                trigger_ref="C236-4",
+            ),
+        ]
+
+        _sanitize_cycle_trigger_refs(thoughts, recent)
+
+        self.assertIsNone(thoughts[0].trigger_ref)
+        self.assertEqual(thoughts[1].trigger_ref, "C236-1")
+        self.assertIsNone(thoughts[2].trigger_ref)
 
 
 class NativeNewsReaderTests(unittest.TestCase):
@@ -1123,6 +1227,47 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(stimuli[0].type, "action_result")
         self.assertIn("搜索完成", stimuli[0].content)
         self.assertEqual(executor.calls, ["act_C1-1"])
+
+    def test_openclaw_search_action_stimulus_contains_results(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        planner = _Planner(ActionPlan("search", "openclaw", "搜索最近的反馈", 30, "测试"))
+        executor = _OpenClawExecutor(_action_result(
+            summary="搜索完成",
+            data={
+                "results": [{
+                    "title": "Example Result",
+                    "url": "https://example.com/result",
+                    "snippet": "这是结果摘要。",
+                }],
+            },
+            run_id="run_search_1",
+            session_key="seedwake:action:act_C1-1",
+        ))
+        manager = ActionManager(
+            redis_client=None,
+            stimulus_queue=queue,
+            planner=planner,
+            openclaw_executor=executor,
+            auto_execute=["search"],
+            require_confirmation=[],
+            forbidden=[],
+        )
+
+        try:
+            manager.submit_from_thoughts([
+                _make_thought(action_request={"type": "search", "params": 'query:"反馈"'})
+            ])
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        stimulus = queue.pop_many(limit=1)[0]
+        self.assertEqual(stimulus.type, "action_result")
+        self.assertEqual(stimulus.metadata["origin"], "action")
+        self.assertEqual(stimulus.metadata["action_type"], "search")
+        self.assertIn("Example Result", stimulus.content)
+        self.assertIn("https://example.com/result", stimulus.content)
+        self.assertIn("这是结果摘要。", stimulus.content)
 
     def test_confirmation_required_action_fails_immediately(self) -> None:
         queue = StimulusQueue(redis_client=None)

@@ -82,6 +82,7 @@ CYCLE_COUNTER_EXCEPTIONS = (
     OSError,
 )
 CYCLE_COUNTER_KEY = "seedwake:cycle_counter"
+CONVERSATION_MERGE_SEPARATOR = " / "
 logger = logging.getLogger(__name__)
 
 
@@ -395,11 +396,17 @@ def _merge_conversation_stimuli(conversation_group: list[Stimulus]) -> Stimulus:
         type=first.type,
         priority=first.priority,
         source=first.source,
-        content="\n".join(stimulus.content for stimulus in conversation_group),
+        content=CONVERSATION_MERGE_SEPARATOR.join(
+            _compact_conversation_text(stimulus.content) for stimulus in conversation_group
+        ),
         timestamp=first.timestamp,
         action_id=first.action_id,
         metadata=merged_metadata,
     )
+
+
+def _compact_conversation_text(content: str) -> str:
+    return " ".join(content.split())
 
 
 def _recover_runtime_services(
@@ -488,6 +495,7 @@ def _execute_cycle(
     perception_cues: list[str],
     prompt_log_file,
 ) -> list[Thought]:
+    recent_thoughts = runtime.stm.get_context()
     ltm_context = _retrieve_associations(
         runtime.ltm,
         runtime.embedding_client,
@@ -498,7 +506,7 @@ def _execute_cycle(
         runtime.primary_client,
         cycle_id,
         identity,
-        runtime.stm.get_context(),
+        recent_thoughts,
         runtime.context_window,
         runtime.model_config,
         long_term_context=ltm_context,
@@ -507,6 +515,7 @@ def _execute_cycle(
         perception_cues=perception_cues,
         prompt_log_file=prompt_log_file,
     )
+    _sanitize_cycle_trigger_refs(thoughts, recent_thoughts)
     runtime.stm.append(thoughts)
     _store_to_ltm(runtime.ltm, runtime.embedding_client, thoughts, runtime.embedding_model, cycle_id)
     runtime.action_manager.submit_from_thoughts(thoughts, stimuli=stimuli)
@@ -531,6 +540,20 @@ def _handle_cycle_failure(
 def _finish_cycle(log_file, cycle_id: int, stimuli: list[Stimulus], thoughts: list[Thought]) -> None:
     _print_stimuli(log_file, stimuli)
     _print_cycle(log_file, cycle_id, thoughts)
+
+
+def _sanitize_cycle_trigger_refs(thoughts: list[Thought], recent_thoughts: list[Thought]) -> None:
+    valid_ids = {thought.thought_id for thought in recent_thoughts}
+    for thought in thoughts:
+        trigger_ref = str(thought.trigger_ref or "").strip()
+        if not trigger_ref:
+            thought.trigger_ref = None
+        elif trigger_ref in valid_ids:
+            pass
+        else:
+            logger.warning("dropping invalid trigger_ref for %s: %s", thought.thought_id, trigger_ref)
+            thought.trigger_ref = None
+        valid_ids.add(thought.thought_id)
 
 
 # -- Long-term memory read/write ------------------------------------------

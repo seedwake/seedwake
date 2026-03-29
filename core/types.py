@@ -64,6 +64,9 @@ class StimulusMetadata(TypedDict):
     status: str
     executor: str
     result: ActionResultEnvelope
+    origin: NotRequired[str]
+    action_type: NotRequired[str]
+    source_thought_id: NotRequired[str]
 
 
 class StimulusRecord(TypedDict):

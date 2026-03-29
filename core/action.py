@@ -51,6 +51,10 @@ THOUGHT_ACTION_TYPES = {
 }
 READING_STIMULUS_EXCERPT_MAX_CHARS = 1600
 READING_STIMULUS_NOTE_MAX_CHARS = 400
+SEARCH_STIMULUS_MAX_RESULTS = 5
+SEARCH_STIMULUS_TITLE_MAX_CHARS = 120
+SEARCH_STIMULUS_URL_MAX_CHARS = 160
+SEARCH_STIMULUS_SNIPPET_MAX_CHARS = 200
 PLANNER_TIMEOUT_FIELD_DESCRIPTION = "本次动作的超时时间；不写则使用默认值。"
 SEARCH_RESULT_DATA_SHAPE = '{"results":[{"title":"","url":"","snippet":""}]}'
 SEARCH_RESULT_REQUIREMENTS = [
@@ -583,6 +587,8 @@ class ActionManager:
             f"planner:{thought.thought_id}",
             summary,
             metadata={
+                "origin": "action",
+                "action_type": raw_action_type,
                 "status": "ignored",
                 "executor": "planner",
                 "source_thought_id": thought.thought_id,
@@ -2283,6 +2289,8 @@ def _build_result_stimulus(
         "source": f"action:{action.action_id}",
         "content": _stimulus_content(stimulus_type, action, status, result),
         "metadata": {
+            "origin": "action",
+            "action_type": action.type,
             "status": status,
             "executor": action.executor,
             "result": result,
@@ -2322,13 +2330,59 @@ def _stimulus_content(
     result: ActionResultEnvelope,
 ) -> str:
     summary = str(result.get("summary") or "行动完成")
+    if _action_result_succeeded(status, result) and action.type == "search":
+        return _search_stimulus_content(summary, result.get("data"))
+    if _action_result_succeeded(status, result) and action.type in {"reading", "web_fetch"}:
+        return _reading_stimulus_content(summary, result.get("data"))
+    if _action_result_succeeded(status, result) and action.type == "news":
+        return _news_stimulus_content(summary, result.get("data"))
     if stimulus_type == "action_result":
         return f"{action.type} {status}: {summary}"
-    if stimulus_type == "reading":
-        return _reading_stimulus_content(summary, result.get("data"))
-    if stimulus_type == "news":
-        return _news_stimulus_content(summary, result.get("data"))
     return summary
+
+
+def _action_result_succeeded(status: str, result: ActionResultEnvelope) -> bool:
+    return status == "succeeded" and bool(result.get("ok", True))
+
+
+def _search_stimulus_content(summary: str, data) -> str:
+    if not isinstance(data, dict):
+        return summary
+    raw_results = data.get("results")
+    if not isinstance(raw_results, list) or not raw_results:
+        return summary
+    parts = [summary]
+    for index, item in enumerate(raw_results[:SEARCH_STIMULUS_MAX_RESULTS], start=1):
+        entry = _search_stimulus_entry(index, item)
+        if entry:
+            parts.append(entry)
+    return "\n".join(parts)
+
+
+def _search_stimulus_entry(index: int, item: object) -> str:
+    if not isinstance(item, dict):
+        return ""
+    title, _ = _clip_prompt_text(
+        str(item.get("title") or "").strip(),
+        SEARCH_STIMULUS_TITLE_MAX_CHARS,
+    )
+    url, _ = _clip_prompt_text(
+        str(item.get("url") or "").strip(),
+        SEARCH_STIMULUS_URL_MAX_CHARS,
+    )
+    snippet, _ = _clip_prompt_text(
+        str(item.get("snippet") or "").strip(),
+        SEARCH_STIMULUS_SNIPPET_MAX_CHARS,
+    )
+    head = title or url
+    if not head:
+        return ""
+    entry = f"{index}. {head}"
+    if title and url:
+        entry += f" ({url})"
+    if snippet:
+        entry += f" —— {snippet}"
+    return entry
 
 
 def _reading_stimulus_content(summary: str, data) -> str:

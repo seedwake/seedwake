@@ -1,5 +1,7 @@
 """Assemble the prompt for each thought-generation cycle."""
 
+import re
+
 from core.action import ActionRecord
 from core.stimulus import Stimulus
 from core.thought_parser import Thought
@@ -20,6 +22,7 @@ SYSTEM_PROMPT = """\
 
 类型由内容自然决定，任意组合都可以——三个思考、两个反应加一个意图，都没问题。
 可以用 (← CX-Y) 标注这个念头是由哪个之前的念头触发的，其中 X 是轮次编号，Y 是该轮第几个念头（1/2/3）。只能引用历史中存在的念头 ID，不能引用段落标题或其他文本。
+历史里出现的 [思考-CX-Y]、[意图-CX-Y]、[反应-CX-Y] 是系统记录用编号，方便回看和引用；我生成新念头时不用自己写编号。
 如果念头里自然带有行动意图，可以在句末附上一个动作标记：
 - {action:time}
 - {action:system_status}
@@ -63,9 +66,31 @@ SYSTEM_PROMPT = """\
 - 只有在念头里真的自然出现行动冲动时才写 {action:...}
 - 只使用上面明确列出的动作标记，不要发明未列出的 action 名称
 - 回复别人时，如果想针对某条具体消息，用 reply_to 带上对方的 msg id；不带则发普通消息
-
-## 念头
 """
+
+ACTION_MARKER_SUFFIX_PATTERN = re.compile(r"\s*\{action:[^}]+\}\s*$")
+CONVERSATION_MERGE_SEPARATOR = " / "
+ACTION_ECHO_ORIGIN = "action"
+PASSIVE_STIMULUS_LABELS = {
+    "time": "[时间感]",
+    "system_status": "[身体感觉]",
+    "weather": "[天气]",
+    "news": "[外界消息]",
+    "reading": "[刚读到的]",
+}
+ACTION_ECHO_LABELS = {
+    "get_time": "[时间感]",
+    "get_system_status": "[身体感觉]",
+    "news": "[外界消息]",
+    "weather": "[天气]",
+    "reading": "[刚读到的]",
+    "search": "[搜索结果]",
+    "web_fetch": "[网页内容]",
+    "send_message": "[发信结果]",
+    "file_modify": "[文件修改]",
+    "system_change": "[系统变更]",
+}
+UNKNOWN_ACTION_ECHO_LABEL = "[结果]"
 
 
 def build_prompt(
@@ -78,98 +103,89 @@ def build_prompt(
     running_actions: list[ActionRecord] | None = None,
     perception_cues: list[str] | None = None,
 ) -> str:
-    """Build a single prompt string for Ollama generate API."""
+    """Build a single prompt string for thought generation."""
     parts = [_build_system(identity)]
 
-    # Long-term memory associations (Phase 2)
-    if long_term_context:
-        parts.append(_format_long_term(long_term_context))
-
-    # Short-term thought history
     window = recent_thoughts[-context_window * 3:]
     if window:
         parts.append(_format_thought_history(window))
-
-    if stimuli:
-        conversations, others = _split_stimuli(stimuli)
-        if conversations:
-            parts.append(_format_conversations(conversations))
-        if others:
-            parts.append(_format_sensory_stimuli(others))
-
+    if long_term_context:
+        parts.append(_format_long_term(long_term_context))
+    if perception_cues:
+        parts.append(_format_perception_cues(perception_cues))
     if running_actions:
         parts.append(_format_running_actions(running_actions))
 
-    if perception_cues:
-        parts.append(_format_perception_cues(perception_cues))
-
-    # Trailing separator to cue the next cycle
-    parts.append(f"\n--- 第 {cycle_id} 轮 ---")
-    return "\n".join(parts)
+    if stimuli:
+        conversations, action_echoes, passive = _split_stimuli(stimuli)
+        if passive:
+            parts.append(_format_sensory_stimuli(passive))
+        if action_echoes:
+            parts.append(_format_action_echoes(action_echoes))
+        if conversations:
+            parts.append(_format_conversations(conversations))
+    parts.append(_format_next_cycle(cycle_id))
+    return "\n\n".join(parts)
 
 
 def _build_system(identity: dict[str, str]) -> str:
-    parts = [SYSTEM_PROMPT, '\n## \u201c我\u201d是谁\n']
-    for section, content in identity.items():
-        parts.append(content.strip())
-    return "\n".join(parts)
+    parts = [SYSTEM_PROMPT.rstrip(), '## “我”是谁']
+    for content in identity.values():
+        normalized = content.strip()
+        if normalized:
+            parts.append(normalized)
+    return "\n\n".join(parts)
 
 
 def _format_long_term(memories: list[str]) -> str:
-    lines = ["\n## 浮上来的记忆\n\n"]
+    lines = []
     for mem in memories:
-        lines.append(f"- {mem}")
-    return "\n".join(lines)
+        lines.append(f"- {_compact_prompt_text(mem)}")
+    return _render_section("浮上来的记忆", lines)
 
 
-def _split_stimuli(stimuli: list[Stimulus]) -> tuple[list[Stimulus], list[Stimulus]]:
+def _split_stimuli(stimuli: list[Stimulus]) -> tuple[list[Stimulus], list[Stimulus], list[Stimulus]]:
     conversations = []
-    others = []
+    action_echoes = []
+    passive = []
     for stimulus in stimuli:
         if stimulus.type == "conversation":
             conversations.append(stimulus)
+        elif _is_action_echo(stimulus):
+            action_echoes.append(stimulus)
         else:
-            others.append(stimulus)
-    return conversations, others
+            passive.append(stimulus)
+    return conversations, action_echoes, passive
 
 
 def _format_conversations(conversations: list[Stimulus]) -> str:
-    lines = [
-        "\n## 有人对我说话了\n\n",
-        "如果我决定回应，需要用 {action:send_message} 真正把话发出去。",
-        "",
-    ]
+    lines = ["如果我决定回应，需要用 {action:send_message} 真正把话发出去。", ""]
     for conv in conversations:
+        content = _compact_prompt_text(conv.content)
         msg_id = conv.metadata.get("telegram_message_id")
         if msg_id:
-            lines.append(f"{conv.source}（msg:{msg_id}）说：")
-        else:
-            lines.append(f"{conv.source} 说：")
-        lines.append(conv.content)
-        lines.append("")
-    return "\n".join(lines)
+            lines.append(f"{conv.source} [msg:{msg_id}] 说：{content}")
+            continue
+        lines.append(f"{conv.source} 说：{content}")
+    return _render_section("有人对我说话了", lines, keep_blank_lines=True)
 
 
 def _format_sensory_stimuli(stimuli: list[Stimulus]) -> str:
-    lines = ["\n## 此刻我注意到\n\n"]
+    lines = []
     for stimulus in stimuli:
-        lines.append(f"- {_sensory_label(stimulus.type)}{stimulus.content}")
-    return "\n".join(lines)
+        lines.append(
+            f"- {_passive_stimulus_label(stimulus.type)} {_compact_prompt_text(stimulus.content)}"
+        )
+    return _render_section("此刻我注意到", lines)
 
 
-def _sensory_label(stimulus_type: str) -> str:
-    labels = {
-        "time": "（时间感）",
-        "system_status": "（身体感觉）",
-        "weather": "（天气）",
-        "news": "（外界消息）",
-        "reading": "（刚读到的）",
-        "action_result": "（行动回音）",
-    }
-    label = labels.get(stimulus_type)
-    if label:
-        return f"{label} "
-    return ""
+def _format_action_echoes(stimuli: list[Stimulus]) -> str:
+    lines = []
+    for stimulus in stimuli:
+        lines.append(
+            f"- {_action_echo_label(stimulus)} {_compact_prompt_text(stimulus.content)}"
+        )
+    return _render_section("行动有了回音", lines)
 
 
 def _format_thought_history(thoughts: list[Thought]) -> str:
@@ -178,22 +194,61 @@ def _format_thought_history(thoughts: list[Thought]) -> str:
     for t in thoughts:
         if t.cycle_id != current_cycle:
             current_cycle = t.cycle_id
-            lines.append(f"\n--- 第 {t.cycle_id} 轮 ---")
+            lines.append(f"--- 第 {t.cycle_id} 轮 ---")
         trigger = f" (← {t.trigger_ref})" if t.trigger_ref else ""
         lines.append(f"[{t.type}-{t.thought_id}] {t.content}{trigger}")
-    return "\n".join(lines)
+    return _render_section("最近的念头", lines)
 
 
 def _format_running_actions(actions: list[ActionRecord]) -> str:
-    lines = ["\n## 我正在等待的事\n\n"]
+    lines = []
     for action in actions:
-        task = str(action.request.get("task") or action.source_content)
-        lines.append(f"- {task}（{action.type}，{action.status}）")
-    return "\n".join(lines)
+        lines.append(f"- {_running_action_summary(action)} [{action.type}/{action.status}]")
+    return _render_section("我已经发起、正在等回音的事", lines)
 
 
 def _format_perception_cues(cues: list[str]) -> str:
-    lines = ["\n## 好像有一阵子没有……\n\n"]
-    for cue in cues:
-        lines.append(f"- {cue}")
-    return "\n".join(lines)
+    return _render_section("好像有一阵子没有……", [f"- {cue}" for cue in cues])
+
+
+def _format_next_cycle(cycle_id: int) -> str:
+    return f"## 接下来的念头\n\n--- 第 {cycle_id} 轮 ---"
+
+
+def _render_section(title: str, lines: list[str], *, keep_blank_lines: bool = False) -> str:
+    if keep_blank_lines:
+        body = "\n".join(lines)
+    else:
+        body = "\n".join(line for line in lines if line)
+    return f"## {title}\n\n{body}"
+
+
+def _passive_stimulus_label(stimulus_type: str) -> str:
+    return PASSIVE_STIMULUS_LABELS.get(stimulus_type, "[感知]")
+
+
+def _action_echo_label(stimulus: Stimulus) -> str:
+    action_type = str(stimulus.metadata.get("action_type") or "").strip()
+    if action_type:
+        return ACTION_ECHO_LABELS.get(action_type, UNKNOWN_ACTION_ECHO_LABEL)
+    return UNKNOWN_ACTION_ECHO_LABEL
+
+
+def _is_action_echo(stimulus: Stimulus) -> bool:
+    origin = str(stimulus.metadata.get("origin") or "").strip()
+    if origin == ACTION_ECHO_ORIGIN:
+        return True
+    return stimulus.source.startswith("action:") or stimulus.source.startswith("planner:")
+
+
+def _running_action_summary(action: ActionRecord) -> str:
+    summary = action.source_content.strip() or str(action.request.get("reason") or "").strip() or action.type
+    return _compact_prompt_text(_strip_action_marker(summary))
+
+
+def _strip_action_marker(content: str) -> str:
+    return ACTION_MARKER_SUFFIX_PATTERN.sub("", content).strip()
+
+
+def _compact_prompt_text(text: str) -> str:
+    return " ".join(str(text).split())
