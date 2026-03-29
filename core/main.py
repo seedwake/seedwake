@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 from core.action import ActionManager, ActionRecord, create_action_manager, pop_action_controls
 from core.cycle import create_client, run_cycle
 from core.embedding import embed_text
-from core.logging import setup_logging
+from core.logging import resolve_log_path, setup_logging
 from core.memory.identity import load_identity
 from core.memory.long_term import LongTermMemory
 from core.memory.short_term import ShortTermMemory
@@ -102,7 +102,7 @@ def main() -> None:
     args = _parse_args()
     config = _load_config(args.config)
     setup_logging(config, component="core")
-    log_file = _open_log(args.log)
+    log_file = _open_log(args.log, config)
 
     ollama_client, redis_client, pg_conn = _create_connections()
     runtime, identity = _build_runtime_components(config, log_file, ollama_client, redis_client, pg_conn)
@@ -528,17 +528,14 @@ def _connect_pg():
 
 def _print_cycle(log_file, cycle_id: int, thoughts: list[Thought]) -> None:
     print(f"\n{C_DIM}── C{cycle_id} ──{C_RESET}")
+    lines = [f"── C{cycle_id} ──"]
     for t in thoughts:
         color = C_TYPE.get(t.type, "")
         trigger = f" {C_DIM}(← {t.trigger_ref}){C_RESET}" if t.trigger_ref else ""
         print(f"  {color}[{t.type}]{C_RESET} {t.content}{trigger}")
-
-    if log_file:
-        log_file.write(f"\n── C{cycle_id} ──\n")
-        for t in thoughts:
-            trigger = f" (← {t.trigger_ref})" if t.trigger_ref else ""
-            log_file.write(f"  [{t.type}] {t.content}{trigger}\n")
-        log_file.flush()
+        plain_trigger = f" (← {t.trigger_ref})" if t.trigger_ref else ""
+        lines.append(f"  [{t.type}] {t.content}{plain_trigger}")
+    _write_log_message(log_file, "\n".join(lines))
 
 
 def _print_stimuli(log_file, stimuli: list[Stimulus]) -> None:
@@ -546,14 +543,11 @@ def _print_stimuli(log_file, stimuli: list[Stimulus]) -> None:
         return
 
     print(f"{C_DIM}刺激{C_RESET}")
+    lines = ["刺激"]
     for stimulus in stimuli:
         print(f"  {C_DIM}[{stimulus.type}]{C_RESET} {stimulus.content}")
-
-    if log_file:
-        log_file.write("刺激\n")
-        for stimulus in stimuli:
-            log_file.write(f"  [{stimulus.type}] {stimulus.content}\n")
-        log_file.flush()
+        lines.append(f"  [{stimulus.type}] {stimulus.content}")
+    _write_log_message(log_file, "\n".join(lines))
 
 
 def _push_passive_stimuli(stimulus_queue: StimulusQueue, stimuli: list[PerceptionStimulusPayload]) -> None:
@@ -569,18 +563,21 @@ def _push_passive_stimuli(stimulus_queue: StimulusQueue, stimuli: list[Perceptio
 
 def _output(log_file, text: str) -> None:
     print(text)
-    if log_file:
-        log_file.write(text + "\n")
-        log_file.flush()
+    _write_log_message(log_file, text)
 
 
 def _print_error(log_file, cycle_id: int, error: Exception, retry_delay: float) -> None:
     msg = f"── C{cycle_id} ERROR: {error} (retry in {retry_delay:.1f}s)"
-    logger.warning(msg, exc_info=True)
     print(f"\n\033[31m{msg}\033[0m", file=sys.stderr)
-    if log_file:
-        log_file.write(f"\n{msg}\n")
-        log_file.flush()
+    _write_log_message(log_file, msg, level=logging.WARNING, exc_info=True)
+
+
+def _write_log_message(log_file, text: str, *, level: int = logging.INFO, exc_info: bool = False) -> None:
+    logger.log(level, text, exc_info=exc_info)
+    if log_file is None:
+        return
+    log_file.write(text + "\n")
+    log_file.flush()
 
 
 def _publish_event(redis_client, event_type: str, payload: EventPayload) -> None:
@@ -617,11 +614,15 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _open_log(path: str | None):
+def _open_log(path: str | None, config: dict):
     if not path:
         return None
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    return open(path, "w", encoding="utf-8")
+    target = Path(path).expanduser().resolve()
+    if target == resolve_log_path(config, component="core"):
+        logger.info("manual cycle log path matches core logger output; reusing logging handler only")
+        return None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target.open("w", encoding="utf-8")
 
 
 def _install_signal_handler(log_file, action_manager) -> None:

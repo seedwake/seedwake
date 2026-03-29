@@ -1,11 +1,13 @@
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import psycopg
 import redis as redis_lib
 
 # noinspection PyProtectedMember
-from core.main import _maybe_reconnect_pg, _maybe_reconnect_redis
+from core.main import _maybe_reconnect_pg, _maybe_reconnect_redis, _open_log
 from core.memory.identity import load_identity
 from core.memory.long_term import LongTermMemory
 # noinspection PyProtectedMember
@@ -258,6 +260,30 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(last_attempt, 10.0)
         self.assertTrue(ltm.available)
         mock_load_identity.assert_called_once_with(mock_conn, {"self_description": "配置版本"})
+
+
+class CoreLogHandleTests(unittest.TestCase):
+    def test_open_log_skips_duplicate_core_log_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config = {"runtime": {"logging": {"directory": tmp_dir}}}
+            log_path = str(Path(tmp_dir) / "core.log")
+
+            handle = _open_log(log_path, config)
+
+            self.assertIsNone(handle)
+
+    def test_open_log_opens_distinct_plain_text_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config = {"runtime": {"logging": {"directory": tmp_dir}}}
+            plain_log = Path(tmp_dir) / "cycles.txt"
+
+            handle = _open_log(str(plain_log), config)
+
+            self.assertIsNotNone(handle)
+            assert handle is not None
+            handle.write("ok\n")
+            handle.close()
+            self.assertTrue(plain_log.exists())
 
 
 if __name__ == "__main__":

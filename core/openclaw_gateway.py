@@ -116,8 +116,8 @@ class OpenClawGatewayExecutor:
                     raise RuntimeError(_format_gateway_error(connect_res))
 
                 request_id = uuid4().hex
-                session_key = f"{self._session_key_prefix}:{action.action_id}"
                 worker_agent_id = self._resolve_worker_agent_id(action)
+                session_key = f"agent:{worker_agent_id}:{self._session_key_prefix}:{action.action_id}"
                 timeout_seconds = int(getattr(action, "timeout_seconds", 300))
                 await client.send_request(
                     request_id,
@@ -177,8 +177,8 @@ class OpenClawGatewayExecutor:
         if not self._http_base_url:
             raise RuntimeError(f"WS 失败且未配置 HTTP fallback: {ws_error}") from ws_error
 
-        session_key = f"{self._session_key_prefix}:{action.action_id}"
         worker_agent_id = self._resolve_worker_agent_id(action)
+        session_key = f"agent:{worker_agent_id}:{self._session_key_prefix}:{action.action_id}"
         payload = {
             "model": f"openclaw/{worker_agent_id}",
             "instructions": RESULT_SYSTEM_PROMPT,
@@ -228,7 +228,7 @@ class OpenClawGatewayExecutor:
         signed_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         payload = _build_device_auth_payload(
             device_id=identity["device_id"],
-            client_id="seedwake",
+            client_id="gateway-client",
             client_mode="backend",
             role="operator",
             scopes=["operator.read", "operator.write"],
@@ -242,7 +242,7 @@ class OpenClawGatewayExecutor:
             "minProtocol": 3,
             "maxProtocol": 3,
             "client": {
-                "id": "seedwake",
+                "id": "gateway-client",
                 "displayName": "Seedwake",
                 "version": "0.3.0",
                 "platform": os.uname().sysname.lower(),
