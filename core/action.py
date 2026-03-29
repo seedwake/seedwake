@@ -1521,7 +1521,7 @@ def _native_send_message_plan(
     explicit_target_entity: str = "",
 ) -> ActionPlan:
     message_text = explicit_message or _build_send_message_text(raw_params, thought)
-    target_source = explicit_target or _build_send_message_target(raw_params)
+    target_source = _normalize_telegram_target(explicit_target) or _build_send_message_target(raw_params)
     target_entity = explicit_target_entity or _build_send_message_target_entity(raw_params)
     if not target_source and not target_entity:
         target_source = str(conversation_source or "").strip()
@@ -1652,11 +1652,17 @@ def _raw_action_params(thought: Thought) -> str:
 
 def _build_send_message_target(raw_params: str) -> str:
     target = _extract_action_first_param(raw_params, "target", "source", "chat_id", "chat")
-    if target:
-        if target.startswith(TELEGRAM_SOURCE_PREFIX):
-            return target
-        if target.isdigit() or (target.startswith("-") and target[1:].isdigit()):
-            return f"{TELEGRAM_SOURCE_PREFIX}{target}"
+    return _normalize_telegram_target(target or "")
+
+
+def _normalize_telegram_target(target: str) -> str:
+    target = target.strip()
+    if not target:
+        return ""
+    if target.startswith(TELEGRAM_SOURCE_PREFIX):
+        return target
+    if target.isdigit() or (target.startswith("-") and target[1:].isdigit()):
+        return f"{TELEGRAM_SOURCE_PREFIX}{target}"
     return ""
 
 

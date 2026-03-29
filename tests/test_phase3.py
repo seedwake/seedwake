@@ -13,6 +13,7 @@ from core.action import (
     ActionPlan,
     NEWS_SEEN_REDIS_KEY,
     _fallback_plan,
+    _native_send_message_plan,
     pop_action_controls,
     push_action_control,
 )
@@ -991,6 +992,26 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(plan.executor, "native")
         self.assertEqual(plan.target_entity, "person:alice")
         self.assertEqual(plan.message_text, "我已经看到")
+
+    def test_native_send_message_plan_normalizes_explicit_numeric_target(self) -> None:
+        thought = _make_thought(
+            thought_type="意图",
+            content="请回复我",
+            action_request={"type": "send_message", "params": 'message:"你好"'},
+        )
+
+        plan = _native_send_message_plan(
+            raw_params='message:"你好"',
+            thought=thought,
+            timeout_seconds=30,
+            reason="测试",
+            conversation_source=None,
+            explicit_message="你好",
+            explicit_target="8469901143",
+        )
+
+        self.assertEqual(plan.target_source, "telegram:8469901143")
+        self.assertEqual(plan.message_text, "你好")
 
     def test_native_send_message_resolves_target_entity(self) -> None:
         queue = StimulusQueue(redis_client=None)
