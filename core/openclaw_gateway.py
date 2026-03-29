@@ -45,6 +45,9 @@ RESULT_SYSTEM_PROMPT = """\
 You are a worker for Seedwake.
 Finish the task and return JSON only:
 {"ok": true, "summary": "...", "data": {}, "error": null}
+Use the exact data field names required by the task instructions.
+Do not rename fields, add sibling fields, or replace the requested shape with a different one.
+If a requested field is unavailable, use "", [], {}, false, or null as appropriate instead of inventing a new key.
 Do not wrap the JSON in markdown fences.
 """
 

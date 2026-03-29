@@ -70,6 +70,21 @@ class ThoughtParserTests(unittest.TestCase):
 
         self.assertEqual(thoughts[0].action_request, {"type": "news", "params": ""})
 
+    def test_parse_action_ignores_action_marker_inside_simple_code_span(self) -> None:
+        thoughts = parse_thoughts("[意图] 我在想 `{action:news}` 是什么语法\n", 1)
+
+        self.assertIsNone(thoughts[0].action_request)
+
+    def test_parse_action_ignores_action_marker_inside_code_span_with_prefix_text(self) -> None:
+        thoughts = parse_thoughts("[意图] 我在想 `示例 {action:news}` 是什么语法\n", 1)
+
+        self.assertIsNone(thoughts[0].action_request)
+
+    def test_parse_action_prefers_real_marker_outside_code_span(self) -> None:
+        thoughts = parse_thoughts("[意图] 我知道 `示例 {action:news}` 这个语法，但我现在真想看看新闻 {action:news}\n", 1)
+
+        self.assertEqual(thoughts[0].action_request, {"type": "news", "params": ""})
+
 
 class CycleTests(unittest.TestCase):
     @patch("core.cycle._call_ollama", return_value="[思考] a\n[意图] b\n[反应] c\n")

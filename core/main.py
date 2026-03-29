@@ -305,16 +305,80 @@ def _prepare_cycle(
 
 
 def _select_cycle_stimuli(stimulus_queue: StimulusQueue) -> list[Stimulus]:
-    stimuli = stimulus_queue.pop_many(limit=2)
-    if len(stimuli) <= 1:
-        return stimuli
-    first = stimuli[0]
-    if first.type != "conversation":
-        return stimuli
-    deferred = stimuli[1:]
+    ranked_stimuli = stimulus_queue.pop_all()
+    if len(ranked_stimuli) <= 1:
+        return ranked_stimuli
+    conversation_source = _first_conversation_source(ranked_stimuli)
+    if conversation_source is None:
+        selected = ranked_stimuli[:2]
+        deferred = ranked_stimuli[2:]
+        if deferred:
+            stimulus_queue.requeue_front(deferred)
+        return selected
+
+    selected, deferred = _partition_cycle_stimuli(ranked_stimuli, conversation_source)
     if deferred:
         stimulus_queue.requeue_front(deferred)
-    return [first]
+    return selected
+
+def _first_conversation_source(stimuli: list[Stimulus]) -> str | None:
+    for stimulus in stimuli:
+        if stimulus.type == "conversation":
+            return stimulus.source
+    return None
+
+
+def _partition_cycle_stimuli(
+    ranked_stimuli: list[Stimulus],
+    conversation_source: str,
+) -> tuple[list[Stimulus], list[Stimulus]]:
+    conversation_group: list[Stimulus] = []
+    first_conversation_index: int | None = None
+    selected_non_conversation: tuple[int, Stimulus] | None = None
+    deferred: list[Stimulus] = []
+
+    for index, stimulus in enumerate(ranked_stimuli):
+        if stimulus.type == "conversation":
+            if stimulus.source == conversation_source:
+                if first_conversation_index is None:
+                    first_conversation_index = index
+                conversation_group.append(stimulus)
+            else:
+                deferred.append(stimulus)
+            continue
+        if selected_non_conversation is None:
+            selected_non_conversation = (index, stimulus)
+            continue
+        deferred.append(stimulus)
+
+    merged_conversation = _merge_conversation_stimuli(conversation_group)
+    selected: list[tuple[int, Stimulus]] = [(
+        0 if first_conversation_index is None else first_conversation_index,
+        merged_conversation,
+    )]
+    if selected_non_conversation is not None:
+        selected.append(selected_non_conversation)
+    selected.sort(key=lambda pair: pair[0])
+    return [stimulus for _, stimulus in selected], deferred
+
+
+def _merge_conversation_stimuli(conversation_group: list[Stimulus]) -> Stimulus:
+    first = conversation_group[0]
+    merged_metadata = dict(first.metadata)
+    merged_metadata["merged_count"] = len(conversation_group)
+    merged_metadata["merged_stimulus_ids"] = [
+        stimulus.stimulus_id for stimulus in conversation_group
+    ]
+    return Stimulus(
+        stimulus_id=first.stimulus_id,
+        type=first.type,
+        priority=first.priority,
+        source=first.source,
+        content="\n".join(stimulus.content for stimulus in conversation_group),
+        timestamp=first.timestamp,
+        action_id=first.action_id,
+        metadata=merged_metadata,
+    )
 
 
 def _recover_runtime_services(

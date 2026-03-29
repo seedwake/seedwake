@@ -14,6 +14,8 @@ from core.action import (
     NEWS_SEEN_REDIS_KEY,
     _fallback_plan,
     _native_send_message_plan,
+    _plan_delegate_tool_call,
+    _planner_tools,
     pop_action_controls,
     push_action_control,
 )
@@ -22,7 +24,7 @@ from core.main import _select_cycle_stimuli
 from core.openclaw_gateway import OpenClawUnavailableError
 from core.perception import PerceptionManager
 from core.prompt_builder import build_prompt
-from core.rss import read_news_result
+from core.rss import read_news_result, summarize_news_items
 from core.stimulus import CONVERSATION_HISTORY_KEY, Stimulus, StimulusQueue
 from core.thought_parser import Thought
 from core.types import ActionControl, ActionResultEnvelope, NewsItem
@@ -409,16 +411,50 @@ class StimulusQueueTests(unittest.TestCase):
         restored = queue.pop_many(limit=2)
         self.assertEqual([stimulus.stimulus_id for stimulus in restored], [first.stimulus_id, second.stimulus_id])
 
-    def test_select_cycle_stimuli_keeps_single_conversation_per_round(self) -> None:
+    def test_select_cycle_stimuli_merges_same_source_conversation(self) -> None:
         queue = StimulusQueue(redis_client=None)
-        queue.push("conversation", 1, "telegram:1", "Alice")
-        queue.push("conversation", 1, "telegram:2", "Bob")
+        first = queue.push("conversation", 1, "telegram:1", "你好")
+        queue.push("conversation", 1, "telegram:1", "你在做什么？")
+        queue.push("conversation", 1, "telegram:1", "你是谁？")
+
+        selected = _select_cycle_stimuli(queue)
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].source, "telegram:1")
+        self.assertEqual(selected[0].stimulus_id, first.stimulus_id)
+        self.assertEqual(selected[0].content, "你好\n你在做什么？\n你是谁？")
+        self.assertEqual(selected[0].metadata["merged_count"], 3)
+        self.assertEqual(len(selected[0].metadata["merged_stimulus_ids"]), 3)
+
+    def test_select_cycle_stimuli_keeps_other_sources_for_later_rounds(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        queue.push("conversation", 1, "telegram:1", "Alice 1")
+        queue.push("conversation", 1, "telegram:2", "Bob 1")
+        queue.push("conversation", 1, "telegram:1", "Alice 2")
 
         first_round = _select_cycle_stimuli(queue)
         second_round = _select_cycle_stimuli(queue)
 
         self.assertEqual(len(first_round), 1)
         self.assertEqual(first_round[0].source, "telegram:1")
+        self.assertEqual(first_round[0].content, "Alice 1\nAlice 2")
+        self.assertEqual(len(second_round), 1)
+        self.assertEqual(second_round[0].source, "telegram:2")
+        self.assertEqual(second_round[0].content, "Bob 1")
+
+    def test_select_cycle_stimuli_keeps_one_conversation_and_one_non_conversation(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        queue.push("conversation", 1, "telegram:1", "你好")
+        queue.push("conversation", 1, "telegram:1", "你在做什么？")
+        queue.push("conversation", 1, "telegram:2", "别人的消息")
+        queue.push("weather", 2, "action:weather", "塔林，多云，5C")
+
+        first_round = _select_cycle_stimuli(queue)
+        second_round = _select_cycle_stimuli(queue)
+
+        self.assertEqual([stimulus.type for stimulus in first_round], ["conversation", "weather"])
+        self.assertEqual(first_round[0].content, "你好\n你在做什么？")
+        self.assertEqual(first_round[1].content, "塔林，多云，5C")
         self.assertEqual(len(second_round), 1)
         self.assertEqual(second_round[0].source, "telegram:2")
 
@@ -454,7 +490,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("{action:web_fetch", prompt)
         self.assertIn("{action:system_change", prompt)
         self.assertIn("不要发明未列出的 action 名称", prompt)
-        self.assertIn("我想发出的内容", prompt)
+        self.assertIn("我想发出的消息内容", prompt)
         self.assertIn("我自己想读的内容", prompt)
         self.assertNotIn("你想发出的内容", prompt)
 
@@ -515,6 +551,25 @@ class NativeNewsReaderTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(len(result["data"]["items"]), 1)
         self.assertIn("errors", result["data"])
+
+    def test_read_news_result_summary_clips_long_title_label(self) -> None:
+        long_title = "超长标题" * 80
+        result = _action_result(
+            summary=summarize_news_items([{
+                "feed_url": "https://example.com/rss.xml",
+                "guid": "item-1",
+                "link": "https://example.com/1",
+                "title": long_title,
+                "published_at": "2026-03-27T10:00:00+00:00",
+                "summary": "",
+            }]),
+            data={"items": []},
+            run_id="run_news_summary_title_clip",
+            session_key="seedwake:action:act_C1-1",
+        )
+
+        self.assertIn("...", result["summary"])
+        self.assertNotIn(long_title, result["summary"])
 
 
 class PerceptionManagerTests(unittest.TestCase):
@@ -627,6 +682,174 @@ class ActionManagerTests(unittest.TestCase):
                 _make_thought(cycle_id=2, action_request={"type": "news", "params": ""}),
             ],
         )
+
+    def test_news_stimulus_falls_back_to_summary_when_title_missing(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        manager = _build_action_manager(
+            queue,
+            _Planner(ActionPlan("news", "native", "读取 RSS", 30, "测试", ["https://example.com/rss.xml"])),
+            redis_client=_RedisNewsSeenStub(),
+            news_reader=_constant_news_reader(_action_result(
+                summary="新闻已读取",
+                data={
+                    "items": [{
+                        "feed_url": "https://example.com/rss.xml",
+                        "guid": "item-summary-only",
+                        "link": "https://example.com/summary-only",
+                        "title": "",
+                        "published_at": "2026-03-27T10:00:00+00:00",
+                        "summary": "只有摘要，没有标题",
+                    }],
+                },
+                run_id="run_news_summary_only",
+                session_key="seedwake:action:act_C1-1",
+            )),
+        )
+
+        _submit_and_shutdown(
+            manager,
+            [_make_thought(cycle_id=1, action_request={"type": "news", "params": ""})],
+        )
+        stimulus = queue.pop_many(limit=1)[0]
+        self.assertEqual(stimulus.type, "news")
+        self.assertIn("- 只有摘要，没有标题", stimulus.content)
+
+    def test_news_stimulus_clips_long_summary_when_title_missing(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        long_summary = "长摘要" * 80
+        manager = _build_action_manager(
+            queue,
+            _Planner(ActionPlan("news", "native", "读取 RSS", 30, "测试", ["https://example.com/rss.xml"])),
+            redis_client=_RedisNewsSeenStub(),
+            news_reader=_constant_news_reader(_action_result(
+                summary="新闻已读取",
+                data={
+                    "items": [{
+                        "feed_url": "https://example.com/rss.xml",
+                        "guid": "item-long-summary",
+                        "link": "https://example.com/summary-only",
+                        "title": "",
+                        "published_at": "2026-03-27T10:00:00+00:00",
+                        "summary": long_summary,
+                    }],
+                },
+                run_id="run_news_long_summary",
+                session_key="seedwake:action:act_C1-1",
+            )),
+        )
+
+        _submit_and_shutdown(
+            manager,
+            [_make_thought(cycle_id=1, action_request={"type": "news", "params": ""})],
+        )
+        stimulus = queue.pop_many(limit=1)[0]
+        self.assertEqual(stimulus.type, "news")
+        self.assertIn("- ", stimulus.content)
+        self.assertIn("...", stimulus.content)
+        self.assertNotIn(long_summary, stimulus.content)
+
+    def test_news_stimulus_clips_long_link_when_title_and_summary_missing(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        long_link = "https://example.com/" + ("path/" * 60)
+        manager = _build_action_manager(
+            queue,
+            _Planner(ActionPlan("news", "native", "读取 RSS", 30, "测试", ["https://example.com/rss.xml"])),
+            redis_client=_RedisNewsSeenStub(),
+            news_reader=_constant_news_reader(_action_result(
+                summary="新闻已读取",
+                data={
+                    "items": [{
+                        "feed_url": "https://example.com/rss.xml",
+                        "guid": "item-long-link",
+                        "link": long_link,
+                        "title": "",
+                        "published_at": "2026-03-27T10:00:00+00:00",
+                        "summary": "",
+                    }],
+                },
+                run_id="run_news_long_link",
+                session_key="seedwake:action:act_C1-1",
+            )),
+        )
+
+        _submit_and_shutdown(
+            manager,
+            [_make_thought(cycle_id=1, action_request={"type": "news", "params": ""})],
+        )
+        stimulus = queue.pop_many(limit=1)[0]
+        self.assertEqual(stimulus.type, "news")
+        self.assertIn("- https://example.com/", stimulus.content)
+        self.assertIn("...", stimulus.content)
+        self.assertNotIn(long_link, stimulus.content)
+
+    def test_news_stimulus_clips_long_title(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        long_title = "超长标题" * 80
+        manager = _build_action_manager(
+            queue,
+            _Planner(ActionPlan("news", "native", "读取 RSS", 30, "测试", ["https://example.com/rss.xml"])),
+            redis_client=_RedisNewsSeenStub(),
+            news_reader=_constant_news_reader(_action_result(
+                summary="新闻已读取",
+                data={
+                    "items": [{
+                        "feed_url": "https://example.com/rss.xml",
+                        "guid": "item-long-title",
+                        "link": "https://example.com/title",
+                        "title": long_title,
+                        "published_at": "2026-03-27T10:00:00+00:00",
+                        "summary": "短摘要",
+                    }],
+                },
+                run_id="run_news_long_title",
+                session_key="seedwake:action:act_C1-1",
+            )),
+        )
+
+        _submit_and_shutdown(
+            manager,
+            [_make_thought(cycle_id=1, action_request={"type": "news", "params": ""})],
+        )
+        stimulus = queue.pop_many(limit=1)[0]
+        self.assertEqual(stimulus.type, "news")
+        self.assertIn("- ", stimulus.content)
+        self.assertIn("...", stimulus.content)
+        self.assertNotIn(long_title, stimulus.content)
+
+    def test_news_stimulus_remaining_count_uses_displayable_entries(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        items = []
+        for index in range(1, 7):
+            items.append({
+                "feed_url": "https://example.com/rss.xml",
+                "guid": f"item-{index}",
+                "link": f"https://example.com/{index}",
+                "title": "" if index <= 5 else "第六条",
+                "published_at": f"2026-03-27T1{index}:00:00+00:00",
+                "summary": f"摘要 {index}",
+            })
+        manager = _build_action_manager(
+            queue,
+            _Planner(ActionPlan("news", "native", "读取 RSS", 30, "测试", ["https://example.com/rss.xml"])),
+            redis_client=_RedisNewsSeenStub(),
+            news_reader=_constant_news_reader(_action_result(
+                summary="新闻已读取",
+                data={"items": items},
+                run_id="run_news_many",
+                session_key="seedwake:action:act_C1-1",
+            )),
+        )
+
+        _submit_and_shutdown(
+            manager,
+            [_make_thought(cycle_id=1, action_request={"type": "news", "params": ""})],
+        )
+        stimulus = queue.pop_many(limit=1)[0]
+        self.assertEqual(stimulus.type, "news")
+        self.assertIn("- 摘要 1", stimulus.content)
+        self.assertIn("- 摘要 5", stimulus.content)
+        self.assertNotIn("- 第六条", stimulus.content)
+        self.assertIn("（另有 1 条未展示）", stimulus.content)
 
     def test_news_seen_index_is_bounded(self) -> None:
         queue = StimulusQueue(redis_client=None)
@@ -1094,6 +1317,8 @@ class ActionManagerTests(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertEqual(plan.executor, "openclaw")
         self.assertIn("塔林", plan.task)
+        self.assertIn('"location"', plan.task)
+        self.assertIn('"condition"', plan.task)
 
     def test_send_message_fallback_uses_conversation_source(self) -> None:
         thought = _make_thought(
@@ -1431,6 +1656,8 @@ class ActionManagerTests(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertEqual(plan.executor, "openclaw")
         self.assertIn("用户反馈 近一周", plan.task)
+        self.assertIn('"results"', plan.task)
+        self.assertIn('"snippet"', plan.task)
 
     def test_web_fetch_fallback_preserves_url(self) -> None:
         thought = _make_thought(
@@ -1451,6 +1678,8 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(plan.executor, "openclaw")
         self.assertIn("https://example.com/a", plan.task)
         self.assertNotIn("{action:web_fetch", plan.task)
+        self.assertIn('"source"', plan.task)
+        self.assertIn('"excerpt_original"', plan.task)
 
     def test_unknown_action_fallback_is_rejected(self) -> None:
         thought = _make_thought(
@@ -1490,6 +1719,8 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(plan.executor, "openclaw")
         self.assertEqual(plan.worker_agent_id, "seedwake-ops")
         self.assertIn("config.yml", plan.task)
+        self.assertIn('"path"', plan.task)
+        self.assertIn('"change_summary"', plan.task)
 
     def test_reading_fallback_preserves_seedwake_query(self) -> None:
         thought = _make_thought(
@@ -1509,6 +1740,8 @@ class ActionManagerTests(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertEqual(plan.executor, "openclaw")
         self.assertIn("无我", plan.task)
+        self.assertIn('"source"', plan.task)
+        self.assertIn('"excerpt_original"', plan.task)
 
     def test_reading_fallback_uses_thought_content_when_no_query(self) -> None:
         thought = _make_thought(
@@ -1528,6 +1761,96 @@ class ActionManagerTests(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertEqual(plan.executor, "openclaw")
         self.assertIn("雨后泥土气味", plan.task)
+        self.assertIn('"brief_note"', plan.task)
+
+    def test_system_change_fallback_includes_structured_result_contract(self) -> None:
+        thought = _make_thought(
+            thought_type="意图",
+            content="我想调整系统服务配置",
+            action_request={"type": "system_change", "params": 'instruction:"重启并检查 nginx 服务"'},
+        )
+
+        plan = _fallback_plan(
+            raw_action_type="system_change",
+            thought=thought,
+            default_timeout_seconds=30,
+            default_weather_location="",
+            news_feed_urls=[],
+            worker_agent_id="seedwake-worker",
+            ops_worker_agent_id="seedwake-ops",
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.executor, "openclaw")
+        self.assertEqual(plan.worker_agent_id, "seedwake-ops")
+        self.assertIn('"status"', plan.task)
+        self.assertIn('"impact_scope"', plan.task)
+
+    def test_custom_delegate_plan_uses_generic_result_contract(self) -> None:
+        thought = _make_thought(
+            thought_type="意图",
+            content="我想让 OpenClaw 帮我整理这轮实验观察",
+            action_request={"type": "search", "params": 'query:"实验观察"'},
+        )
+
+        plan = _plan_delegate_tool_call(
+            arguments={
+                "action_type": "custom",
+                "task": "整理这轮实验观察，提炼结构化要点。",
+            },
+            thought=thought,
+            timeout_seconds=30,
+            reason="测试",
+            default_weather_location="",
+            news_feed_urls=[],
+            worker_agent_id="seedwake-worker",
+            ops_worker_agent_id="seedwake-ops",
+            conversation_source=None,
+        )
+
+        self.assertEqual(plan.action_type, "custom")
+        self.assertEqual(plan.executor, "openclaw")
+        self.assertEqual(plan.worker_agent_id, "seedwake-worker")
+        self.assertIn("整理这轮实验观察", plan.task)
+        self.assertIn('"details"', plan.task)
+        self.assertIn("不要在 data 下新增 details 之外的同级字段。", plan.task)
+
+    def test_delegate_plan_rejects_unknown_action_type(self) -> None:
+        thought = _make_thought(
+            thought_type="意图",
+            content="我想试试一个不支持的委托动作",
+            action_request={"type": "search", "params": 'query:"实验观察"'},
+        )
+
+        plan = _plan_delegate_tool_call(
+            arguments={
+                "action_type": "foo",
+                "task": "做点什么。",
+            },
+            thought=thought,
+            timeout_seconds=30,
+            reason="测试",
+            default_weather_location="",
+            news_feed_urls=[],
+            worker_agent_id="seedwake-worker",
+            ops_worker_agent_id="seedwake-ops",
+            conversation_source=None,
+        )
+
+        self.assertEqual(plan, (None, "不支持的 delegated action：foo"))
+
+    def test_delegate_openclaw_tool_restricts_action_type_enum(self) -> None:
+        delegate_tool = next(
+            tool for tool in _planner_tools()
+            if tool["function"]["name"] == "delegate_openclaw"
+        )
+        action_type_schema = delegate_tool["function"]["parameters"]["properties"]["action_type"]
+
+        self.assertIn("enum", action_type_schema)
+        self.assertEqual(
+            sorted(action_type_schema["enum"]),
+            ["custom", "file_modify", "reading", "search", "system_change", "weather", "web_fetch"],
+        )
 
     def test_confirmation_control_starts_pending_action(self) -> None:
         queue = StimulusQueue(redis_client=None)

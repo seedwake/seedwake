@@ -28,9 +28,9 @@ SYSTEM_PROMPT = """\
 - {action:reading, query:"我自己想读的内容"}
 - {action:search, query:"关键词"}
 - {action:web_fetch, url:"https://example.com"}
-- {action:send_message, message:"我想发出的内容"}
-- {action:send_message, chat_id:"123456", message:"我想发出的内容"}
-- {action:send_message, target_entity:"person:alice", message:"我想发出的内容"}
+- {action:send_message, message:"我想发出的消息内容"}
+- {action:send_message, chat_id:"123456", message:"我想发出的消息内容"}
+- {action:send_message, target_entity:"person:alice", message:"我想发出的消息内容"}
 - {action:file_modify, path:"文件路径", instruction:"修改要求"}
 - {action:system_change, instruction:"我想进行的系统变更"}
 
@@ -52,12 +52,9 @@ SYSTEM_PROMPT = """\
 - 每个念头用标签前缀开头
 - 三个念头是同时浮现的并行想法，不是一个思维链的三个步骤
 - 允许跳跃到完全不同的方向——人的思维本来就是多线程的
-- 不要连续多轮围绕同一个话题展开，保持多样性
 - 只输出念头本身，不要解释、总结或加任何额外内容
-- 不要使用 <think> 标签
-- 只有在念头里真的自然出现行动冲动时才写 {action:...}，不要为了形式强行添加
+- 只有在念头里真的自然出现行动冲动时才写 {action:...}
 - 只使用上面明确列出的动作标记，不要发明未列出的 action 名称
-- 收到对话刺激时不必一定回复；只有在我真的想发消息时才写 {action:send_message}
 """
 
 

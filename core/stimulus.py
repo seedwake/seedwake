@@ -100,6 +100,17 @@ class StimulusQueue:
                     self._redis = None
         return self._shadow_pop_many(limit)
 
+    def pop_all(self) -> list[Stimulus]:
+        with self._lock:
+            redis_client = self._redis
+        if redis_client:
+            try:
+                return self._redis_pop_all(redis_client)
+            except STIMULUS_REDIS_EXCEPTIONS:
+                with self._lock:
+                    self._redis = None
+        return self._shadow_pop_all()
+
     def requeue_front(self, stimuli: list[Stimulus]) -> None:
         if not stimuli:
             return
@@ -148,6 +159,26 @@ class StimulusQueue:
         with self._lock:
             items = list(self._deque)
         chosen_pairs = _select_ranked(items, limit)
+        chosen_items = [items[index] for index, _ in chosen_pairs]
+        self._drop_shadow_items([stimulus.stimulus_id for stimulus in chosen_items])
+        return chosen_items
+
+    def _redis_pop_all(self, redis_client) -> list[Stimulus]:
+        raw_items = redis_client.lrange(REDIS_KEY, 0, -1)
+        if not raw_items:
+            return []
+        parsed = [_stimulus_from_dict(json.loads(item)) for item in raw_items]
+        chosen_pairs = _select_ranked(parsed, len(parsed))
+        chosen_items = [parsed[index] for index, _ in chosen_pairs]
+        for raw_item in raw_items:
+            redis_client.lrem(REDIS_KEY, 1, raw_item)
+        self._drop_shadow_items([stimulus.stimulus_id for stimulus in chosen_items])
+        return chosen_items
+
+    def _shadow_pop_all(self) -> list[Stimulus]:
+        with self._lock:
+            items = list(self._deque)
+        chosen_pairs = _select_ranked(items, len(items))
         chosen_items = [items[index] for index, _ in chosen_pairs]
         self._drop_shadow_items([stimulus.stimulus_id for stimulus in chosen_items])
         return chosen_items

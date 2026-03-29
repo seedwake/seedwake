@@ -34,6 +34,7 @@ ACTION_CONTROL_KEY = "seedwake:action_control"
 NEWS_SEEN_REDIS_KEY = "seedwake:news_seen"
 TELEGRAM_SOURCE_PREFIX = "telegram:"
 OPENCLAW_ACTION_TYPES = {"search", "web_fetch", "system_change", "custom", "weather", "reading", "file_modify"}
+DELEGATED_TOOL_COMPAT_ACTION_TYPES = {"news", "send_message"}
 PERCEPTION_AUTO_EXECUTE_TYPES = {"news", "weather", "reading"}
 OPS_ACTION_TYPES = {"system_change", "file_modify"}
 THOUGHT_ACTION_TYPES = {
@@ -1011,7 +1012,7 @@ def _planner_tools() -> list[dict]:
                     "type": "object",
                     "required": ["action_type", "task"],
                     "properties": {
-                        "action_type": {"type": "string"},
+                        "action_type": {"type": "string", "enum": sorted(OPENCLAW_ACTION_TYPES)},
                         "task": {"type": "string"},
                         "timeout_seconds": {"type": "integer"},
                         "reason": {"type": "string"},
@@ -1294,6 +1295,8 @@ def _build_openclaw_task(
         return _build_file_modify_task(raw_params, explicit_task, thought)
     if action_type == "system_change":
         return _build_system_change_task(raw_params, explicit_task, thought)
+    if action_type == "custom":
+        return _build_custom_task(explicit_task, thought)
     if explicit_task:
         return explicit_task
     return thought.content
@@ -1302,56 +1305,209 @@ def _build_openclaw_task(
 def _build_search_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
     search_query = _extract_action_first_param(raw_params, "query", "keywords", "topic")
     if search_query:
-        return f"围绕“{search_query}”进行搜索，返回按相关性整理的简洁结果。"
+        return _with_openclaw_result_contract(
+            f"围绕“{search_query}”进行搜索，返回按相关性整理的简洁结果。",
+            data_shape='{"results":[{"title":"","url":"","snippet":""}]}',
+            requirements=[
+                "results 最多返回 5 条最相关结果。",
+                "title、url、snippet 使用这些精确字段名。",
+            ],
+        )
     if explicit_task:
-        return explicit_task
-    return thought.content
+        return _with_openclaw_result_contract(
+            explicit_task,
+            data_shape='{"results":[{"title":"","url":"","snippet":""}]}',
+            requirements=[
+                "results 最多返回 5 条最相关结果。",
+                "title、url、snippet 使用这些精确字段名。",
+            ],
+        )
+    return _with_openclaw_result_contract(
+        thought.content,
+        data_shape='{"results":[{"title":"","url":"","snippet":""}]}',
+        requirements=[
+            "results 最多返回 5 条最相关结果。",
+            "title、url、snippet 使用这些精确字段名。",
+        ],
+    )
 
 
 def _build_web_fetch_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
     url = _extract_action_first_param(raw_params, "url", "link")
     if url:
-        return f"抓取并提取这个网页的主要内容：{url}。返回简洁摘要和关键信息。"
+        return _with_openclaw_result_contract(
+            f"抓取并提取这个网页的主要内容：{url}。返回简洁摘要和关键信息。",
+            data_shape='{"source":{"title":"","url":""},"excerpt_original":"","brief_note":""}',
+            requirements=[
+                "source.title 和 source.url 使用这些精确字段名。",
+                "excerpt_original 必须是网页原文片段，不要改写成综述。",
+                "brief_note 用 1-2 句说明这段内容的重点。",
+            ],
+        )
     if explicit_task:
-        return explicit_task
-    return thought.content
+        return _with_openclaw_result_contract(
+            explicit_task,
+            data_shape='{"source":{"title":"","url":""},"excerpt_original":"","brief_note":""}',
+            requirements=[
+                "source.title 和 source.url 使用这些精确字段名。",
+                "excerpt_original 必须是网页原文片段，不要改写成综述。",
+                "brief_note 用 1-2 句说明这段内容的重点。",
+            ],
+        )
+    return _with_openclaw_result_contract(
+        thought.content,
+        data_shape='{"source":{"title":"","url":""},"excerpt_original":"","brief_note":""}',
+        requirements=[
+            "source.title 和 source.url 使用这些精确字段名。",
+            "excerpt_original 必须是网页原文片段，不要改写成综述。",
+            "brief_note 用 1-2 句说明这段内容的重点。",
+        ],
+    )
 
 
 def _build_reading_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
     reading_query = _extract_action_first_param(raw_params, "query", "topic", "keywords")
     if reading_query:
-        return f"围绕“{reading_query}”寻找一小段值得阅读的外部材料，返回原文片段和简短说明。"
+        return _with_openclaw_result_contract(
+            f"围绕“{reading_query}”寻找一小段值得阅读的外部材料，返回原文片段和简短说明。",
+            data_shape='{"source":{"title":"","url":""},"excerpt_original":"","brief_note":""}',
+            requirements=[
+                "source.title 和 source.url 使用这些精确字段名。",
+                "excerpt_original 必须是原文片段，不要改写成综述。",
+                "brief_note 用 1-2 句说明为什么这段材料值得我读。",
+            ],
+        )
     if explicit_task:
-        return explicit_task
-    return f"围绕这条念头当前真正想读的方向寻找一小段外部材料：{thought.content}"
+        return _with_openclaw_result_contract(
+            explicit_task,
+            data_shape='{"source":{"title":"","url":""},"excerpt_original":"","brief_note":""}',
+            requirements=[
+                "source.title 和 source.url 使用这些精确字段名。",
+                "excerpt_original 必须是原文片段，不要改写成综述。",
+                "brief_note 用 1-2 句说明为什么这段材料值得我读。",
+            ],
+        )
+    return _with_openclaw_result_contract(
+        f"围绕这条念头当前真正想读的方向寻找一小段外部材料：{thought.content}",
+        data_shape='{"source":{"title":"","url":""},"excerpt_original":"","brief_note":""}',
+        requirements=[
+            "source.title 和 source.url 使用这些精确字段名。",
+            "excerpt_original 必须是原文片段，不要改写成综述。",
+            "brief_note 用 1-2 句说明为什么这段材料值得我读。",
+        ],
+    )
 
 
 def _build_weather_task(raw_params: str, default_weather_location: str) -> str:
     location = _extract_action_param(raw_params, "location") or default_weather_location
     if location:
-        return f"查询 {location} 的当前天气，返回简洁概况。"
-    return "查询默认位置的当前天气；如果缺少默认位置，请明确说明无法确定位置。"
+        return _with_openclaw_result_contract(
+            f"查询 {location} 的当前天气，返回简洁概况。",
+            data_shape='{"location":"","condition":"","temperature_c":"","feels_like_c":"","humidity_pct":"","wind_kph":""}',
+            requirements=[
+                "location、condition、temperature_c、feels_like_c、humidity_pct、wind_kph 使用这些精确字段名。",
+            ],
+        )
+    return _with_openclaw_result_contract(
+        "查询默认位置的当前天气；如果缺少默认位置，请明确说明无法确定位置。",
+        data_shape='{"location":"","condition":"","temperature_c":"","feels_like_c":"","humidity_pct":"","wind_kph":""}',
+        requirements=[
+            "location、condition、temperature_c、feels_like_c、humidity_pct、wind_kph 使用这些精确字段名。",
+        ],
+    )
 
 
 def _build_file_modify_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
     path = _extract_action_first_param(raw_params, "path", "file")
     instruction = _extract_action_first_param(raw_params, "instruction", "edit", "change")
     if path and instruction:
-        return f"修改文件 {path}。修改要求：{instruction}。只做必要改动，并返回修改摘要。"
+        return _with_openclaw_result_contract(
+            f"修改文件 {path}。修改要求：{instruction}。只做必要改动，并返回修改摘要。",
+            data_shape='{"path":"","applied":false,"changed":false,"change_summary":""}',
+            requirements=[
+                "path、applied、changed、change_summary 使用这些精确字段名。",
+            ],
+        )
     if path:
-        return f"修改文件 {path}。修改要求围绕这条念头展开：{thought.content}"
+        return _with_openclaw_result_contract(
+            f"修改文件 {path}。修改要求围绕这条念头展开：{thought.content}",
+            data_shape='{"path":"","applied":false,"changed":false,"change_summary":""}',
+            requirements=[
+                "path、applied、changed、change_summary 使用这些精确字段名。",
+            ],
+        )
     if explicit_task:
-        return explicit_task
-    return thought.content
+        return _with_openclaw_result_contract(
+            explicit_task,
+            data_shape='{"path":"","applied":false,"changed":false,"change_summary":""}',
+            requirements=[
+                "path、applied、changed、change_summary 使用这些精确字段名。",
+            ],
+        )
+    return _with_openclaw_result_contract(
+        thought.content,
+        data_shape='{"path":"","applied":false,"changed":false,"change_summary":""}',
+        requirements=[
+            "path、applied、changed、change_summary 使用这些精确字段名。",
+        ],
+    )
 
 
 def _build_system_change_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
     instruction = _extract_action_first_param(raw_params, "instruction", "task", "change")
     if instruction:
-        return f"执行系统变更：{instruction}。返回变更摘要、影响范围和结果。"
+        return _with_openclaw_result_contract(
+            f"执行系统变更：{instruction}。返回变更摘要、影响范围和结果。",
+            data_shape='{"applied":false,"status":"","change_summary":"","impact_scope":""}',
+            requirements=[
+                "applied、status、change_summary、impact_scope 使用这些精确字段名。",
+                'status 只使用 "applied"、"partial"、"blocked" 之一。',
+            ],
+        )
     if explicit_task:
-        return explicit_task
-    return thought.content
+        return _with_openclaw_result_contract(
+            explicit_task,
+            data_shape='{"applied":false,"status":"","change_summary":"","impact_scope":""}',
+            requirements=[
+                "applied、status、change_summary、impact_scope 使用这些精确字段名。",
+                'status 只使用 "applied"、"partial"、"blocked" 之一。',
+            ],
+        )
+    return _with_openclaw_result_contract(
+        thought.content,
+        data_shape='{"applied":false,"status":"","change_summary":"","impact_scope":""}',
+        requirements=[
+            "applied、status、change_summary、impact_scope 使用这些精确字段名。",
+            'status 只使用 "applied"、"partial"、"blocked" 之一。',
+        ],
+    )
+
+
+def _build_custom_task(explicit_task: str, thought: Thought) -> str:
+    task = explicit_task or thought.content
+    return _with_openclaw_result_contract(
+        task,
+        data_shape='{"details":{}}',
+        requirements=[
+            "把任务相关的结构化结果统一放进 details 对象。",
+            "不要在 data 下新增 details 之外的同级字段。",
+            "details 里的 key 保持简洁稳定，并只放和当前任务直接相关的信息。",
+        ],
+    )
+
+
+def _with_openclaw_result_contract(task: str, *, data_shape: str, requirements: list[str]) -> str:
+    lines = [
+        task,
+        "",
+        "严格按以下 JSON 返回，不要输出 JSON 之外的任何文本：",
+        f'{{"ok": true, "summary": "...", "data": {data_shape}, "error": null}}',
+        "data 对象必须使用上面列出的精确字段名；不要改名，不要新增同级字段。",
+        '如果某字段暂时拿不到：字符串用 ""，列表用 []，对象用 {}，布尔值用 false。',
+    ]
+    for requirement in requirements:
+        lines.append(f"- {requirement}")
+    return "\n".join(lines)
 
 
 def _extract_action_first_param(raw_params: str, *keys: str) -> str | None:
@@ -1660,9 +1816,11 @@ def _plan_delegate_tool_call(
     worker_agent_id: str,
     ops_worker_agent_id: str,
     conversation_source: str | None,
-) -> ActionPlan:
+) -> ActionPlan | tuple[None, str | None]:
     explicit_task = str(arguments.get("task") or "").strip()
     action_type = _delegated_action_type(arguments, thought)
+    if action_type not in OPENCLAW_ACTION_TYPES and action_type not in DELEGATED_TOOL_COMPAT_ACTION_TYPES:
+        return None, f"不支持的 delegated action：{action_type or '空'}"
     if action_type == "news":
         return _native_news_plan(
             timeout_seconds=timeout_seconds,
@@ -1915,18 +2073,20 @@ def _stimulus_content(
         return f"{action.type} {status}: {summary}"
     if stimulus_type == "reading":
         return _reading_stimulus_content(summary, result.get("data"))
+    if stimulus_type == "news":
+        return _news_stimulus_content(summary, result.get("data"))
     return summary
 
 
 def _reading_stimulus_content(summary: str, data) -> str:
     if not isinstance(data, dict):
         return summary
-    excerpt, excerpt_truncated = _clip_reading_prompt_text(
-        str(data.get("excerpt_original") or "").strip(),
+    excerpt, excerpt_truncated = _clip_prompt_text(
+        str(data.get("excerpt_original") or data.get("excerpt") or "").strip(),
         READING_STIMULUS_EXCERPT_MAX_CHARS,
     )
-    note, note_truncated = _clip_reading_prompt_text(
-        str(data.get("brief_note") or "").strip(),
+    note, note_truncated = _clip_prompt_text(
+        str(data.get("brief_note") or data.get("note") or "").strip(),
         READING_STIMULUS_NOTE_MAX_CHARS,
     )
     source_info = data.get("source")
@@ -1934,8 +2094,11 @@ def _reading_stimulus_content(summary: str, data) -> str:
     if isinstance(source_info, dict):
         title = str(source_info.get("title") or "").strip()
         url = str(source_info.get("url") or "").strip()
-        if title:
-            parts.append(f"来源：{title}" + (f" ({url})" if url else ""))
+    else:
+        title = str(data.get("title") or "").strip()
+        url = str(data.get("url") or "").strip()
+    if title:
+        parts.append(f"来源：{title}" + (f" ({url})" if url else ""))
     if excerpt:
         excerpt_label = "原文片段（节选）" if excerpt_truncated else "原文片段"
         parts.append(f"{excerpt_label}：{excerpt}")
@@ -1949,7 +2112,52 @@ def _reading_stimulus_content(summary: str, data) -> str:
     return "\n".join(parts)
 
 
-def _clip_reading_prompt_text(text: str, limit: int) -> tuple[str, bool]:
+NEWS_STIMULUS_MAX_ITEMS = 5
+NEWS_STIMULUS_SUMMARY_MAX_CHARS = 200
+
+
+def _news_stimulus_content(summary: str, data) -> str:
+    if not isinstance(data, dict):
+        return summary
+    items = data.get("items")
+    if not isinstance(items, list) or not items:
+        return summary
+    parts = [summary]
+    shown_count = 0
+    displayable_count = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title, _ = _clip_prompt_text(
+            str(item.get("title") or "").strip(),
+            NEWS_STIMULUS_SUMMARY_MAX_CHARS,
+        )
+        item_summary, _ = _clip_prompt_text(
+            str(item.get("summary") or "").strip(),
+            NEWS_STIMULUS_SUMMARY_MAX_CHARS,
+        )
+        link, _ = _clip_prompt_text(
+            str(item.get("link") or "").strip(),
+            NEWS_STIMULUS_SUMMARY_MAX_CHARS,
+        )
+        headline = title or item_summary or link
+        if not headline:
+            continue
+        displayable_count += 1
+        if shown_count >= NEWS_STIMULUS_MAX_ITEMS:
+            continue
+        entry = f"- {headline}"
+        if title and item_summary:
+            entry += f"\n  {item_summary}"
+        parts.append(entry)
+        shown_count += 1
+    remaining = displayable_count - shown_count
+    if remaining > 0:
+        parts.append(f"（另有 {remaining} 条未展示）")
+    return "\n".join(parts)
+
+
+def _clip_prompt_text(text: str, limit: int) -> tuple[str, bool]:
     if not text or limit <= 0:
         return "", False
     if len(text) <= limit:

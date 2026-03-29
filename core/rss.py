@@ -258,6 +258,9 @@ def _order_items(items: list[tuple[NewsItem, float | None, int]]) -> list[NewsIt
     return [item for item, _, _ in ranked[:MAX_TOTAL_ITEMS]]
 
 
+NEWS_SUMMARY_LABEL_MAX_CHARS = 200
+
+
 def summarize_news_items(items: list[NewsItem]) -> str:
     if not items:
         return "RSS 没有新的条目"
@@ -266,14 +269,20 @@ def summarize_news_items(items: list[NewsItem]) -> str:
         title = str(item.get("title") or "").strip()
         feed_url = str(item.get("feed_url") or "").strip()
         if title and feed_url:
-            labels.append(f"{title} ({feed_url})")
+            labels.append(_clip_news_label(f"{title} ({feed_url})"))
             continue
         if title:
-            labels.append(title)
+            labels.append(_clip_news_label(title))
             continue
         summary = str(item.get("summary") or "").strip()
         if summary:
-            labels.append(summary)
+            labels.append(_clip_news_label(summary))
     if not labels:
         return f"RSS 新条目 {len(items)} 条"
     return f"RSS 新条目 {len(items)} 条：{'；'.join(labels)}"
+
+
+def _clip_news_label(text: str) -> str:
+    if len(text) <= NEWS_SUMMARY_LABEL_MAX_CHARS:
+        return text
+    return text[:NEWS_SUMMARY_LABEL_MAX_CHARS].rstrip() + "..."
