@@ -8,12 +8,12 @@ from core.stimulus import Stimulus
 from core.thought_parser import Thought, fallback_thought, parse_thoughts
 
 
-def create_client(base_url: str, auth_header: str = "", auth_value: str = "") -> Client:
+def create_client(base_url: str, auth_header: str = "", auth_value: str = "", timeout: float = 300.0) -> Client:
     """Create an Ollama client with optional auth header."""
     headers = {}
     if auth_header and auth_value:
         headers[auth_header] = auth_value
-    return Client(host=base_url, headers=headers, timeout=120.0)
+    return Client(host=base_url, headers=headers, timeout=timeout)
 
 
 def run_cycle(

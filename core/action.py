@@ -173,6 +173,7 @@ class ActionManager:
         self._news_seen_shadow: dict[str, float] = {}
         self._perception_observations: list[str] = []
         self._futures: set[Future] = set()
+        self._recent_sent_messages: list[tuple[str, str, str]] = []  # (target, message, reply_to) dedup window
         if self._redis is not None:
             try:
                 self._restore_from_redis()
@@ -187,10 +188,12 @@ class ActionManager:
     ) -> list[ActionRecord]:
         created: list[ActionRecord] = []
         conversation_source = _latest_conversation_source(stimuli or [])
+        conversation_reply_to_message_id = _latest_conversation_message_id(stimuli or [])
         for thought in thoughts:
             action = self._plan_submitted_action(
                 thought,
                 conversation_source=conversation_source,
+                conversation_reply_to_message_id=conversation_reply_to_message_id,
             )
             if action is None:
                 continue
@@ -205,6 +208,7 @@ class ActionManager:
         thought: Thought,
         *,
         conversation_source: str | None,
+        conversation_reply_to_message_id: str | None,
     ) -> ActionRecord | None:
         if not thought.action_request:
             return None
@@ -224,6 +228,7 @@ class ActionManager:
             thought=thought,
             plan=plan,
             conversation_source=conversation_source,
+            conversation_reply_to_message_id=conversation_reply_to_message_id,
         )
 
     def apply_controls(self, controls: list[ActionControl]) -> None:
@@ -379,13 +384,19 @@ class ActionManager:
         )
         if failure is not None:
             return failure
+        reply_to = str(action.request.get("reply_to_message_id") or "").strip()
+        if self._is_duplicate_message(target_source, message_text, reply_to):
+            return _failure_result(
+                "和刚才发的一样，跳过重复发送",
+                "duplicate_message",
+                transport="native",
+            )
         if not self._mark_dispatch_started(action_id):
             return _failure_result(
                 "消息发送前无法持久化状态",
                 "delivery_state_unavailable",
                 transport="native",
             )
-        reply_to = str(action.request.get("reply_to_message_id") or "").strip()
         send_error = _send_telegram_message(
             target_source,
             message_text,
@@ -395,6 +406,7 @@ class ActionManager:
         if send_error:
             self._update_action(action_id, dispatch_started_at=None)
             return _failure_result(f"Telegram 发送失败：{send_error}", send_error, transport="native")
+        self._record_sent_message(target_source, message_text, reply_to)
         return _build_action_result(
             ok=True,
             summary=f"已发送消息到 {target_source}",
@@ -616,6 +628,21 @@ class ActionManager:
     def _discard_future(self, future: Future) -> None:
         with self._lock:
             self._futures.discard(future)
+
+    _SENT_MESSAGE_DEDUP_WINDOW = 5
+
+    def _is_duplicate_message(self, target: str, message: str, reply_to_message_id: str) -> bool:
+        key = (target.strip(), message.strip(), reply_to_message_id.strip())
+        with self._lock:
+            return key in self._recent_sent_messages
+
+    def _record_sent_message(self, target: str, message: str, reply_to_message_id: str) -> None:
+        key = (target.strip(), message.strip(), reply_to_message_id.strip())
+        with self._lock:
+            if key not in self._recent_sent_messages:
+                self._recent_sent_messages.append(key)
+            if len(self._recent_sent_messages) > self._SENT_MESSAGE_DEDUP_WINDOW:
+                self._recent_sent_messages = self._recent_sent_messages[-self._SENT_MESSAGE_DEDUP_WINDOW:]
 
     def _record_perception_observation(
         self,
@@ -1706,7 +1733,16 @@ def _action_from_plan(
     thought: Thought,
     plan: ActionPlan,
     conversation_source: str | None,
+    conversation_reply_to_message_id: str | None,
 ) -> ActionRecord:
+    reply_to_message_id = plan.reply_to_message_id
+    if (
+        not reply_to_message_id
+        and plan.action_type == "send_message"
+        and not plan.target_source
+        and not plan.target_entity
+    ):
+        reply_to_message_id = str(conversation_reply_to_message_id or "").strip()
     request_payload = _build_action_request_payload(
         task=plan.task,
         reason=plan.reason,
@@ -1716,7 +1752,7 @@ def _action_from_plan(
         target_source=plan.target_source or str(conversation_source or "").strip(),
         target_entity=plan.target_entity,
         message_text=plan.message_text,
-        reply_to_message_id=plan.reply_to_message_id,
+        reply_to_message_id=reply_to_message_id,
     )
     return ActionRecord(
         action_id=f"act_{thought.thought_id}",
@@ -1750,6 +1786,17 @@ def _latest_conversation_source(stimuli: list[Stimulus]) -> str | None:
     for stimulus in reversed(stimuli):
         if stimulus.type == "conversation":
             return stimulus.source
+    return None
+
+
+def _latest_conversation_message_id(stimuli: list[Stimulus]) -> str | None:
+    for stimulus in reversed(stimuli):
+        if stimulus.type != "conversation":
+            continue
+        message_id = stimulus.metadata.get("telegram_message_id")
+        if message_id is None:
+            return None
+        return str(message_id).strip() or None
     return None
 
 

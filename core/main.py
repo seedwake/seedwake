@@ -111,7 +111,7 @@ def main() -> None:
     setup_logging(config, component="core")
     log_file = _open_log(args.log, config)
 
-    ollama_client, redis_client, pg_conn = _create_connections()
+    ollama_client, redis_client, pg_conn = _create_connections(config)
     runtime, identity = _build_runtime_components(config, log_file, ollama_client, redis_client, pg_conn)
 
     _install_signal_handler(log_file, runtime.action_manager)
@@ -120,11 +120,15 @@ def main() -> None:
     _run_engine_loop(log_file, runtime, identity)
 
 
-def _create_connections():
+def _create_connections(config: dict):
+    ollama_timeout = float(
+        config.get("models", {}).get("primary", {}).get("timeout", 300)
+    )
     ollama_client = create_client(
         os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
         os.environ.get("OLLAMA_AUTH_HEADER", ""),
         os.environ.get("OLLAMA_AUTH_VALUE", ""),
+        timeout=ollama_timeout,
     )
     return ollama_client, _connect_redis(), _connect_pg()
 
@@ -320,6 +324,7 @@ def _select_cycle_stimuli(stimulus_queue: StimulusQueue) -> list[Stimulus]:
     if deferred:
         stimulus_queue.requeue_front(deferred)
     return selected
+
 
 def _first_conversation_source(stimuli: list[Stimulus]) -> str | None:
     for stimulus in stimuli:

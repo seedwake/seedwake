@@ -48,13 +48,20 @@ def _make_thought(
     )
 
 
-def _conversation_stimulus(source: str = "telegram:1", content: str = "你好") -> Stimulus:
+def _conversation_stimulus(
+    source: str = "telegram:1",
+    content: str = "你好",
+    *,
+    message_id: int | None = None,
+) -> Stimulus:
+    metadata = {"telegram_message_id": message_id} if message_id is not None else {}
     return Stimulus(
         stimulus_id="stim_conv_1",
         type="conversation",
         priority=1,
         source=source,
         content=content,
+        metadata=metadata,
     )
 
 
@@ -1357,6 +1364,35 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(plan.target_source, "telegram:42")
         self.assertEqual(plan.message_text, "我已经收到")
 
+    def test_native_send_message_uses_current_conversation_reply_to_by_default(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        manager = _build_action_manager(
+            queue,
+            _Planner(ActionPlan("send_message", "native", "发送消息", 30, "测试", message_text="我在。")),
+            redis_client=ListRedisStub(),
+            auto_execute=["send_message"],
+        )
+
+        try:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
+                with patch("core.action.request.urlopen") as mock_urlopen:
+                    response = MagicMock()
+                    response.read.return_value = b'{"ok": true}'
+                    mock_urlopen.return_value.__enter__.return_value = response
+                    created = manager.submit_from_thoughts(
+                        [_make_thought(action_request={"type": "send_message", "params": 'message:"我在。"'})],
+                        stimuli=[_conversation_stimulus(message_id=103)],
+                    )
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(created[0].status, "succeeded")
+        self.assertEqual(created[0].request["reply_to_message_id"], "103")
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["reply_parameters"]["message_id"], 103)
+
     def test_send_message_fallback_preserves_target_entity(self) -> None:
         thought = _make_thought(
             thought_type="意图",
@@ -1535,6 +1571,62 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(created[0].status, "succeeded")
         self.assertEqual(events[-1][0], "reply")
         self.assertNotIn(CONVERSATION_HISTORY_KEY, redis_stub.lists)
+
+    def test_native_send_message_dedup_allows_same_text_with_different_reply_to(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        manager = _build_action_manager(
+            queue,
+            _Planner(ActionPlan(
+                "send_message",
+                "native",
+                "发送消息",
+                30,
+                "测试",
+                target_source="telegram:42",
+                message_text="收到",
+                reply_to_message_id="101",
+            )),
+            redis_client=ListRedisStub(),
+            auto_execute=["send_message"],
+        )
+
+        try:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
+                with patch("core.action.request.urlopen") as mock_urlopen:
+                    response = MagicMock()
+                    response.read.return_value = b'{"ok": true}'
+                    mock_urlopen.return_value.__enter__.return_value = response
+                    first = manager.submit_from_thoughts([
+                        _make_thought(
+                            cycle_id=1,
+                            index=1,
+                            action_request={"type": "send_message", "params": 'chat_id:"42", reply_to:"101", message:"收到"'},
+                        )
+                    ])
+                    manager._planner = _Planner(ActionPlan(
+                        "send_message",
+                        "native",
+                        "发送消息",
+                        30,
+                        "测试",
+                        target_source="telegram:42",
+                        message_text="收到",
+                        reply_to_message_id="102",
+                    ))
+                    second = manager.submit_from_thoughts([
+                        _make_thought(
+                            cycle_id=1,
+                            index=2,
+                            action_request={"type": "send_message", "params": 'chat_id:"42", reply_to:"102", message:"收到"'},
+                        )
+                    ])
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(first[0].status, "succeeded")
+        self.assertEqual(second[0].status, "succeeded")
+        self.assertEqual(mock_urlopen.call_count, 2)
 
     def test_native_send_message_does_not_send_when_dispatch_marker_cannot_persist(self) -> None:
         class DispatchStateFailingRedis(ListRedisStub):
