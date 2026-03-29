@@ -96,12 +96,13 @@ def _make_update(
     chat_type: str = "private",
     text: str = "你好",
     username: str = "alice",
- ) -> Update:
+    reply_to_message=None,
+) -> Update:
     message = FakeTelegramMessage(
         text=text,
         reply_text=AsyncMock(),
         message_id=1001,
-        reply_to_message=None,
+        reply_to_message=reply_to_message,
     )
     return _as_update(SimpleNamespace(
         effective_user=SimpleNamespace(
@@ -224,6 +225,27 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"role": "user"', history)
         self.assertIn('"content": "你好"', history)
         _reply_text_mock(update).assert_not_awaited()
+
+    async def test_handle_text_message_stores_reply_context_metadata(self) -> None:
+        redis_client = FakeRedis()
+        reply_to = SimpleNamespace(
+            message_id=998,
+            text="好，我自己找一篇关于有氧锻炼的文章",
+            caption="",
+            from_user=SimpleNamespace(id=12345, username="seedwake_bot", full_name="Seedwake"),
+        )
+        update = _make_update(reply_to_message=reply_to, text="谢谢你")
+        context = _make_context(redis_client, allowed_user_ids={1})
+
+        with patch("bot.main._read_env", return_value="12345:secret"):
+            await _handle_text_message(update, context)
+
+        stored = redis_client.lists[STIMULUS_REDIS_KEY][0]
+        self.assertIn('"telegram_message_id": 1001', stored)
+        self.assertIn('"reply_to_message_id": 998', stored)
+        self.assertIn('"reply_to_preview": "好，我自己找一篇关于有氧锻炼的文章"', stored)
+        self.assertIn('"reply_to_from_self": true', stored)
+        self.assertIn('"telegram_full_name": "alice"', stored)
 
     async def test_handle_text_message_rejects_unauthorized_user(self) -> None:
         redis_client = FakeRedis()

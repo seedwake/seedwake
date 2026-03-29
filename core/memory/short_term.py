@@ -67,10 +67,16 @@ class ShortTermMemory:
         limit = self._context_window * 3
         if self._redis:
             try:
-                return self._redis_recent(limit)
+                thoughts = self._redis_recent(limit)
+                if _sanitize_trigger_refs(thoughts):
+                    self._sync_shadow_trigger_refs(thoughts)
+                    self._rewrite_recent_redis_thoughts(thoughts)
+                return thoughts
             except SHORT_TERM_REDIS_EXCEPTIONS:
                 self._redis = None
-        return list(self._deque)[-limit:]
+        thoughts = list(self._deque)[-limit:]
+        _sanitize_trigger_refs(thoughts)
+        return thoughts
 
     def latest_cycle_id(self) -> int:
         latest_from_deque = self._deque[-1].cycle_id if self._deque else 0
@@ -127,6 +133,19 @@ class ShortTermMemory:
             ensure_ascii=False,
         )
         self._redis.publish(REDIS_CHANNEL, payload)
+
+    def _rewrite_recent_redis_thoughts(self, thoughts: list[Thought]) -> None:
+        raw_items = self._redis.zrange(REDIS_KEY, -len(thoughts), -1)
+        if raw_items:
+            self._redis.zrem(REDIS_KEY, *raw_items)
+        for thought in thoughts:
+            self._redis_append(thought)
+
+    def _sync_shadow_trigger_refs(self, thoughts: list[Thought]) -> None:
+        trigger_refs = {thought.thought_id: thought.trigger_ref for thought in thoughts}
+        for thought in self._deque:
+            if thought.thought_id in trigger_refs:
+                thought.trigger_ref = trigger_refs[thought.thought_id]
 
     def _sync_to_redis(self) -> None:
         """Merge the in-memory shadow copy back into Redis after recovery."""
@@ -189,3 +208,18 @@ def _coerce_cycle_id(value) -> int:
     if isinstance(value, int):
         return value
     return 0
+
+
+def _sanitize_trigger_refs(thoughts: list[Thought]) -> bool:
+    changed = False
+    valid_ids: set[str] = set()
+    for thought in thoughts:
+        trigger_ref = str(thought.trigger_ref or "").strip()
+        if trigger_ref and trigger_ref not in valid_ids:
+            thought.trigger_ref = None
+            changed = True
+        elif not trigger_ref and thought.trigger_ref is not None:
+            thought.trigger_ref = None
+            changed = True
+        valid_ids.add(thought.thought_id)
+    return changed

@@ -198,20 +198,14 @@ async def _handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
     text = str(message.text or "").strip()
     if not text:
         return
-    content = _build_conversation_content(message, text)
+    content = _build_conversation_content(text)
     queue = StimulusQueue(redis_client)
     queue.push(
         "conversation",
         1,
         f"telegram:{user['chat_id']}",
         content,
-        metadata={
-            "telegram_user_id": user["user_id"],
-            "telegram_chat_id": user["chat_id"],
-            "telegram_username": user["username"],
-            "telegram_full_name": user["full_name"],
-            "telegram_message_id": message.message_id,
-        },
+        metadata=_build_conversation_metadata(message, user),
     )
     if not queue.redis_available:
         _mark_redis_unavailable(context.application)
@@ -450,15 +444,59 @@ def _mark_redis_unavailable(application: Application) -> None:
     application.bot_data["redis"] = None
 
 
-def _build_conversation_content(message, text: str) -> str:
+def _build_conversation_content(text: str) -> str:
+    return text.strip()
+
+
+def _build_conversation_metadata(message, user: AuthorizedTelegramUser) -> JsonObject:
+    metadata: JsonObject = {
+        "telegram_user_id": user["user_id"],
+        "telegram_chat_id": user["chat_id"],
+        "telegram_username": user["username"],
+        "telegram_full_name": user["full_name"],
+        "telegram_message_id": message.message_id,
+    }
     reply = getattr(message, "reply_to_message", None)
     if reply is None:
+        return metadata
+    reply_message_id = getattr(reply, "message_id", None)
+    if isinstance(reply_message_id, int):
+        metadata["reply_to_message_id"] = reply_message_id
+    reply_preview = _telegram_message_preview(reply)
+    if reply_preview:
+        metadata["reply_to_preview"] = reply_preview
+    reply_user = getattr(reply, "from_user", None)
+    if reply_user is None:
+        return metadata
+    bot_user_id = _telegram_bot_user_id_from_token(_read_env("TELEGRAM_BOT_TOKEN"))
+    reply_user_id = getattr(reply_user, "id", None)
+    if isinstance(reply_user_id, int):
+        metadata["reply_to_user_id"] = reply_user_id
+        metadata["reply_to_from_self"] = bool(bot_user_id and reply_user_id == bot_user_id)
+    reply_username = str(getattr(reply_user, "username", "") or "").strip()
+    if reply_username:
+        metadata["reply_to_username"] = reply_username
+    reply_full_name = str(getattr(reply_user, "full_name", "") or "").strip()
+    if reply_full_name:
+        metadata["reply_to_full_name"] = reply_full_name
+    return metadata
+
+
+def _telegram_message_preview(message, limit: int = 200) -> str:
+    text = str(getattr(message, "text", "") or getattr(message, "caption", "") or "").strip()
+    if not text:
+        return ""
+    if len(text) <= limit:
         return text
-    quoted_text = str(getattr(reply, "text", "") or "").strip()
-    if not quoted_text:
-        return text
-    quoted_preview = quoted_text[:200] + "..." if len(quoted_text) > 200 else quoted_text
-    return f"（引用：{quoted_preview}）\n{text}"
+    return text[:limit].rstrip() + "..."
+
+
+def _telegram_bot_user_id_from_token(token: str) -> int | None:
+    raw = str(token or "").strip()
+    prefix, _, _ = raw.partition(":")
+    if prefix.isdigit():
+        return int(prefix)
+    return None
 
 
 def _read_env(name: str) -> str:

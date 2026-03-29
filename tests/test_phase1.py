@@ -126,7 +126,8 @@ class CycleTests(unittest.TestCase):
 
         logged_prompt = prompt_log.getvalue()
         self.assertIn("PROMPT C4", logged_prompt)
-        self.assertIn("🔥" * 8, logged_prompt)
+        self.assertIn("🟢" * 8, logged_prompt)
+        self.assertIn("🔴" * 8, logged_prompt)
         self.assertIn("我是 Seedwake", logged_prompt)
         self.assertIn("--- 第 4 轮 ---", logged_prompt)
 

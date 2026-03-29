@@ -7,6 +7,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import time
@@ -83,6 +84,21 @@ CYCLE_COUNTER_EXCEPTIONS = (
 )
 CYCLE_COUNTER_KEY = "seedwake:cycle_counter"
 CONVERSATION_MERGE_SEPARATOR = " / "
+LTM_ACTION_MARKER_PATTERN = re.compile(r"\s*\{action:[^}]+\}\s*$")
+LTM_RETRIEVAL_OVERSAMPLE_FACTOR = 3
+MERGED_TELEGRAM_METADATA_KEYS = (
+    "telegram_user_id",
+    "telegram_chat_id",
+    "telegram_username",
+    "telegram_full_name",
+    "telegram_message_id",
+    "reply_to_message_id",
+    "reply_to_preview",
+    "reply_to_user_id",
+    "reply_to_from_self",
+    "reply_to_username",
+    "reply_to_full_name",
+)
 logger = logging.getLogger(__name__)
 
 
@@ -388,9 +404,15 @@ def _merge_conversation_stimuli(conversation_group: list[Stimulus]) -> Stimulus:
     merged_metadata["merged_stimulus_ids"] = [
         stimulus.stimulus_id for stimulus in conversation_group
     ]
+    merged_metadata["merged_messages"] = [
+        _merged_conversation_message(stimulus) for stimulus in conversation_group
+    ]
     latest_message_id = last.metadata.get("telegram_message_id")
     if latest_message_id is not None:
         merged_metadata["telegram_message_id"] = latest_message_id
+    for key in MERGED_TELEGRAM_METADATA_KEYS:
+        if key in last.metadata:
+            merged_metadata[key] = last.metadata[key]
     return Stimulus(
         stimulus_id=first.stimulus_id,
         type=first.type,
@@ -407,6 +429,17 @@ def _merge_conversation_stimuli(conversation_group: list[Stimulus]) -> Stimulus:
 
 def _compact_conversation_text(content: str) -> str:
     return " ".join(content.split())
+
+
+def _merged_conversation_message(stimulus: Stimulus) -> dict:
+    payload = {
+        "source": stimulus.source,
+        "content": _compact_conversation_text(stimulus.content),
+    }
+    for key in MERGED_TELEGRAM_METADATA_KEYS:
+        if key in stimulus.metadata:
+            payload[key] = stimulus.metadata[key]
+    return payload
 
 
 def _recover_runtime_services(
@@ -576,16 +609,20 @@ def _retrieve_associations(
     if not context:
         return None
     anchor = context[-1]
+    result_limit = _ltm_result_limit(ltm)
     try:
         vec = embed_text(embedding_client, anchor.content, embedding_model)
     except EMBEDDING_EXCEPTIONS:
         return None
     try:
-        entries = ltm.search(vec)
+        entries = ltm.search(vec, top_k=_ltm_search_limit(ltm))
         if not entries:
             return None
-        ltm.mark_accessed([e.id for e in entries])
-        return [e.content for e in entries]
+        memory_ids, contents = _dedupe_ltm_contents(entries, limit=result_limit)
+        if not contents:
+            return None
+        ltm.mark_accessed(memory_ids)
+        return contents
     except LTM_EXCEPTIONS:
         ltm.disconnect()
         return None
@@ -601,14 +638,19 @@ def _store_to_ltm(
     """Embed and store new thoughts into long-term memory."""
     if not ltm.available:
         return
+    seen_contents: set[str] = set()
     for t in thoughts:
+        clean_content = _sanitize_ltm_content(t.content)
+        if not clean_content or clean_content in seen_contents:
+            continue
+        seen_contents.add(clean_content)
         try:
-            vec = embed_text(embedding_client, t.content, embedding_model)
+            vec = embed_text(embedding_client, clean_content, embedding_model)
         except EMBEDDING_EXCEPTIONS:
             continue
         try:
             ltm.store(
-                content=t.content,
+                content=clean_content,
                 memory_type="episodic",
                 embedding=vec,
                 source_cycle_id=cycle_id,
@@ -616,6 +658,38 @@ def _store_to_ltm(
         except LTM_EXCEPTIONS:
             ltm.disconnect()
             return
+
+
+def _dedupe_ltm_contents(entries, *, limit: int | None = None) -> tuple[list[int], list[str]]:
+    memory_ids: list[int] = []
+    contents: list[str] = []
+    seen_contents: set[str] = set()
+    for entry in entries:
+        clean_content = _sanitize_ltm_content(entry.content)
+        if not clean_content or clean_content in seen_contents:
+            continue
+        seen_contents.add(clean_content)
+        memory_ids.append(entry.id)
+        contents.append(clean_content)
+        if limit is not None and len(contents) >= limit:
+            break
+    return memory_ids, contents
+
+
+def _ltm_result_limit(ltm: LongTermMemory) -> int:
+    retrieval_top_k = getattr(ltm, "retrieval_top_k", None)
+    if not isinstance(retrieval_top_k, int) or retrieval_top_k <= 0:
+        return 5
+    return retrieval_top_k
+
+
+def _ltm_search_limit(ltm: LongTermMemory) -> int:
+    return _ltm_result_limit(ltm) * LTM_RETRIEVAL_OVERSAMPLE_FACTOR
+
+
+def _sanitize_ltm_content(content: str) -> str:
+    stripped = LTM_ACTION_MARKER_PATTERN.sub("", str(content).strip())
+    return " ".join(stripped.split())
 
 
 def _maybe_reconnect_redis(

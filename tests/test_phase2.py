@@ -14,10 +14,12 @@ from core.main import (
     _next_cycle_id,
     _open_log,
     _open_prompt_log,
+    _retrieve_associations,
+    _store_to_ltm,
 )
 from core.memory.short_term import LATEST_CYCLE_KEY
 from core.memory.identity import load_identity
-from core.memory.long_term import LongTermMemory
+from core.memory.long_term import LongTermEntry, LongTermMemory
 # noinspection PyProtectedMember
 from core.memory.short_term import ShortTermMemory, _thought_to_dict, _dict_to_thought
 from core.thought_parser import Thought
@@ -54,6 +56,21 @@ class ShortTermMemoryFallbackTests(unittest.TestCase):
     def test_empty_context(self) -> None:
         stm = ShortTermMemory(redis_client=None, context_window=10)
         self.assertEqual(stm.get_context(), [])
+
+    def test_get_context_repairs_old_invalid_trigger_refs(self) -> None:
+        stm = ShortTermMemory(redis_client=None, context_window=2)
+        older = _make_thought(1, 1, "old")
+        current = _make_thought(2, 1, "current")
+        broken = _make_thought(2, 2, "broken")
+        broken.trigger_ref = "C3-1"
+        valid = _make_thought(2, 3, "valid")
+        valid.trigger_ref = "C2-1"
+        stm.append([older, current, broken, valid])
+
+        context = stm.get_context()
+
+        self.assertIsNone(context[2].trigger_ref)
+        self.assertEqual(context[3].trigger_ref, "C2-1")
 
 
 def _seed_existing_history(redis_client: MagicMock, *, latest_cycle_id: str | None) -> None:
@@ -230,6 +247,101 @@ class LongTermMemoryTests(unittest.TestCase):
         target = ltm.resolve_telegram_target_for_entity("person:alice")
 
         self.assertEqual(target, "telegram:123456")
+
+    def test_store_skips_exact_duplicate_content(self) -> None:
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.side_effect = [(42,)]
+        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cursor
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        ltm = LongTermMemory(mock_conn)
+
+        entry_id = ltm.store("same content", "episodic", [0.1, 0.2])
+
+        self.assertEqual(entry_id, 42)
+        self.assertEqual(mock_cursor.execute.call_count, 1)
+        mock_conn.commit.assert_called_once()
+
+
+class LongTermMemoryPromptNormalizationTests(unittest.TestCase):
+    def test_retrieve_associations_dedupes_and_strips_action_markers(self) -> None:
+        entry_time = _make_thought(1, 1).timestamp
+        ltm = MagicMock()
+        ltm.available = True
+        ltm.retrieval_top_k = 5
+        ltm.search.return_value = [
+            LongTermEntry(1, "读过一段材料 {action:reading}", "episodic", 1, 0.5, entry_time, 0.9),
+            LongTermEntry(2, "读过一段材料 {action:reading}", "episodic", 1, 0.5, entry_time, 0.8),
+            LongTermEntry(3, "另一段记忆", "episodic", 1, 0.5, entry_time, 0.7),
+        ]
+        stm = ShortTermMemory(redis_client=None, context_window=2)
+        stm.append([_make_thought(1, 1, "当前念头")])
+
+        with patch("core.main.embed_text", return_value=[0.1, 0.2]):
+            memories = _retrieve_associations(ltm, MagicMock(), stm, "embed-model")
+
+        self.assertEqual(memories, ["读过一段材料", "另一段记忆"])
+        ltm.search.assert_called_once_with([0.1, 0.2], top_k=15)
+        ltm.mark_accessed.assert_called_once_with([1, 3])
+
+    def test_retrieve_associations_overfetches_to_preserve_distinct_memories(self) -> None:
+        entry_time = _make_thought(1, 1).timestamp
+        ltm = MagicMock()
+        ltm.available = True
+        ltm.retrieval_top_k = 2
+        ltm.search.return_value = [
+            LongTermEntry(1, "重复记忆 {action:news}", "episodic", 1, 0.5, entry_time, 0.99),
+            LongTermEntry(2, "重复记忆 {action:news}", "episodic", 1, 0.5, entry_time, 0.98),
+            LongTermEntry(3, "另一段记忆", "episodic", 1, 0.5, entry_time, 0.97),
+        ]
+        stm = ShortTermMemory(redis_client=None, context_window=2)
+        stm.append([_make_thought(1, 1, "当前念头")])
+
+        with patch("core.main.embed_text", return_value=[0.1, 0.2]):
+            memories = _retrieve_associations(ltm, MagicMock(), stm, "embed-model")
+
+        self.assertEqual(memories, ["重复记忆", "另一段记忆"])
+        ltm.search.assert_called_once_with([0.1, 0.2], top_k=6)
+        ltm.mark_accessed.assert_called_once_with([1, 3])
+
+    def test_retrieve_associations_truncates_deduped_results_back_to_top_k(self) -> None:
+        entry_time = _make_thought(1, 1).timestamp
+        ltm = MagicMock()
+        ltm.available = True
+        ltm.retrieval_top_k = 2
+        ltm.search.return_value = [
+            LongTermEntry(1, "重复记忆 {action:news}", "episodic", 1, 0.5, entry_time, 0.99),
+            LongTermEntry(2, "重复记忆 {action:news}", "episodic", 1, 0.5, entry_time, 0.98),
+            LongTermEntry(3, "另一段记忆", "episodic", 1, 0.5, entry_time, 0.97),
+            LongTermEntry(4, "第三段记忆", "episodic", 1, 0.5, entry_time, 0.96),
+        ]
+        stm = ShortTermMemory(redis_client=None, context_window=2)
+        stm.append([_make_thought(1, 1, "当前念头")])
+
+        with patch("core.main.embed_text", return_value=[0.1, 0.2]):
+            memories = _retrieve_associations(ltm, MagicMock(), stm, "embed-model")
+
+        self.assertEqual(memories, ["重复记忆", "另一段记忆"])
+        ltm.search.assert_called_once_with([0.1, 0.2], top_k=6)
+        ltm.mark_accessed.assert_called_once_with([1, 3])
+
+    def test_store_to_ltm_strips_action_markers_and_skips_batch_duplicates(self) -> None:
+        ltm = MagicMock()
+        ltm.available = True
+        thoughts = [
+            _make_thought(3, 1, "去看看新闻 {action:news}"),
+            _make_thought(3, 2, "去看看新闻 {action:news}"),
+            _make_thought(3, 3, "保留这条记忆"),
+        ]
+
+        with patch("core.main.embed_text", return_value=[0.1, 0.2]):
+            _store_to_ltm(ltm, MagicMock(), thoughts, "embed-model", 3)
+
+        self.assertEqual(ltm.store.call_count, 2)
+        first_call = ltm.store.call_args_list[0].kwargs
+        second_call = ltm.store.call_args_list[1].kwargs
+        self.assertEqual(first_call["content"], "去看看新闻")
+        self.assertEqual(second_call["content"], "保留这条记忆")
 
 
 class RecoveryTests(unittest.TestCase):

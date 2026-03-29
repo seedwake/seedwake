@@ -55,6 +55,7 @@ SEARCH_STIMULUS_MAX_RESULTS = 5
 SEARCH_STIMULUS_TITLE_MAX_CHARS = 120
 SEARCH_STIMULUS_URL_MAX_CHARS = 160
 SEARCH_STIMULUS_SNIPPET_MAX_CHARS = 200
+SEND_MESSAGE_SUMMARY_MAX_CHARS = 120
 PLANNER_TIMEOUT_FIELD_DESCRIPTION = "本次动作的超时时间；不写则使用默认值。"
 SEARCH_RESULT_DATA_SHAPE = '{"results":[{"title":"","url":"","snippet":""}]}'
 SEARCH_RESULT_REQUIREMENTS = [
@@ -436,7 +437,7 @@ class ActionManager:
         self._record_sent_message(target_source, message_text, reply_to)
         return _build_action_result(
             ok=True,
-            summary=f"已发送消息到 {target_source}",
+            summary=_send_message_success_summary(target_source, message_text),
             data={
                 "source": target_source,
                 "target_entity": target_entity,
@@ -691,12 +692,6 @@ class ActionManager:
         status: str,
         result: ActionResultEnvelope,
     ) -> tuple[str, ActionResultEnvelope, bool]:
-        # Successful send_message should not produce a stimulus —
-        # the model already knows it sent the message, and an action_result
-        # like "send_message succeeded" misleads it into thinking all
-        # pending conversations have been addressed.
-        if action.type == "send_message" and status == "succeeded" and bool(result.get("ok", True)):
-            return status, result, False
         if status != "succeeded" or action.type != "news" or not bool(result.get("ok", True)):
             return status, result, True
         if not _is_structured_news_result(result):
@@ -755,7 +750,8 @@ class ActionManager:
             return deduped_result, True
         deduped_result["summary"] = summarize_news_items(new_items)
         if not new_items:
-            return deduped_result, False
+            deduped_result["summary"] = "已查看 RSS，没有新的新闻条目"
+            return deduped_result, True
         return deduped_result, True
 
     def _reserve_news_item(self, item_key: str) -> bool:
@@ -2332,6 +2328,8 @@ def _stimulus_content(
     summary = str(result.get("summary") or "行动完成")
     if _action_result_succeeded(status, result) and action.type == "search":
         return _search_stimulus_content(summary, result.get("data"))
+    if _action_result_succeeded(status, result) and action.type == "send_message":
+        return summary
     if _action_result_succeeded(status, result) and action.type in {"reading", "web_fetch"}:
         return _reading_stimulus_content(summary, result.get("data"))
     if _action_result_succeeded(status, result) and action.type == "news":
@@ -2383,6 +2381,13 @@ def _search_stimulus_entry(index: int, item: object) -> str:
     if snippet:
         entry += f" —— {snippet}"
     return entry
+
+
+def _send_message_success_summary(target_source: str, message_text: str) -> str:
+    excerpt, _ = _clip_prompt_text(message_text.strip(), SEND_MESSAGE_SUMMARY_MAX_CHARS)
+    if excerpt:
+        return f'已成功发送给 {target_source}：“{excerpt}”'
+    return f"已成功发送给 {target_source}"
 
 
 def _reading_stimulus_content(summary: str, data) -> str:

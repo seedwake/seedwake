@@ -56,15 +56,18 @@ def _conversation_stimulus(
     content: str = "你好",
     *,
     message_id: int | None = None,
+    metadata: dict | None = None,
 ) -> Stimulus:
-    metadata = {"telegram_message_id": message_id} if message_id is not None else {}
+    base_metadata = dict(metadata or {})
+    if message_id is not None:
+        base_metadata["telegram_message_id"] = message_id
     return Stimulus(
         stimulus_id="stim_conv_1",
         type="conversation",
         priority=1,
         source=source,
         content=content,
-        metadata=metadata,
+        metadata=base_metadata,
     )
 
 
@@ -365,6 +368,26 @@ def _assert_single_news_stimulus(
     return stimuli[0]
 
 
+def _assert_news_stimuli_contents(
+    test_case: unittest.TestCase,
+    queue: StimulusQueue,
+    manager: ActionManager,
+    thoughts: list[Thought],
+    expected_fragments: list[str],
+) -> list[Stimulus]:
+    _submit_and_shutdown(manager, thoughts)
+    stimuli = queue.pop_many(limit=10)
+    test_case.assertEqual(len(stimuli), len(expected_fragments))
+    test_case.assertTrue(all(stimulus.type == "news" for stimulus in stimuli))
+    actual_contents = [stimulus.content for stimulus in stimuli]
+    for fragment in expected_fragments:
+        test_case.assertTrue(
+            any(fragment in content for content in actual_contents),
+            msg=f"missing news stimulus fragment: {fragment!r} in {actual_contents!r}",
+        )
+    return stimuli
+
+
 def _stored_action_payload(
     *,
     action_id: str = "act_C1-1",
@@ -515,6 +538,50 @@ class StimulusQueueTests(unittest.TestCase):
         self.assertEqual(selected[0].metadata["merged_count"], 3)
         self.assertEqual(len(selected[0].metadata["merged_stimulus_ids"]), 3)
         self.assertEqual(selected[0].metadata["telegram_message_id"], 103)
+        self.assertEqual(len(selected[0].metadata["merged_messages"]), 3)
+
+    def test_prompt_keeps_reply_context_on_only_the_replied_message_after_merge(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        queue.push(
+            "conversation",
+            1,
+            "telegram:1",
+            "第一句",
+            metadata={
+                "telegram_full_name": "Alice",
+                "telegram_message_id": 101,
+            },
+        )
+        queue.push(
+            "conversation",
+            1,
+            "telegram:1",
+            "第二句",
+            metadata={
+                "telegram_full_name": "Alice",
+                "telegram_message_id": 102,
+                "reply_to_message_id": 98,
+                "reply_to_preview": "之前那句",
+                "reply_to_from_self": True,
+            },
+        )
+
+        prompt = build_prompt(
+            3,
+            {"self_description": "我是 Seedwake。"},
+            [],
+            30,
+            stimuli=_select_cycle_stimuli(queue),
+        )
+
+        self.assertIn(
+            'telegram:1 (Alice) [msg:101] 说：\n第一句\n\ntelegram:1 (Alice) [msg:102] 引用了我之前说的 [msg:98]：“之前那句” 说：\n第二句',
+            prompt,
+        )
+        self.assertNotIn(
+            'telegram:1 (Alice) [msg:101] 引用了我之前说的 [msg:98]：“之前那句” 说：\n第一句',
+            prompt,
+        )
 
     def test_select_cycle_stimuli_keeps_other_sources_for_later_rounds(self) -> None:
         queue = StimulusQueue(redis_client=None)
@@ -565,7 +632,19 @@ class StimulusQueueTests(unittest.TestCase):
 class PromptBuilderPhase3Tests(unittest.TestCase):
     def test_prompt_includes_reordered_sections_and_sanitized_action_summaries(self) -> None:
         queue = StimulusQueue(redis_client=None)
-        stimulus = queue.push("conversation", 1, "user:alice", "你好")
+        stimulus = queue.push(
+            "conversation",
+            1,
+            "telegram:1",
+            "谢谢你",
+            metadata={
+                "telegram_full_name": "Alice",
+                "telegram_message_id": 305,
+                "reply_to_message_id": 298,
+                "reply_to_preview": "好，我自己找一篇关于有氧锻炼的文章",
+                "reply_to_from_self": True,
+            },
+        )
         passive = Stimulus(
             stimulus_id="stim_time",
             type="time",
@@ -619,11 +698,11 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertLess(prompt.index("## 我已经发起、正在等回音的事"), prompt.index("## 此刻我注意到"))
         self.assertLess(prompt.index("## 此刻我注意到"), prompt.index("## 行动有了回音"))
         self.assertLess(prompt.index("## 行动有了回音"), prompt.index("## 有人对我说话了"))
-        self.assertIn("user:alice 说：你好", prompt)
+        self.assertIn('telegram:1 (Alice) [msg:305] 引用了我之前说的 [msg:298]：“好，我自己找一篇关于有氧锻炼的文章” 说：谢谢你', prompt)
         self.assertIn("如果我决定回应，需要用 {action:send_message} 真正把话发出去", prompt)
         self.assertIn("[时间感] 现在是晚上", prompt)
         self.assertIn("[搜索结果] 搜索完成 1. 标题 (https://example.com) —— 摘要", prompt)
-        self.assertIn("我想搜一下最近的反馈", prompt)
+        self.assertIn("[search/running] 我想搜一下最近的反馈", prompt)
         self.assertNotIn('{"results":[{"title":"","url":"","snippet":""}]}', prompt)
         self.assertNotIn('{action:search, query:"反馈"}', prompt)
         self.assertIn("好像有一阵子没有", prompt)
@@ -836,7 +915,7 @@ class ActionManagerTests(unittest.TestCase):
                 seen_feed_urls.append(list(feed_urls)) or _news_result()
             ),
         )
-        _assert_single_news_stimulus(
+        _assert_news_stimuli_contents(
             self,
             queue,
             manager,
@@ -844,7 +923,10 @@ class ActionManagerTests(unittest.TestCase):
                 _make_thought(cycle_id=1, action_request={"type": "news", "params": ""}),
                 _make_thought(cycle_id=2, action_request={"type": "news", "params": ""}),
             ],
-            expected_text="第一条",
+            expected_fragments=[
+                "已查看 RSS，没有新的新闻条目",
+                "第一条",
+            ],
         )
         self.assertEqual(seen_feed_urls[0], ["https://example.com/rss.xml"])
         self.assertEqual(manager.pop_perception_observations().count("news"), 2)
@@ -880,13 +962,17 @@ class ActionManagerTests(unittest.TestCase):
             redis_client=_RedisNewsSeenStub(),
             news_reader=news_reader,
         )
-        _assert_single_news_stimulus(
+        _assert_news_stimuli_contents(
             self,
             queue,
             manager,
             [
                 _make_thought(cycle_id=1, action_request={"type": "news", "params": ""}),
                 _make_thought(cycle_id=2, action_request={"type": "news", "params": ""}),
+            ],
+            expected_fragments=[
+                "已查看 RSS，没有新的新闻条目",
+                "同一条新闻",
             ],
         )
 
@@ -1052,6 +1138,30 @@ class ActionManagerTests(unittest.TestCase):
         self.assertNotIn("- 第六条", stimulus.content)
         self.assertIn("（另有 1 条未展示）", stimulus.content)
 
+    def test_news_stimulus_emits_explicit_empty_feedback_when_no_new_items(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        manager = _build_action_manager(
+            queue,
+            _Planner(ActionPlan("news", "native", "读取 RSS", 30, "测试", ["https://example.com/rss.xml"])),
+            redis_client=_RedisNewsSeenStub(),
+            news_reader=_constant_news_reader(_action_result(
+                summary="新闻已读取",
+                data={"items": []},
+                run_id="run_news_empty",
+                session_key="seedwake:action:act_C1-1",
+                transport="native",
+            )),
+        )
+
+        _submit_and_shutdown(
+            manager,
+            [_make_thought(cycle_id=1, action_request={"type": "news", "params": ""})],
+        )
+        stimulus = queue.pop_many(limit=1)[0]
+        self.assertEqual(stimulus.type, "news")
+        self.assertEqual(stimulus.metadata["origin"], "action")
+        self.assertEqual(stimulus.content, "已查看 RSS，没有新的新闻条目")
+
     def test_news_seen_index_is_bounded(self) -> None:
         queue = StimulusQueue(redis_client=None)
         planner = _Planner(ActionPlan("news", "native", "读取 RSS", 30, "测试", ["https://example.com/rss.xml"]))
@@ -1124,7 +1234,10 @@ class ActionManagerTests(unittest.TestCase):
             _make_thought(cycle_id=2, action_request={"type": "news", "params": ""}),
         ])
 
-        self.assertEqual(second_queue.pop_many(limit=5), [])
+        stimuli = second_queue.pop_many(limit=5)
+        self.assertEqual(len(stimuli), 1)
+        self.assertEqual(stimuli[0].type, "news")
+        self.assertEqual(stimuli[0].content, "已查看 RSS，没有新的新闻条目")
 
     def test_malformed_news_result_falls_back_to_failed_action_result(self) -> None:
         _assert_failed_news_action(
@@ -1378,6 +1491,10 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(events[-1][1]["message"], "我在。")
         self.assertIn(CONVERSATION_HISTORY_KEY, redis_stub.lists)
         self.assertIn('"role": "assistant"', redis_stub.lists[CONVERSATION_HISTORY_KEY][0])
+        stimulus = queue.pop_many(limit=1)[0]
+        self.assertEqual(stimulus.metadata["action_type"], "send_message")
+        self.assertIn("已成功发送给 telegram:1", stimulus.content)
+        self.assertIn("我在。", stimulus.content)
 
     def test_perception_action_auto_executes_without_auto_execute_list(self) -> None:
         queue = StimulusQueue(redis_client=None)

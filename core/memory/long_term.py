@@ -33,6 +33,10 @@ class LongTermMemory:
     def available(self) -> bool:
         return self._conn is not None
 
+    @property
+    def retrieval_top_k(self) -> int:
+        return self._top_k
+
     def store(
         self,
         content: str,
@@ -45,24 +49,42 @@ class LongTermMemory:
         """Write a memory entry. Returns the new row id."""
         if not self.available:
             return None
+        normalized_content = content.strip()
+        if not normalized_content:
+            return None
         tags = entity_tags or []
         vec_literal = _format_vector(embedding)
         try:
+            entry_id: int | None = None
             with self._conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO long_term_memory
-                        (content, memory_type, embedding, entity_tags,
-                         source_cycle_id, importance)
-                    VALUES (%s, %s, %s::vector, %s, %s, %s)
-                    RETURNING id
+                    SELECT id
+                    FROM long_term_memory
+                    WHERE is_active = TRUE AND content = %s
+                    LIMIT 1
                     """,
-                    (content, memory_type, vec_literal, tags,
-                     source_cycle_id, importance),
+                    (normalized_content,),
                 )
-                row = cur.fetchone()
+                existing = cur.fetchone()
+                if existing:
+                    entry_id = existing[0]
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO long_term_memory
+                            (content, memory_type, embedding, entity_tags,
+                             source_cycle_id, importance)
+                        VALUES (%s, %s, %s::vector, %s, %s, %s)
+                        RETURNING id
+                        """,
+                        (normalized_content, memory_type, vec_literal, tags,
+                         source_cycle_id, importance),
+                    )
+                    row = cur.fetchone()
+                    entry_id = row[0] if row else None
             self._conn.commit()
-            return row[0] if row else None
+            return entry_id
         except psycopg.Error:
             self._conn.rollback()
             raise

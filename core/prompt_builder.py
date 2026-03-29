@@ -27,10 +27,11 @@ SYSTEM_PROMPT = """\
 - {action:time}
 - {action:system_status}
 - {action:news}
+- {action:weather}
 - {action:weather, location:"某个位置"}
 - {action:reading}
 - {action:reading, query:"我自己想读的内容"}
-- {action:search, query:"关键词"}
+- {action:search, query:"在互联网上搜索关键词"}
 - {action:web_fetch, url:"https://example.com"}
 - {action:send_message, message:"我想说的话"}
 - {action:send_message, chat_id:"123456", message:"我想发出的消息内容"}
@@ -161,12 +162,7 @@ def _split_stimuli(stimuli: list[Stimulus]) -> tuple[list[Stimulus], list[Stimul
 def _format_conversations(conversations: list[Stimulus]) -> str:
     lines = ["如果我决定回应，需要用 {action:send_message} 真正把话发出去。", ""]
     for conv in conversations:
-        content = _compact_prompt_text(conv.content)
-        msg_id = conv.metadata.get("telegram_message_id")
-        if msg_id:
-            lines.append(f"{conv.source} [msg:{msg_id}] 说：{content}")
-            continue
-        lines.append(f"{conv.source} 说：{content}")
+        lines.append(_format_conversation_line(conv))
     return _render_section("有人对我说话了", lines, keep_blank_lines=True)
 
 
@@ -203,7 +199,7 @@ def _format_thought_history(thoughts: list[Thought]) -> str:
 def _format_running_actions(actions: list[ActionRecord]) -> str:
     lines = []
     for action in actions:
-        lines.append(f"- {_running_action_summary(action)} [{action.type}/{action.status}]")
+        lines.append(f"- [{action.type}/{action.status}] {_running_action_summary(action)}")
     return _render_section("我已经发起、正在等回音的事", lines)
 
 
@@ -225,6 +221,93 @@ def _render_section(title: str, lines: list[str], *, keep_blank_lines: bool = Fa
 
 def _passive_stimulus_label(stimulus_type: str) -> str:
     return PASSIVE_STIMULUS_LABELS.get(stimulus_type, "[感知]")
+
+
+def _conversation_prefix(stimulus: Stimulus) -> str:
+    parts = [_conversation_speaker(stimulus)]
+    message_id = stimulus.metadata.get("telegram_message_id")
+    if message_id:
+        parts.append(f"[msg:{message_id}]")
+    reply_context = _conversation_reply_context(stimulus)
+    if reply_context:
+        parts.append(reply_context)
+    return " ".join(str(part).strip() for part in parts if str(part).strip())
+
+
+def _format_conversation_line(stimulus: Stimulus) -> str:
+    merged_messages = stimulus.metadata.get("merged_messages")
+    if isinstance(merged_messages, list) and len(merged_messages) > 1:
+        return "\n\n".join(
+            _format_conversation_block(message) for message in merged_messages
+        )
+    content = _compact_prompt_text(stimulus.content)
+    return f"{_conversation_prefix(stimulus)} 说：{content}"
+
+
+def _format_conversation_block(message: object) -> str:
+    if not isinstance(message, dict):
+        return _compact_prompt_text(str(message or ""))
+    content = _compact_prompt_text(str(message.get("content") or ""))
+    prefix = _conversation_dict_prefix(message)
+    if not prefix:
+        return content
+    if not content:
+        return prefix
+    return f"{prefix} 说：\n{content}"
+
+
+def _conversation_dict_prefix(message: dict) -> str:
+    parts = [_conversation_dict_speaker(message)]
+    message_id = message.get("telegram_message_id")
+    if message_id:
+        parts.append(f"[msg:{message_id}]")
+    reply_context = _conversation_dict_reply_context(message)
+    if reply_context:
+        parts.append(reply_context)
+    return " ".join(str(part).strip() for part in parts if str(part).strip())
+
+
+def _conversation_dict_speaker(message: dict) -> str:
+    source = str(message.get("source") or "").strip()
+    full_name = str(message.get("telegram_full_name") or "").strip()
+    username = str(message.get("telegram_username") or "").strip()
+    display_name = full_name or username
+    if display_name and source:
+        return f"{source} ({display_name})"
+    return source or display_name
+
+
+def _conversation_dict_reply_context(message: dict) -> str:
+    reply_to_message_id = message.get("reply_to_message_id")
+    reply_preview = _compact_prompt_text(str(message.get("reply_to_preview") or ""))
+    if not reply_to_message_id or not reply_preview:
+        return ""
+    if bool(message.get("reply_to_from_self")):
+        quoted_owner = "引用了我之前说的"
+    else:
+        quoted_owner = "引用了自己之前说的"
+    return f'{quoted_owner} [msg:{reply_to_message_id}]：“{reply_preview}”'
+
+
+def _conversation_speaker(stimulus: Stimulus) -> str:
+    full_name = str(stimulus.metadata.get("telegram_full_name") or "").strip()
+    username = str(stimulus.metadata.get("telegram_username") or "").strip()
+    display_name = full_name or username
+    if display_name:
+        return f"{stimulus.source} ({display_name})"
+    return stimulus.source
+
+
+def _conversation_reply_context(stimulus: Stimulus) -> str:
+    reply_to_message_id = stimulus.metadata.get("reply_to_message_id")
+    reply_preview = _compact_prompt_text(str(stimulus.metadata.get("reply_to_preview") or ""))
+    if not reply_to_message_id or not reply_preview:
+        return ""
+    if bool(stimulus.metadata.get("reply_to_from_self")):
+        quoted_owner = "引用了我之前说的"
+    else:
+        quoted_owner = "引用了自己之前说的"
+    return f'{quoted_owner} [msg:{reply_to_message_id}]：“{reply_preview}”'
 
 
 def _action_echo_label(stimulus: Stimulus) -> str:

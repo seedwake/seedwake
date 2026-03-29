@@ -50,15 +50,16 @@ def _call_ollama(client: ModelClient, prompt: str, model_config: dict) -> str:
 def _write_prompt_log(prompt_log_file, cycle_id: int, prompt: str) -> None:
     if prompt_log_file is None:
         return
-    banner = "🔥" * 24
+    start_banner = "🟢" * 24
+    end_banner = "🔴" * 24
     prompt_log_file.write(
         "\n"
-        + banner
+        + start_banner
         + "\n"
-        + f"🔥🔥🔥 PROMPT C{cycle_id} 🔥🔥🔥\n"
-        + banner
+        + f"🟢🟢🟢 PROMPT C{cycle_id} START 🟢🟢🟢\n"
+        + start_banner
         + "\n"
     )
     prompt_log_file.write(prompt)
-    prompt_log_file.write("\n" + banner + "\n\n")
+    prompt_log_file.write("\n" + end_banner + "\n" + f"🔴🔴🔴 PROMPT C{cycle_id} END 🔴🔴🔴\n" + end_banner + "\n\n")
     prompt_log_file.flush()
