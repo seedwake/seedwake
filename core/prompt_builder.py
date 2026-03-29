@@ -92,6 +92,7 @@ ACTION_ECHO_LABELS = {
     "system_change": "[系统变更]",
 }
 UNKNOWN_ACTION_ECHO_LABEL = "[结果]"
+RUNNING_ACTION_VISIBLE_STATUSES = {"pending", "running"}
 
 
 def build_prompt(
@@ -106,6 +107,7 @@ def build_prompt(
 ) -> str:
     """Build a single prompt string for thought generation."""
     parts = [_build_system(identity)]
+    visible_running_actions = _visible_running_actions(running_actions)
 
     window = recent_thoughts[-context_window * 3:]
     if window:
@@ -114,17 +116,19 @@ def build_prompt(
         parts.append(_format_long_term(long_term_context))
     if perception_cues:
         parts.append(_format_perception_cues(perception_cues))
-    if running_actions:
-        parts.append(_format_running_actions(running_actions))
 
     if stimuli:
         conversations, action_echoes, passive = _split_stimuli(stimuli)
-        if passive:
-            parts.append(_format_sensory_stimuli(passive))
         if action_echoes:
             parts.append(_format_action_echoes(action_echoes))
+        if visible_running_actions:
+            parts.append(_format_running_actions(visible_running_actions))
+        if passive:
+            parts.append(_format_sensory_stimuli(passive))
         if conversations:
             parts.append(_format_conversations(conversations))
+    elif visible_running_actions:
+        parts.append(_format_running_actions(visible_running_actions))
     parts.append(_format_next_cycle(cycle_id))
     return "\n\n".join(parts)
 
@@ -201,6 +205,12 @@ def _format_running_actions(actions: list[ActionRecord]) -> str:
     for action in actions:
         lines.append(f"- [{action.type}/{action.status}] {_running_action_summary(action)}")
     return _render_section("我已经发起、正在等回音的事", lines)
+
+
+def _visible_running_actions(actions: list[ActionRecord] | None) -> list[ActionRecord]:
+    return [
+        action for action in (actions or []) if action.status in RUNNING_ACTION_VISIBLE_STATUSES
+    ]
 
 
 def _format_perception_cues(cues: list[str]) -> str:
@@ -325,8 +335,42 @@ def _is_action_echo(stimulus: Stimulus) -> bool:
 
 
 def _running_action_summary(action: ActionRecord) -> str:
-    summary = action.source_content.strip() or str(action.request.get("reason") or "").strip() or action.type
+    if action.type == "send_message":
+        return _running_send_message_summary(action)
+    task_summary = _running_action_task_summary(action)
+    if task_summary:
+        return task_summary
+    summary = str(action.request.get("reason") or "").strip() or action.type
     return _compact_prompt_text(_strip_action_marker(summary))
+
+
+def _running_send_message_summary(action: ActionRecord) -> str:
+    target = str(
+        action.request.get("target_source")
+        or action.request.get("target_entity")
+        or "当前 Telegram 对话"
+    ).strip()
+    message = _running_message_excerpt(str(action.request.get("message_text") or ""))
+    if message:
+        return f"给 {target} 发送消息：“{message}”"
+    task_summary = _running_action_task_summary(action)
+    if task_summary:
+        return task_summary
+    return f"给 {target} 发送消息"
+
+
+def _running_action_task_summary(action: ActionRecord) -> str:
+    task = str(action.request.get("task") or "").strip()
+    if not task:
+        return ""
+    first_line = next((line.strip() for line in task.splitlines() if line.strip()), "")
+    if not first_line:
+        return ""
+    return _compact_prompt_text(_strip_action_marker(first_line))
+
+
+def _running_message_excerpt(message: str) -> str:
+    return _compact_prompt_text(message)
 
 
 def _strip_action_marker(content: str) -> str:

@@ -665,8 +665,24 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         action.type = "search"
         action.executor = "openclaw"
         action.status = "running"
-        action.request = {"task": '不要泄漏 {"results":[{"title":"","url":"","snippet":""}]}'}
+        action.request = {
+            "task": (
+                "围绕“反馈”进行搜索，返回按相关性整理的简洁结果。\n\n"
+                '严格按以下 JSON 返回：{"results":[{"title":"","url":"","snippet":""}]}'
+            )
+        }
         action.source_content = '我想搜一下最近的反馈 {action:search, query:"反馈"}'
+        completed = MagicMock()
+        completed.action_id = "act_2"
+        completed.type = "send_message"
+        completed.executor = "native"
+        completed.status = "succeeded"
+        completed.request = {
+            "task": "向 telegram:1 发送消息：我在。",
+            "target_source": "telegram:1",
+            "message_text": "我在。",
+        }
+        completed.source_content = "我想赶紧回一句"
         recent = [_make_thought(cycle_id=2, index=1, thought_type="思考", content="之前的念头")]
 
         prompt = build_prompt(
@@ -680,7 +696,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             30,
             long_term_context=["之前某次读到过关于雨后气味的解释。"],
             stimuli=[stimulus, passive, action_echo],
-            running_actions=[action],
+            running_actions=[action, completed],
             perception_cues=["了解外界动态——最近发生了什么？"],
         )
 
@@ -694,17 +710,18 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("## 接下来的念头", prompt)
         self.assertLess(prompt.index("## 最近的念头"), prompt.index("## 浮上来的记忆"))
         self.assertLess(prompt.index("## 浮上来的记忆"), prompt.index("## 好像有一阵子没有……"))
-        self.assertLess(prompt.index("## 好像有一阵子没有……"), prompt.index("## 我已经发起、正在等回音的事"))
+        self.assertLess(prompt.index("## 好像有一阵子没有……"), prompt.index("## 行动有了回音"))
+        self.assertLess(prompt.index("## 行动有了回音"), prompt.index("## 我已经发起、正在等回音的事"))
         self.assertLess(prompt.index("## 我已经发起、正在等回音的事"), prompt.index("## 此刻我注意到"))
-        self.assertLess(prompt.index("## 此刻我注意到"), prompt.index("## 行动有了回音"))
         self.assertLess(prompt.index("## 行动有了回音"), prompt.index("## 有人对我说话了"))
         self.assertIn('telegram:1 (Alice) [msg:305] 引用了我之前说的 [msg:298]：“好，我自己找一篇关于有氧锻炼的文章” 说：谢谢你', prompt)
         self.assertIn("如果我决定回应，需要用 {action:send_message} 真正把话发出去", prompt)
         self.assertIn("[时间感] 现在是晚上", prompt)
         self.assertIn("[搜索结果] 搜索完成 1. 标题 (https://example.com) —— 摘要", prompt)
-        self.assertIn("[search/running] 我想搜一下最近的反馈", prompt)
+        self.assertIn("[search/running] 围绕“反馈”进行搜索，返回按相关性整理的简洁结果。", prompt)
+        self.assertNotIn("[send_message/succeeded]", prompt)
         self.assertNotIn('{"results":[{"title":"","url":"","snippet":""}]}', prompt)
-        self.assertNotIn('{action:search, query:"反馈"}', prompt)
+        self.assertNotIn("我想搜一下最近的反馈", prompt)
         self.assertIn("好像有一阵子没有", prompt)
         self.assertIn("外界动态", prompt)
         self.assertIn("探索和学习。", prompt)
@@ -720,6 +737,34 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("这种回应必须外化成 {action:send_message, ...}", prompt)
         self.assertIn("对话是前景，时间感和身体感觉只是背景", prompt)
         self.assertNotIn("你想发出的内容", prompt)
+
+    def test_running_send_message_summary_uses_request_not_source_content(self) -> None:
+        action = MagicMock()
+        action.action_id = "act_1"
+        action.type = "send_message"
+        action.executor = "native"
+        action.status = "running"
+        action.request = {
+            "task": "向 telegram:1 发送消息：我在。",
+            "target_source": "telegram:1",
+            "message_text": "我在。",
+        }
+        action.source_content = '那句"你怎么不说话"又把我往前推了一步'
+
+        prompt = build_prompt(
+            3,
+            {
+                "self_description": "我是 Seedwake。",
+                "core_goals": "探索和学习。",
+                "self_understanding": "我会在经验里慢慢形成自己。",
+            },
+            [_make_thought(cycle_id=2, index=1, thought_type="思考", content="之前的念头")],
+            30,
+            running_actions=[action],
+        )
+
+        self.assertIn('[send_message/running] 给 telegram:1 发送消息：“我在。”', prompt)
+        self.assertNotIn("你怎么不说话", prompt)
 
 
 class TriggerValidationTests(unittest.TestCase):
