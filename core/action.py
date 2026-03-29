@@ -532,14 +532,18 @@ class ActionManager:
             self._log_callback(text)
 
     def _emit_planner_feedback(self, thought: Thought, raw_action_type: str, reason: str | None) -> None:
-        summary = (reason or "").strip() or "该行动本轮未执行"
+        reason_text = (reason or "").strip()
+        if reason_text:
+            summary = f"我刚才想 {raw_action_type}，但没有做——{reason_text}"
+        else:
+            summary = f"我刚才想 {raw_action_type}，但那股冲动被抑制了"
         result = _failure_result(summary, "ignored_by_planner", transport="planner")
         self._emit(f"行动已跳过 {thought.thought_id} [{raw_action_type}]")
         self._stimulus_queue.push(
             "action_result",
             2,
             f"planner:{thought.thought_id}",
-            f"{raw_action_type} 未执行：{summary}",
+            summary,
             metadata={
                 "status": "ignored",
                 "executor": "planner",

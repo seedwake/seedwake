@@ -478,19 +478,19 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             30,
             stimuli=[stimulus],
             running_actions=[action],
-            perception_cues=["我已经有一段时间没有接触外部新闻了。"],
+            perception_cues=["了解外界动态——最近发生了什么？"],
         )
 
-        self.assertIn("## 当前外部刺激", prompt)
+        self.assertIn("## 有人对我说话了", prompt)
         self.assertIn("你好", prompt)
-        self.assertIn("## 正在进行的行动", prompt)
-        self.assertIn("act_1", prompt)
-        self.assertIn("## 感知空缺", prompt)
-        self.assertIn("外部新闻", prompt)
+        self.assertIn("## 我正在等待的事", prompt)
+        self.assertIn("search", prompt)
+        self.assertIn("## 好像有一阵子没有", prompt)
+        self.assertIn("外界动态", prompt)
         self.assertIn("{action:web_fetch", prompt)
         self.assertIn("{action:system_change", prompt)
         self.assertIn("不要发明未列出的 action 名称", prompt)
-        self.assertIn("我想发出的消息内容", prompt)
+        self.assertIn("我想说的话", prompt)
         self.assertIn("我自己想读的内容", prompt)
         self.assertNotIn("你想发出的内容", prompt)
 
@@ -595,13 +595,10 @@ class PerceptionManagerTests(unittest.TestCase):
         cues = manager.build_prompt_cues(1, [])
 
         self.assertEqual(len(cues), 3)
-        self.assertIn("我已经有一段时间没有接触外部新闻了", " ".join(cues))
-        self.assertIn("我已经有一段时间没有感知外部天气了", " ".join(cues))
-        self.assertIn("我已经有一段时间没有阅读外部材料了", " ".join(cues))
-        self.assertIn("可用 {action:news}", " ".join(cues))
-        self.assertIn("可用 {action:weather}", " ".join(cues))
-        self.assertIn("默认天气位置", " ".join(cues))
-        self.assertIn("可用 {action:reading}", " ".join(cues))
+        joined = " ".join(cues)
+        self.assertIn("外界动态", joined)
+        self.assertIn("天气", joined)
+        self.assertIn("读", joined)
 
         self.assertEqual(manager.build_prompt_cues(2, []), [])
 
@@ -614,7 +611,7 @@ class PerceptionManagerTests(unittest.TestCase):
 
         cues = manager.build_prompt_cues(1, [])
 
-        self.assertNotIn("可用 {action:news}", " ".join(cues))
+        self.assertNotIn("外界动态", " ".join(cues))
 
 
 class ActionManagerTests(unittest.TestCase):
@@ -1273,7 +1270,7 @@ class ActionManagerTests(unittest.TestCase):
         stimulus = queue.pop_many(limit=1)[0]
         self.assertEqual(stimulus.type, "action_result")
         self.assertEqual(stimulus.source, "planner:C1-1")
-        self.assertIn("news 未执行", stimulus.content)
+        self.assertIn("我刚才想 news", stimulus.content)
         self.assertEqual(stimulus.metadata["status"], "ignored")
         self.assertEqual(stimulus.metadata["result"]["error"], "ignored_by_planner")
 
@@ -1297,7 +1294,7 @@ class ActionManagerTests(unittest.TestCase):
         stimulus = queue.pop_many(limit=1)[0]
         self.assertEqual(stimulus.type, "action_result")
         self.assertIn("参数不足，先不执行", stimulus.content)
-        self.assertEqual(stimulus.metadata["result"]["summary"], "参数不足，先不执行")
+        self.assertIn("我刚才想 news", stimulus.content)
 
     def test_weather_fallback_uses_default_location(self) -> None:
         thought = _make_thought(

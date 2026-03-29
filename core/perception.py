@@ -98,25 +98,16 @@ class PerceptionManager:
         cues = []
 
         if self._should_offer("weather", cycle_id, self._config.weather_cue_interval_cycles, running_actions):
-            location_hint = ""
-            if self._config.default_weather_location:
-                location_hint = "；若不写 location，将使用默认天气位置"
-            cues.append(
-                f"我已经有一段时间没有感知外部天气了；如果自然想知道，可用 {{action:weather}}{location_hint}。"
-            )
+            cues.append("感知外面的天气——外面现在是什么样的？")
 
         if (
             self._config.news_feed_urls
             and self._should_offer("news", cycle_id, self._config.news_cue_interval_cycles, running_actions)
         ):
-            cues.append(
-                "我已经有一段时间没有接触外部新闻了；如果自然想知道外界发生了什么，可用 {action:news} 从固定 RSS 信息流里取回内容。"
-            )
+            cues.append("了解外界动态——最近发生了什么？")
 
         if self._should_offer("reading", cycle_id, self._config.reading_cue_interval_cycles, running_actions):
-            cues.append(
-                "我已经有一段时间没有阅读外部材料了；如果自然想读一点东西，可用 {action:reading}；如果心里已经有想读的方向，也可以自己加 query。"
-            )
+            cues.append("读一点什么——有什么值得读的吗？")
 
         return cues
 
