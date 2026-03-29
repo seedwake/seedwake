@@ -55,6 +55,21 @@ class ThoughtParserTests(unittest.TestCase):
         self.assertEqual(t.content, "模型输出了奇怪的东西")
         self.assertEqual(t.thought_id, "C5-1")
 
+    def test_parse_action_without_params(self) -> None:
+        thoughts = parse_thoughts("[意图] 看看新闻 {action:news}\n", 1)
+
+        self.assertEqual(thoughts[0].action_request, {"type": "news", "params": ""})
+
+    def test_parse_action_without_params_allows_trailing_whitespace(self) -> None:
+        thoughts = parse_thoughts("[意图] 看看新闻 {action:news }\n", 1)
+
+        self.assertEqual(thoughts[0].action_request, {"type": "news", "params": ""})
+
+    def test_parse_action_without_params_allows_newline_before_closing_brace(self) -> None:
+        thoughts = parse_thoughts("[意图] 看看新闻 {action:news\n}\n", 1)
+
+        self.assertEqual(thoughts[0].action_request, {"type": "news", "params": ""})
+
 
 class CycleTests(unittest.TestCase):
     @patch("core.cycle._call_ollama", return_value="[思考] a\n[意图] b\n[反应] c\n")

@@ -36,6 +36,20 @@ TELEGRAM_SOURCE_PREFIX = "telegram:"
 OPENCLAW_ACTION_TYPES = {"search", "web_fetch", "system_change", "custom", "weather", "reading", "file_modify"}
 PERCEPTION_AUTO_EXECUTE_TYPES = {"news", "weather", "reading"}
 OPS_ACTION_TYPES = {"system_change", "file_modify"}
+THOUGHT_ACTION_TYPES = {
+    "time",
+    "system_status",
+    "news",
+    "weather",
+    "reading",
+    "search",
+    "web_fetch",
+    "send_message",
+    "file_modify",
+    "system_change",
+}
+READING_STIMULUS_EXCERPT_MAX_CHARS = 1600
+READING_STIMULUS_NOTE_MAX_CHARS = 400
 ACTION_REDIS_EXCEPTIONS = (
     redis_exceptions.RedisError,
     ConnectionError,
@@ -968,7 +982,7 @@ def _planner_messages(thought: Thought, *, conversation_source: str | None = Non
         {
             "role": "system",
             "content": (
-                "你是 Seedwake 的前额叶行动规划器。"
+                "我是 Seedwake 的前额叶行动规划器。"
                 "不要执行动作，只能通过一个 tool call 返回结构化决定。"
                 "纯本地、无副作用、一次函数调用即可完成的时间读取、系统状态读取、固定 RSS 新闻读取，以及 Telegram 消息发送可选 native。"
                 "天气、阅读、网页搜索、网页抓取、浏览器和多步探索委托普通 OpenClaw worker。"
@@ -1146,8 +1160,10 @@ def _fallback_plan(
     worker_agent_id: str = "seedwake-worker",
     ops_worker_agent_id: str = "seedwake-ops",
     conversation_source: str | None = None,
-) -> ActionPlan | None:
-    action_type = raw_action_type or "custom"
+) -> ActionPlan | tuple[None, str | None] | None:
+    action_type = str(raw_action_type or "").strip()
+    if action_type not in THOUGHT_ACTION_TYPES:
+        return None, f"未知 action：{action_type or '空'}；当前不可用。"
     if action_type == "time":
         return ActionPlan(
             action_type="get_time",
@@ -1178,7 +1194,7 @@ def _fallback_plan(
             reason="fallback",
             conversation_source=conversation_source,
         )
-    if action_type in OPENCLAW_ACTION_TYPES or action_type:
+    if action_type in OPENCLAW_ACTION_TYPES:
         return ActionPlan(
             action_type=action_type,
             executor="openclaw",
@@ -1268,6 +1284,8 @@ def _build_openclaw_task(
     raw_params = str((thought.action_request or {}).get("params") or "")
     if action_type == "search":
         return _build_search_task(raw_params, explicit_task, thought)
+    if action_type == "web_fetch":
+        return _build_web_fetch_task(raw_params, explicit_task, thought)
     if action_type == "reading":
         return _build_reading_task(raw_params, explicit_task, thought)
     if action_type == "weather":
@@ -1285,6 +1303,15 @@ def _build_search_task(raw_params: str, explicit_task: str, thought: Thought) ->
     search_query = _extract_action_first_param(raw_params, "query", "keywords", "topic")
     if search_query:
         return f"围绕“{search_query}”进行搜索，返回按相关性整理的简洁结果。"
+    if explicit_task:
+        return explicit_task
+    return thought.content
+
+
+def _build_web_fetch_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
+    url = _extract_action_first_param(raw_params, "url", "link")
+    if url:
+        return f"抓取并提取这个网页的主要内容：{url}。返回简洁摘要和关键信息。"
     if explicit_task:
         return explicit_task
     return thought.content
@@ -1886,7 +1913,49 @@ def _stimulus_content(
     summary = str(result.get("summary") or "行动完成")
     if stimulus_type == "action_result":
         return f"{action.type} {status}: {summary}"
+    if stimulus_type == "reading":
+        return _reading_stimulus_content(summary, result.get("data"))
     return summary
+
+
+def _reading_stimulus_content(summary: str, data) -> str:
+    if not isinstance(data, dict):
+        return summary
+    excerpt, excerpt_truncated = _clip_reading_prompt_text(
+        str(data.get("excerpt_original") or "").strip(),
+        READING_STIMULUS_EXCERPT_MAX_CHARS,
+    )
+    note, note_truncated = _clip_reading_prompt_text(
+        str(data.get("brief_note") or "").strip(),
+        READING_STIMULUS_NOTE_MAX_CHARS,
+    )
+    source_info = data.get("source")
+    parts = [summary]
+    if isinstance(source_info, dict):
+        title = str(source_info.get("title") or "").strip()
+        url = str(source_info.get("url") or "").strip()
+        if title:
+            parts.append(f"来源：{title}" + (f" ({url})" if url else ""))
+    if excerpt:
+        excerpt_label = "原文片段（节选）" if excerpt_truncated else "原文片段"
+        parts.append(f"{excerpt_label}：{excerpt}")
+        if excerpt_truncated:
+            parts.append(
+                "说明：这里只展示节选；如果我还想继续读，可以再次使用 {action:reading} 或 {action:web_fetch}。"
+            )
+    if note:
+        note_label = "笔记（节选）" if note_truncated else "笔记"
+        parts.append(f"{note_label}：{note}")
+    return "\n".join(parts)
+
+
+def _clip_reading_prompt_text(text: str, limit: int) -> tuple[str, bool]:
+    if not text or limit <= 0:
+        return "", False
+    if len(text) <= limit:
+        return text, False
+    clipped = text[:limit].rstrip()
+    return f"{clipped}...", True
 
 
 def push_action_control(

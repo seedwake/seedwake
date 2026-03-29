@@ -12,7 +12,7 @@ THOUGHT_HEADER_PATTERN = re.compile(
 # Phase 4 type — recognize to skip, not to parse
 SKIPPED_HEADER_PATTERN = re.compile(r"^\[反思(?:-C\d+-\d+)?]")
 TRIGGER_PATTERN = re.compile(r"^(?P<content>.*?)(?:\s*\(←\s*(?P<trigger>[^)]+)\))?\s*$", re.DOTALL)
-ACTION_PATTERN = re.compile(r"\{action:(\w+),\s*(.+?)}")
+ACTION_PATTERN = re.compile(r"\{action:(\w+)(?:,\s*(.+?))?\s*\}", re.DOTALL)
 
 
 @dataclass
@@ -72,7 +72,7 @@ def _parse_action(content: str) -> RawActionRequest | None:
     m = ACTION_PATTERN.search(content)
     if not m:
         return None
-    action_request: RawActionRequest = {"type": m.group(1), "params": m.group(2)}
+    action_request: RawActionRequest = {"type": m.group(1), "params": m.group(2) or ""}
     return action_request
 
 

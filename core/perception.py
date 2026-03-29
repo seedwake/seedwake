@@ -102,7 +102,7 @@ class PerceptionManager:
             if self._config.default_weather_location:
                 location_hint = "；若不写 location，将使用默认天气位置"
             cues.append(
-                f"你已经有一段时间没有感知外部天气了；如果自然想知道，可用 {{action:weather}}{location_hint}。"
+                f"我已经有一段时间没有感知外部天气了；如果自然想知道，可用 {{action:weather}}{location_hint}。"
             )
 
         if (
@@ -110,12 +110,12 @@ class PerceptionManager:
             and self._should_offer("news", cycle_id, self._config.news_cue_interval_cycles, running_actions)
         ):
             cues.append(
-                "你已经有一段时间没有接触外部新闻了；如果自然想知道外界发生了什么，可用 {action:news} 从固定 RSS 信息流里取回内容。"
+                "我已经有一段时间没有接触外部新闻了；如果自然想知道外界发生了什么，可用 {action:news} 从固定 RSS 信息流里取回内容。"
             )
 
         if self._should_offer("reading", cycle_id, self._config.reading_cue_interval_cycles, running_actions):
             cues.append(
-                "你已经有一段时间没有阅读外部材料了；如果自然想读一点东西，可用 {action:reading}；如果心里已经有想读的方向，也可以自己加 query。"
+                "我已经有一段时间没有阅读外部材料了；如果自然想读一点东西，可用 {action:reading}；如果心里已经有想读的方向，也可以自己加 query。"
             )
 
         return cues

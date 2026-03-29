@@ -442,7 +442,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             30,
             stimuli=[stimulus],
             running_actions=[action],
-            perception_cues=["你已经有一段时间没有接触外部新闻了。"],
+            perception_cues=["我已经有一段时间没有接触外部新闻了。"],
         )
 
         self.assertIn("## 当前外部刺激", prompt)
@@ -451,6 +451,12 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("act_1", prompt)
         self.assertIn("## 感知空缺", prompt)
         self.assertIn("外部新闻", prompt)
+        self.assertIn("{action:web_fetch", prompt)
+        self.assertIn("{action:system_change", prompt)
+        self.assertIn("不要发明未列出的 action 名称", prompt)
+        self.assertIn("我想发出的内容", prompt)
+        self.assertIn("我自己想读的内容", prompt)
+        self.assertNotIn("你想发出的内容", prompt)
 
 
 class NativeNewsReaderTests(unittest.TestCase):
@@ -534,6 +540,9 @@ class PerceptionManagerTests(unittest.TestCase):
         cues = manager.build_prompt_cues(1, [])
 
         self.assertEqual(len(cues), 3)
+        self.assertIn("我已经有一段时间没有接触外部新闻了", " ".join(cues))
+        self.assertIn("我已经有一段时间没有感知外部天气了", " ".join(cues))
+        self.assertIn("我已经有一段时间没有阅读外部材料了", " ".join(cues))
         self.assertIn("可用 {action:news}", " ".join(cues))
         self.assertIn("可用 {action:weather}", " ".join(cues))
         self.assertIn("默认天气位置", " ".join(cues))
@@ -938,6 +947,89 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(stimulus.type, "weather")
         self.assertIn("多云", stimulus.content)
 
+    def test_reading_stimulus_contains_excerpt_and_note(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        planner = _Planner(ActionPlan("reading", "openclaw", "阅读外部材料", 30, "测试"))
+        executor = _OpenClawExecutor(_action_result(
+            summary="找到一段贴题材料",
+            data={
+                "source": {
+                    "title": "Example Article",
+                    "url": "https://example.com/article",
+                },
+                "excerpt_original": "The answer lies in the logs.",
+                "brief_note": "这段适合当前主题。",
+            },
+            run_id="run_reading_1",
+            session_key="agent:seedwake-worker:seedwake:action:act_C1-1",
+        ))
+        manager = ActionManager(
+            redis_client=None,
+            stimulus_queue=queue,
+            planner=planner,
+            openclaw_executor=executor,
+            auto_execute=[],
+            require_confirmation=[],
+            forbidden=[],
+        )
+
+        try:
+            manager.submit_from_thoughts([
+                _make_thought(action_request={"type": "reading", "params": 'query:"意识"'})
+            ])
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        stimulus = queue.pop_many(limit=1)[0]
+        self.assertEqual(stimulus.type, "reading")
+        self.assertIn("找到一段贴题材料", stimulus.content)
+        self.assertIn("来源：Example Article (https://example.com/article)", stimulus.content)
+        self.assertIn("原文片段：The answer lies in the logs.", stimulus.content)
+        self.assertIn("笔记：这段适合当前主题。", stimulus.content)
+
+    def test_reading_stimulus_truncates_long_excerpt_and_marks_continuation(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        planner = _Planner(ActionPlan("reading", "openclaw", "阅读外部材料", 30, "测试"))
+        long_excerpt = "A" * 1800 + "TAIL"
+        executor = _OpenClawExecutor(_action_result(
+            summary="找到一段很长的材料",
+            data={
+                "source": {
+                    "title": "Long Article",
+                    "url": "https://example.com/long",
+                },
+                "excerpt_original": long_excerpt,
+                "brief_note": "这段很长，需要节选。",
+            },
+            run_id="run_reading_2",
+            session_key="agent:seedwake-worker:seedwake:action:act_C1-1",
+        ))
+        manager = ActionManager(
+            redis_client=None,
+            stimulus_queue=queue,
+            planner=planner,
+            openclaw_executor=executor,
+            auto_execute=[],
+            require_confirmation=[],
+            forbidden=[],
+        )
+
+        try:
+            manager.submit_from_thoughts([
+                _make_thought(action_request={"type": "reading", "params": 'query:"长文"'})
+            ])
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        stimulus = queue.pop_many(limit=1)[0]
+        self.assertIn("原文片段（节选）：", stimulus.content)
+        self.assertIn("说明：这里只展示节选；如果我还想继续读，可以再次使用 {action:reading} 或 {action:web_fetch}。", stimulus.content)
+        self.assertNotIn(long_excerpt, stimulus.content)
+        self.assertNotIn("TAIL", stimulus.content)
+        self.assertIn("笔记：这段很长，需要节选。", stimulus.content)
+
     def test_planner_ignore_emits_feedback_stimulus(self) -> None:
         queue = StimulusQueue(redis_client=None)
         manager = _build_action_manager(
@@ -1339,6 +1431,43 @@ class ActionManagerTests(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertEqual(plan.executor, "openclaw")
         self.assertIn("用户反馈 近一周", plan.task)
+
+    def test_web_fetch_fallback_preserves_url(self) -> None:
+        thought = _make_thought(
+            thought_type="意图",
+            content='我想抓取这个页面 {action:web_fetch, url:"https://example.com/a"}',
+            action_request={"type": "web_fetch", "params": 'url:"https://example.com/a"'},
+        )
+
+        plan = _fallback_plan(
+            raw_action_type="web_fetch",
+            thought=thought,
+            default_timeout_seconds=30,
+            default_weather_location="",
+            news_feed_urls=[],
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.executor, "openclaw")
+        self.assertIn("https://example.com/a", plan.task)
+        self.assertNotIn("{action:web_fetch", plan.task)
+
+    def test_unknown_action_fallback_is_rejected(self) -> None:
+        thought = _make_thought(
+            thought_type="意图",
+            content='我想试试一个不存在的动作 {action:foo}',
+            action_request={"type": "foo", "params": ""},
+        )
+
+        plan = _fallback_plan(
+            raw_action_type="foo",
+            thought=thought,
+            default_timeout_seconds=30,
+            default_weather_location="",
+            news_feed_urls=[],
+        )
+
+        self.assertEqual(plan, (None, "未知 action：foo；当前不可用。"))
 
     def test_file_modify_fallback_routes_to_ops_worker(self) -> None:
         thought = _make_thought(
