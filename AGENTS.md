@@ -29,6 +29,7 @@
 - 能抽成公开纯函数的就抽到 helper；不该公开的内部函数保持私有，测试侧局部 suppress，不要为过 inspection 乱改 API 边界。
 - 发现真实联调 bug 后，必须补对应回归测试，避免“线上修了，测试没锁住”。
 - 对 spell checking，专业术语优先加入 `dictionary.dic`，不要为消告警而硬改正确术语。
+- 对 inspection 里的内嵌 Lua / JSON / YAML 片段，先区分是 Python 代码还是 DSL / 字典项；正确术语加词典，别误改协议或脚本语义。
 - 遇到重复代码、过长参数列表、过高复杂度时，优先抽 helper / dataclass / callbacks，避免继续堆条件分支。
 - 任何涉及阶段边界的改动，先核对 `SPECS.md` 与 `BACKGROUND.md`；不要擅自把后续阶段内容提前落到当前阶段。
 

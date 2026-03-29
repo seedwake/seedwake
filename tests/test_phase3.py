@@ -108,10 +108,8 @@ class _UnavailableOpenClawExecutor:
 
 
 class _JsonPlannerClient(ModelClient):
-    provider = "openai_compatible"
-    supports_tool_calls = False
-
     def __init__(self, content: str):
+        super().__init__(provider="openai_compatible", supports_tool_calls=False)
         self._content = content
 
     def generate_text(self, prompt: str, model_config: dict) -> str:
@@ -296,6 +294,37 @@ def _submit_and_shutdown_with_stimuli(
         manager.shutdown()
 
 
+def _submit_planner_feedback(
+    planner_result: ActionPlan | tuple[None, str | None] | None,
+) -> tuple[list, Stimulus]:
+    queue = StimulusQueue(redis_client=None)
+    manager = _build_action_manager(
+        queue,
+        _Planner(planner_result),
+        auto_execute=["news"],
+    )
+    try:
+        created = manager.submit_from_thoughts([
+            _make_thought(action_request={"type": "news", "params": ""})
+        ])
+    finally:
+        manager.shutdown()
+    return created, queue.pop_many(limit=1)[0]
+
+
+def _mock_http_fallback_payload(summary: str = "ok") -> bytes:
+    output_text = json.dumps(
+        {"ok": True, "summary": summary, "data": {}, "error": None},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return json.dumps(
+        {"output": [{"type": "output_text", "text": output_text}]},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 def _assert_failed_news_action(
     test_case: unittest.TestCase,
     result: ActionResultEnvelope,
@@ -326,13 +355,14 @@ def _assert_single_news_stimulus(
     thoughts: list[Thought],
     *,
     expected_text: str | None = None,
-) -> None:
+) -> Stimulus:
     _submit_and_shutdown(manager, thoughts)
     stimuli = queue.pop_many(limit=5)
     test_case.assertEqual(len(stimuli), 1)
     test_case.assertEqual(stimuli[0].type, "news")
     if expected_text:
         test_case.assertIn(expected_text, stimuli[0].content)
+    return stimuli[0]
 
 
 def _stored_action_payload(
@@ -795,12 +825,9 @@ class ActionManagerTests(unittest.TestCase):
             )),
         )
 
-        _submit_and_shutdown(
-            manager,
-            [_make_thought(cycle_id=1, action_request={"type": "news", "params": ""})],
-        )
-        stimulus = queue.pop_many(limit=1)[0]
-        self.assertEqual(stimulus.type, "news")
+        stimulus = _assert_single_news_stimulus(self, queue, manager, [
+            _make_thought(cycle_id=1, action_request={"type": "news", "params": ""}),
+        ])
         self.assertIn("- ", stimulus.content)
         self.assertIn("...", stimulus.content)
         self.assertNotIn(long_summary, stimulus.content)
@@ -829,12 +856,9 @@ class ActionManagerTests(unittest.TestCase):
             )),
         )
 
-        _submit_and_shutdown(
-            manager,
-            [_make_thought(cycle_id=1, action_request={"type": "news", "params": ""})],
-        )
-        stimulus = queue.pop_many(limit=1)[0]
-        self.assertEqual(stimulus.type, "news")
+        stimulus = _assert_single_news_stimulus(self, queue, manager, [
+            _make_thought(cycle_id=1, action_request={"type": "news", "params": ""}),
+        ])
         self.assertIn("- https://example.com/", stimulus.content)
         self.assertIn("...", stimulus.content)
         self.assertNotIn(long_link, stimulus.content)
@@ -1311,23 +1335,8 @@ class ActionManagerTests(unittest.TestCase):
         self.assertIn("笔记：这段很长，需要节选。", stimulus.content)
 
     def test_planner_ignore_emits_feedback_stimulus(self) -> None:
-        queue = StimulusQueue(redis_client=None)
-        manager = _build_action_manager(
-            queue,
-            _Planner(None),
-            auto_execute=["news"],
-        )
-
-        try:
-            created = manager.submit_from_thoughts([
-                _make_thought(action_request={"type": "news", "params": ""})
-            ])
-            manager.shutdown()
-        finally:
-            manager.shutdown()
-
+        created, stimulus = _submit_planner_feedback(None)
         self.assertEqual(created, [])
-        stimulus = queue.pop_many(limit=1)[0]
         self.assertEqual(stimulus.type, "action_result")
         self.assertEqual(stimulus.source, "planner:C1-1")
         self.assertIn("我刚才想 news", stimulus.content)
@@ -1335,23 +1344,8 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(stimulus.metadata["result"]["error"], "ignored_by_planner")
 
     def test_planner_ignore_preserves_reason_in_feedback_stimulus(self) -> None:
-        queue = StimulusQueue(redis_client=None)
-        manager = _build_action_manager(
-            queue,
-            _Planner((None, "参数不足，先不执行")),
-            auto_execute=["news"],
-        )
-
-        try:
-            created = manager.submit_from_thoughts([
-                _make_thought(action_request={"type": "news", "params": ""})
-            ])
-            manager.shutdown()
-        finally:
-            manager.shutdown()
-
+        created, stimulus = _submit_planner_feedback((None, "参数不足，先不执行"))
         self.assertEqual(created, [])
-        stimulus = queue.pop_many(limit=1)[0]
         self.assertEqual(stimulus.type, "action_result")
         self.assertIn("参数不足，先不执行", stimulus.content)
         self.assertIn("我刚才想 news", stimulus.content)
@@ -1634,7 +1628,11 @@ class ActionManagerTests(unittest.TestCase):
                         _make_thought(
                             cycle_id=1,
                             index=1,
-                            action_request={"type": "send_message", "params": 'chat_id:"42", reply_to:"101", message:"收到"'},
+                            action_request={
+                                "type": "send_message",
+                                "params": 'chat_id:"42", reply_to:"101", '
+                                'message:"收到"',
+                            },
                         )
                     ])
                     manager._planner = _Planner(ActionPlan(
@@ -1651,7 +1649,11 @@ class ActionManagerTests(unittest.TestCase):
                         _make_thought(
                             cycle_id=1,
                             index=2,
-                            action_request={"type": "send_message", "params": 'chat_id:"42", reply_to:"102", message:"收到"'},
+                            action_request={
+                                "type": "send_message",
+                                "params": 'chat_id:"42", reply_to:"102", '
+                                'message:"收到"',
+                            },
                         )
                     ])
                     self.assertTrue(manager.shutdown_with_timeout(1.0))
@@ -2157,9 +2159,7 @@ class OpenClawHttpFallbackTests(unittest.TestCase):
             _ = timeout
             requests.append(req)
             response = MagicMock()
-            response.read.return_value = (
-                b'{"output":[{"type":"output_text","text":"{\\"ok\\":true,\\"summary\\":\\"ok\\",\\"data\\":{},\\"error\\":null}"}]}'
-            )
+            response.read.return_value = _mock_http_fallback_payload()
             cm = MagicMock()
             cm.__enter__.return_value = response
             return cm

@@ -50,6 +50,12 @@ class ShortTermMemoryFallbackTests(unittest.TestCase):
         self.assertEqual(stm.get_context(), [])
 
 
+def _seed_existing_history(redis_client: MagicMock, *, latest_cycle_id: str | None) -> None:
+    redis_client.get.return_value = latest_cycle_id
+    redis_client.zrange.return_value = [json.dumps(_thought_to_dict(_make_thought(8, 1, "old")))]
+    redis_client.eval.return_value = 9
+
+
 class ShortTermMemoryRedisDegradationTests(unittest.TestCase):
     """Test that Redis failures degrade to deque instead of crashing."""
 
@@ -322,9 +328,7 @@ class CycleCounterTests(unittest.TestCase):
 
     def test_next_cycle_id_bootstraps_from_existing_redis_history_when_counter_missing(self) -> None:
         redis_client = MagicMock()
-        redis_client.get.return_value = None
-        redis_client.zrange.return_value = [json.dumps(_thought_to_dict(_make_thought(8, 1, "old")))]
-        redis_client.eval.return_value = 9
+        _seed_existing_history(redis_client, latest_cycle_id=None)
         stm = ShortTermMemory(redis_client=redis_client, context_window=10)
 
         cycle_id = _next_cycle_id(stm, 0)
@@ -335,9 +339,7 @@ class CycleCounterTests(unittest.TestCase):
 
     def test_next_cycle_id_prefers_existing_history_when_latest_key_is_stale(self) -> None:
         redis_client = MagicMock()
-        redis_client.get.return_value = "5"
-        redis_client.zrange.return_value = [json.dumps(_thought_to_dict(_make_thought(8, 1, "old")))]
-        redis_client.eval.return_value = 9
+        _seed_existing_history(redis_client, latest_cycle_id="5")
         stm = ShortTermMemory(redis_client=redis_client, context_window=10)
 
         cycle_id = _next_cycle_id(stm, 0)

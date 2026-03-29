@@ -51,6 +51,37 @@ THOUGHT_ACTION_TYPES = {
 }
 READING_STIMULUS_EXCERPT_MAX_CHARS = 1600
 READING_STIMULUS_NOTE_MAX_CHARS = 400
+PLANNER_TIMEOUT_FIELD_DESCRIPTION = "本次动作的超时时间；不写则使用默认值。"
+SEARCH_RESULT_DATA_SHAPE = '{"results":[{"title":"","url":"","snippet":""}]}'
+SEARCH_RESULT_REQUIREMENTS = [
+    "results 最多返回 5 条最相关结果。",
+    "title、url、snippet 使用这些精确字段名。",
+]
+READING_SOURCE_RESULT_DATA_SHAPE = '{"source":{"title":"","url":""},"excerpt_original":"","brief_note":""}'
+WEB_FETCH_RESULT_REQUIREMENTS = [
+    "source.title 和 source.url 使用这些精确字段名。",
+    "excerpt_original 必须是网页原文片段，不要改写成综述。",
+    "brief_note 用 1-2 句说明这段内容的重点。",
+]
+READING_RESULT_REQUIREMENTS = [
+    "source.title 和 source.url 使用这些精确字段名。",
+    "excerpt_original 必须是原文片段，不要改写成综述。",
+    "brief_note 用 1-2 句说明为什么这段材料值得我读。",
+]
+WEATHER_RESULT_DATA_SHAPE = (
+    '{"location":"","condition":"","temperature_c":"","feels_like_c":"",'
+    '"humidity_pct":"","wind_kph":""}'
+)
+WEATHER_RESULT_FIELD_REQUIREMENT = (
+    "location、condition、temperature_c、feels_like_c、humidity_pct、wind_kph 使用这些精确字段名。"
+)
+FILE_MODIFY_RESULT_DATA_SHAPE = '{"path":"","applied":false,"changed":false,"change_summary":""}'
+FILE_MODIFY_RESULT_REQUIREMENTS = [
+    "path、applied、changed、change_summary 使用这些精确字段名。",
+]
+SYSTEM_CHANGE_RESULT_DATA_SHAPE = '{"applied":false,"status":"","change_summary":"","impact_scope":""}'
+SYSTEM_CHANGE_FIELD_REQUIREMENT = "applied、status、change_summary、impact_scope 使用这些精确字段名。"
+SYSTEM_CHANGE_STATUS_REQUIREMENT = 'status 只使用 "applied"、"partial"、"blocked" 之一。'
 ACTION_REDIS_EXCEPTIONS = (
     redis_exceptions.RedisError,
     ConnectionError,
@@ -1083,38 +1114,48 @@ def _planner_json_system_prompt() -> str:
 def _planner_json_tool_contract() -> str:
     parts = ["可用 tool 与 arguments 约束如下："]
     for tool in _planner_tools():
-        function = tool.get("function") or {}
-        if not isinstance(function, dict):
-            continue
-        name = str(function.get("name") or "").strip()
-        if not name:
-            continue
-        description = str(function.get("description") or "").strip()
-        parameters = function.get("parameters") or {}
-        if not isinstance(parameters, dict):
-            parts.append(f"{name}：{description} arguments 返回 {{}}。")
-            continue
-        required_fields = {
-            str(item).strip()
-            for item in (parameters.get("required") or [])
-            if str(item).strip()
-        }
-        properties = parameters.get("properties") or {}
-        if not isinstance(properties, dict) or not properties:
-            parts.append(f"{name}：{description} arguments 返回 {{}}。")
-            continue
-        field_parts: list[str] = []
-        for field_name, schema in properties.items():
-            if not isinstance(schema, dict):
-                continue
-            field_parts.append(_planner_json_field_contract(
-                field_name=str(field_name),
-                schema=schema,
-                required=field_name in required_fields,
-            ))
-        joined_fields = "；".join(item for item in field_parts if item)
-        parts.append(f"{name}：{description} arguments 字段：{joined_fields}。")
+        entry = _planner_json_tool_contract_entry(tool)
+        if entry:
+            parts.append(entry)
     return "".join(parts)
+
+
+def _planner_json_tool_contract_entry(tool: dict) -> str:
+    function = tool.get("function") or {}
+    if not isinstance(function, dict):
+        return ""
+    name = str(function.get("name") or "").strip()
+    if not name:
+        return ""
+    description = str(function.get("description") or "").strip()
+    field_contracts = _planner_json_tool_field_contracts(function.get("parameters"))
+    if not field_contracts:
+        return f"{name}：{description} arguments 返回 {{}}。"
+    joined_fields = "；".join(field_contracts)
+    return f"{name}：{description} arguments 字段：{joined_fields}。"
+
+
+def _planner_json_tool_field_contracts(parameters: object) -> list[str]:
+    if not isinstance(parameters, dict):
+        return []
+    required_fields = {
+        str(item).strip()
+        for item in (parameters.get("required") or [])
+        if str(item).strip()
+    }
+    properties = parameters.get("properties") or {}
+    if not isinstance(properties, dict) or not properties:
+        return []
+    field_contracts: list[str] = []
+    for field_name, schema in properties.items():
+        if not isinstance(schema, dict):
+            continue
+        field_contracts.append(_planner_json_field_contract(
+            field_name=str(field_name),
+            schema=schema,
+            required=field_name in required_fields,
+        ))
+    return [item for item in field_contracts if item]
 
 
 def _planner_json_field_contract(*, field_name: str, schema: dict, required: bool) -> str:
@@ -1227,7 +1268,7 @@ def _planner_tools() -> list[dict]:
                         },
                         "timeout_seconds": {
                             "type": "integer",
-                            "description": "本次动作的超时时间；不写则使用默认值。",
+                            "description": PLANNER_TIMEOUT_FIELD_DESCRIPTION,
                         },
                         "reason": {
                             "type": "string",
@@ -1248,7 +1289,7 @@ def _planner_tools() -> list[dict]:
                         "reason": {"type": "string", "description": "为什么读取时间。"},
                         "timeout_seconds": {
                             "type": "integer",
-                            "description": "本次动作的超时时间；不写则使用默认值。",
+                            "description": PLANNER_TIMEOUT_FIELD_DESCRIPTION,
                         },
                     },
                 },
@@ -1265,7 +1306,7 @@ def _planner_tools() -> list[dict]:
                         "reason": {"type": "string", "description": "为什么读取系统状态。"},
                         "timeout_seconds": {
                             "type": "integer",
-                            "description": "本次动作的超时时间；不写则使用默认值。",
+                            "description": PLANNER_TIMEOUT_FIELD_DESCRIPTION,
                         },
                     },
                 },
@@ -1282,7 +1323,7 @@ def _planner_tools() -> list[dict]:
                         "reason": {"type": "string", "description": "为什么读取新闻。"},
                         "timeout_seconds": {
                             "type": "integer",
-                            "description": "本次动作的超时时间；不写则使用默认值。",
+                            "description": PLANNER_TIMEOUT_FIELD_DESCRIPTION,
                         },
                     },
                 },
@@ -1317,7 +1358,7 @@ def _planner_tools() -> list[dict]:
                         },
                         "timeout_seconds": {
                             "type": "integer",
-                            "description": "本次动作的超时时间；不写则使用默认值。",
+                            "description": PLANNER_TIMEOUT_FIELD_DESCRIPTION,
                         },
                         "reason": {
                             "type": "string",
@@ -1553,96 +1594,29 @@ def _build_openclaw_task(
 def _build_search_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
     search_query = _extract_action_first_param(raw_params, "query", "keywords", "topic")
     if search_query:
-        return _with_openclaw_result_contract(
-            f"围绕“{search_query}”进行搜索，返回按相关性整理的简洁结果。",
-            data_shape='{"results":[{"title":"","url":"","snippet":""}]}',
-            requirements=[
-                "results 最多返回 5 条最相关结果。",
-                "title、url、snippet 使用这些精确字段名。",
-            ],
-        )
+        return _search_result_contract(f"围绕“{search_query}”进行搜索，返回按相关性整理的简洁结果。")
     if explicit_task:
-        return _with_openclaw_result_contract(
-            explicit_task,
-            data_shape='{"results":[{"title":"","url":"","snippet":""}]}',
-            requirements=[
-                "results 最多返回 5 条最相关结果。",
-                "title、url、snippet 使用这些精确字段名。",
-            ],
-        )
-    return _with_openclaw_result_contract(
-        thought.content,
-        data_shape='{"results":[{"title":"","url":"","snippet":""}]}',
-        requirements=[
-            "results 最多返回 5 条最相关结果。",
-            "title、url、snippet 使用这些精确字段名。",
-        ],
-    )
+        return _search_result_contract(explicit_task)
+    return _search_result_contract(thought.content)
 
 
 def _build_web_fetch_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
     url = _extract_action_first_param(raw_params, "url", "link")
     if url:
-        return _with_openclaw_result_contract(
-            f"抓取并提取这个网页的主要内容：{url}。返回简洁摘要和关键信息。",
-            data_shape='{"source":{"title":"","url":""},"excerpt_original":"","brief_note":""}',
-            requirements=[
-                "source.title 和 source.url 使用这些精确字段名。",
-                "excerpt_original 必须是网页原文片段，不要改写成综述。",
-                "brief_note 用 1-2 句说明这段内容的重点。",
-            ],
-        )
+        return _web_fetch_result_contract(f"抓取并提取这个网页的主要内容：{url}。返回简洁摘要和关键信息。")
     if explicit_task:
-        return _with_openclaw_result_contract(
-            explicit_task,
-            data_shape='{"source":{"title":"","url":""},"excerpt_original":"","brief_note":""}',
-            requirements=[
-                "source.title 和 source.url 使用这些精确字段名。",
-                "excerpt_original 必须是网页原文片段，不要改写成综述。",
-                "brief_note 用 1-2 句说明这段内容的重点。",
-            ],
-        )
-    return _with_openclaw_result_contract(
-        thought.content,
-        data_shape='{"source":{"title":"","url":""},"excerpt_original":"","brief_note":""}',
-        requirements=[
-            "source.title 和 source.url 使用这些精确字段名。",
-            "excerpt_original 必须是网页原文片段，不要改写成综述。",
-            "brief_note 用 1-2 句说明这段内容的重点。",
-        ],
-    )
+        return _web_fetch_result_contract(explicit_task)
+    return _web_fetch_result_contract(thought.content)
 
 
 def _build_reading_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
     reading_query = _extract_action_first_param(raw_params, "query", "topic", "keywords")
     if reading_query:
-        return _with_openclaw_result_contract(
-            f"围绕“{reading_query}”寻找一小段值得阅读的外部材料，返回原文片段和简短说明。",
-            data_shape='{"source":{"title":"","url":""},"excerpt_original":"","brief_note":""}',
-            requirements=[
-                "source.title 和 source.url 使用这些精确字段名。",
-                "excerpt_original 必须是原文片段，不要改写成综述。",
-                "brief_note 用 1-2 句说明为什么这段材料值得我读。",
-            ],
-        )
+        return _reading_result_contract(f"围绕“{reading_query}”寻找一小段值得阅读的外部材料，返回原文片段和简短说明。")
     if explicit_task:
-        return _with_openclaw_result_contract(
-            explicit_task,
-            data_shape='{"source":{"title":"","url":""},"excerpt_original":"","brief_note":""}',
-            requirements=[
-                "source.title 和 source.url 使用这些精确字段名。",
-                "excerpt_original 必须是原文片段，不要改写成综述。",
-                "brief_note 用 1-2 句说明为什么这段材料值得我读。",
-            ],
-        )
-    return _with_openclaw_result_contract(
-        f"围绕这条念头当前真正想读的方向寻找一小段外部材料：{thought.content}",
-        data_shape='{"source":{"title":"","url":""},"excerpt_original":"","brief_note":""}',
-        requirements=[
-            "source.title 和 source.url 使用这些精确字段名。",
-            "excerpt_original 必须是原文片段，不要改写成综述。",
-            "brief_note 用 1-2 句说明为什么这段材料值得我读。",
-        ],
+        return _reading_result_contract(explicit_task)
+    return _reading_result_contract(
+        f"围绕这条念头当前真正想读的方向寻找一小段外部材料：{thought.content}"
     )
 
 
@@ -1651,17 +1625,13 @@ def _build_weather_task(raw_params: str, default_weather_location: str) -> str:
     if location:
         return _with_openclaw_result_contract(
             f"查询 {location} 的当前天气，返回简洁概况。",
-            data_shape='{"location":"","condition":"","temperature_c":"","feels_like_c":"","humidity_pct":"","wind_kph":""}',
-            requirements=[
-                "location、condition、temperature_c、feels_like_c、humidity_pct、wind_kph 使用这些精确字段名。",
-            ],
+            data_shape=WEATHER_RESULT_DATA_SHAPE,
+            requirements=[WEATHER_RESULT_FIELD_REQUIREMENT],
         )
     return _with_openclaw_result_contract(
         "查询默认位置的当前天气；如果缺少默认位置，请明确说明无法确定位置。",
-        data_shape='{"location":"","condition":"","temperature_c":"","feels_like_c":"","humidity_pct":"","wind_kph":""}',
-        requirements=[
-            "location、condition、temperature_c、feels_like_c、humidity_pct、wind_kph 使用这些精确字段名。",
-        ],
+        data_shape=WEATHER_RESULT_DATA_SHAPE,
+        requirements=[WEATHER_RESULT_FIELD_REQUIREMENT],
     )
 
 
@@ -1669,64 +1639,62 @@ def _build_file_modify_task(raw_params: str, explicit_task: str, thought: Though
     path = _extract_action_first_param(raw_params, "path", "file")
     instruction = _extract_action_first_param(raw_params, "instruction", "edit", "change")
     if path and instruction:
-        return _with_openclaw_result_contract(
-            f"修改文件 {path}。修改要求：{instruction}。只做必要改动，并返回修改摘要。",
-            data_shape='{"path":"","applied":false,"changed":false,"change_summary":""}',
-            requirements=[
-                "path、applied、changed、change_summary 使用这些精确字段名。",
-            ],
-        )
+        return _file_modify_result_contract(f"修改文件 {path}。修改要求：{instruction}。只做必要改动，并返回修改摘要。")
     if path:
-        return _with_openclaw_result_contract(
-            f"修改文件 {path}。修改要求围绕这条念头展开：{thought.content}",
-            data_shape='{"path":"","applied":false,"changed":false,"change_summary":""}',
-            requirements=[
-                "path、applied、changed、change_summary 使用这些精确字段名。",
-            ],
-        )
+        return _file_modify_result_contract(f"修改文件 {path}。修改要求围绕这条念头展开：{thought.content}")
     if explicit_task:
-        return _with_openclaw_result_contract(
-            explicit_task,
-            data_shape='{"path":"","applied":false,"changed":false,"change_summary":""}',
-            requirements=[
-                "path、applied、changed、change_summary 使用这些精确字段名。",
-            ],
-        )
-    return _with_openclaw_result_contract(
-        thought.content,
-        data_shape='{"path":"","applied":false,"changed":false,"change_summary":""}',
-        requirements=[
-            "path、applied、changed、change_summary 使用这些精确字段名。",
-        ],
-    )
+        return _file_modify_result_contract(explicit_task)
+    return _file_modify_result_contract(thought.content)
 
 
 def _build_system_change_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
     instruction = _extract_action_first_param(raw_params, "instruction", "task", "change")
     if instruction:
-        return _with_openclaw_result_contract(
-            f"执行系统变更：{instruction}。返回变更摘要、影响范围和结果。",
-            data_shape='{"applied":false,"status":"","change_summary":"","impact_scope":""}',
-            requirements=[
-                "applied、status、change_summary、impact_scope 使用这些精确字段名。",
-                'status 只使用 "applied"、"partial"、"blocked" 之一。',
-            ],
-        )
+        return _system_change_result_contract(f"执行系统变更：{instruction}。返回变更摘要、影响范围和结果。")
     if explicit_task:
-        return _with_openclaw_result_contract(
-            explicit_task,
-            data_shape='{"applied":false,"status":"","change_summary":"","impact_scope":""}',
-            requirements=[
-                "applied、status、change_summary、impact_scope 使用这些精确字段名。",
-                'status 只使用 "applied"、"partial"、"blocked" 之一。',
-            ],
-        )
+        return _system_change_result_contract(explicit_task)
+    return _system_change_result_contract(thought.content)
+
+
+def _search_result_contract(task: str) -> str:
     return _with_openclaw_result_contract(
-        thought.content,
-        data_shape='{"applied":false,"status":"","change_summary":"","impact_scope":""}',
+        task,
+        data_shape=SEARCH_RESULT_DATA_SHAPE,
+        requirements=SEARCH_RESULT_REQUIREMENTS,
+    )
+
+
+def _web_fetch_result_contract(task: str) -> str:
+    return _with_openclaw_result_contract(
+        task,
+        data_shape=READING_SOURCE_RESULT_DATA_SHAPE,
+        requirements=WEB_FETCH_RESULT_REQUIREMENTS,
+    )
+
+
+def _reading_result_contract(task: str) -> str:
+    return _with_openclaw_result_contract(
+        task,
+        data_shape=READING_SOURCE_RESULT_DATA_SHAPE,
+        requirements=READING_RESULT_REQUIREMENTS,
+    )
+
+
+def _file_modify_result_contract(task: str) -> str:
+    return _with_openclaw_result_contract(
+        task,
+        data_shape=FILE_MODIFY_RESULT_DATA_SHAPE,
+        requirements=FILE_MODIFY_RESULT_REQUIREMENTS,
+    )
+
+
+def _system_change_result_contract(task: str) -> str:
+    return _with_openclaw_result_contract(
+        task,
+        data_shape=SYSTEM_CHANGE_RESULT_DATA_SHAPE,
         requirements=[
-            "applied、status、change_summary、impact_scope 使用这些精确字段名。",
-            'status 只使用 "applied"、"partial"、"blocked" 之一。',
+            SYSTEM_CHANGE_FIELD_REQUIREMENT,
+            SYSTEM_CHANGE_STATUS_REQUIREMENT,
         ],
     )
 
@@ -2374,26 +2342,12 @@ def _reading_stimulus_content(summary: str, data) -> str:
         str(data.get("brief_note") or data.get("note") or "").strip(),
         READING_STIMULUS_NOTE_MAX_CHARS,
     )
-    source_info = data.get("source")
     parts = [summary]
-    if isinstance(source_info, dict):
-        title = str(source_info.get("title") or "").strip()
-        url = str(source_info.get("url") or "").strip()
-    else:
-        title = str(data.get("title") or "").strip()
-        url = str(data.get("url") or "").strip()
+    title, url = _reading_source_title_and_url(data)
     if title:
         parts.append(f"来源：{title}" + (f" ({url})" if url else ""))
-    if excerpt:
-        excerpt_label = "原文片段（节选）" if excerpt_truncated else "原文片段"
-        parts.append(f"{excerpt_label}：{excerpt}")
-        if excerpt_truncated:
-            parts.append(
-                "说明：这里只展示节选；如果我还想继续读，可以再次使用 {action:reading} 或 {action:web_fetch}。"
-            )
-    if note:
-        note_label = "笔记（节选）" if note_truncated else "笔记"
-        parts.append(f"{note_label}：{note}")
+    _append_reading_excerpt(parts, excerpt, excerpt_truncated)
+    _append_reading_note(parts, note, note_truncated)
     return "\n".join(parts)
 
 
@@ -2411,35 +2365,78 @@ def _news_stimulus_content(summary: str, data) -> str:
     shown_count = 0
     displayable_count = 0
     for item in items:
-        if not isinstance(item, dict):
-            continue
-        title, _ = _clip_prompt_text(
-            str(item.get("title") or "").strip(),
-            NEWS_STIMULUS_SUMMARY_MAX_CHARS,
-        )
-        item_summary, _ = _clip_prompt_text(
-            str(item.get("summary") or "").strip(),
-            NEWS_STIMULUS_SUMMARY_MAX_CHARS,
-        )
-        link, _ = _clip_prompt_text(
-            str(item.get("link") or "").strip(),
-            NEWS_STIMULUS_SUMMARY_MAX_CHARS,
-        )
-        headline = title or item_summary or link
-        if not headline:
+        entry = _news_stimulus_entry(item)
+        if not entry:
             continue
         displayable_count += 1
         if shown_count >= NEWS_STIMULUS_MAX_ITEMS:
             continue
-        entry = f"- {headline}"
-        if title and item_summary:
-            entry += f"\n  {item_summary}"
         parts.append(entry)
         shown_count += 1
     remaining = displayable_count - shown_count
     if remaining > 0:
         parts.append(f"（另有 {remaining} 条未展示）")
     return "\n".join(parts)
+
+
+def _reading_source_title_and_url(data: dict) -> tuple[str, str]:
+    source_info = data.get("source")
+    if isinstance(source_info, dict):
+        return (
+            str(source_info.get("title") or "").strip(),
+            str(source_info.get("url") or "").strip(),
+        )
+    return (
+        str(data.get("title") or "").strip(),
+        str(data.get("url") or "").strip(),
+    )
+
+
+def _append_reading_excerpt(parts: list[str], excerpt: str, excerpt_truncated: bool) -> None:
+    if not excerpt:
+        return
+    excerpt_label = "原文片段（节选）" if excerpt_truncated else "原文片段"
+    parts.append(f"{excerpt_label}：{excerpt}")
+    if excerpt_truncated:
+        parts.append(
+            "说明：这里只展示节选；如果我还想继续读，可以再次使用 {action:reading} 或 {action:web_fetch}。"
+        )
+
+
+def _append_reading_note(parts: list[str], note: str, note_truncated: bool) -> None:
+    if not note:
+        return
+    note_label = "笔记（节选）" if note_truncated else "笔记"
+    parts.append(f"{note_label}：{note}")
+
+
+def _news_stimulus_entry(item: object) -> str:
+    if not isinstance(item, dict):
+        return ""
+    title, item_summary, link = _news_item_headline_parts(item)
+    headline = title or item_summary or link
+    if not headline:
+        return ""
+    entry = f"- {headline}"
+    if title and item_summary:
+        entry += f"\n  {item_summary}"
+    return entry
+
+
+def _news_item_headline_parts(item: dict) -> tuple[str, str, str]:
+    title, _ = _clip_prompt_text(
+        str(item.get("title") or "").strip(),
+        NEWS_STIMULUS_SUMMARY_MAX_CHARS,
+    )
+    item_summary, _ = _clip_prompt_text(
+        str(item.get("summary") or "").strip(),
+        NEWS_STIMULUS_SUMMARY_MAX_CHARS,
+    )
+    link, _ = _clip_prompt_text(
+        str(item.get("link") or "").strip(),
+        NEWS_STIMULUS_SUMMARY_MAX_CHARS,
+    )
+    return title, item_summary, link
 
 
 def _clip_prompt_text(text: str, limit: int) -> tuple[str, bool]:

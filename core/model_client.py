@@ -283,6 +283,16 @@ def _resolve_tool_call_capability(provider: str, raw_value: object) -> bool:
 
 
 def _normalize_openai_chat_response(body: dict) -> dict:
+    message = _openai_chat_message(body)
+    return {
+        "message": {
+            "content": _extract_openai_message_text(message.get("content")),
+            "tool_calls": _normalize_openai_tool_calls(message.get("tool_calls")),
+        },
+    }
+
+
+def _openai_chat_message(body: dict) -> dict:
     choices = body.get("choices")
     if not isinstance(choices, list) or not choices:
         raise RuntimeError("chat response missing choices")
@@ -292,27 +302,32 @@ def _normalize_openai_chat_response(body: dict) -> dict:
     message = first_choice.get("message")
     if not isinstance(message, dict):
         raise RuntimeError("chat response missing message")
-    normalized_tool_calls: list[dict[str, dict[str, str]]] = []
-    raw_tool_calls = message.get("tool_calls")
-    if isinstance(raw_tool_calls, list):
-        for item in raw_tool_calls:
-            if not isinstance(item, dict):
-                continue
-            function = item.get("function")
-            if not isinstance(function, dict):
-                continue
-            name = str(function.get("name") or "").strip()
-            arguments = function.get("arguments")
-            normalized_tool_calls.append({
-                "function": {
-                    "name": name,
-                    "arguments": arguments if isinstance(arguments, str) else json.dumps(arguments or {}),
-                },
-            })
+    return message
+
+
+def _normalize_openai_tool_calls(raw_tool_calls: object) -> list[dict[str, dict[str, str]]]:
+    if not isinstance(raw_tool_calls, list):
+        return []
+    normalized: list[dict[str, dict[str, str]]] = []
+    for item in raw_tool_calls:
+        normalized_call = _normalize_openai_tool_call(item)
+        if normalized_call:
+            normalized.append(normalized_call)
+    return normalized
+
+
+def _normalize_openai_tool_call(item: object) -> dict[str, dict[str, str]] | None:
+    if not isinstance(item, dict):
+        return None
+    function = item.get("function")
+    if not isinstance(function, dict):
+        return None
+    name = str(function.get("name") or "").strip()
+    arguments = function.get("arguments")
     return {
-        "message": {
-            "content": _extract_openai_message_text(message.get("content")),
-            "tool_calls": normalized_tool_calls,
+        "function": {
+            "name": name,
+            "arguments": arguments if isinstance(arguments, str) else json.dumps(arguments or {}),
         },
     }
 
