@@ -16,6 +16,7 @@ from core.thought_parser import Thought
 
 REDIS_KEY = "seedwake:thoughts"
 REDIS_CHANNEL = "seedwake:stream"
+LATEST_CYCLE_KEY = "seedwake:latest_cycle_id"
 SHORT_TERM_REDIS_EXCEPTIONS = (
     redis_lib.RedisError,
     ConnectionError,
@@ -54,6 +55,8 @@ class ShortTermMemory:
             try:
                 for t in thoughts:
                     self._redis_append(t)
+                if thoughts:
+                    self._update_latest_cycle_id(max(t.cycle_id for t in thoughts))
                 self._trim()
                 self._publish(thoughts)
             except SHORT_TERM_REDIS_EXCEPTIONS:
@@ -68,6 +71,19 @@ class ShortTermMemory:
             except SHORT_TERM_REDIS_EXCEPTIONS:
                 self._redis = None
         return list(self._deque)[-limit:]
+
+    def latest_cycle_id(self) -> int:
+        latest_from_deque = self._deque[-1].cycle_id if self._deque else 0
+        if self._redis:
+            try:
+                latest_from_key = _coerce_cycle_id(self._redis.get(LATEST_CYCLE_KEY))
+                recent = self._redis_recent(1)
+            except SHORT_TERM_REDIS_EXCEPTIONS:
+                self._redis = None
+            else:
+                latest_from_recent = recent[-1].cycle_id if recent else 0
+                return max(latest_from_deque, latest_from_key, latest_from_recent)
+        return latest_from_deque
 
     @property
     def redis_available(self) -> bool:
@@ -116,7 +132,25 @@ class ShortTermMemory:
         """Merge the in-memory shadow copy back into Redis after recovery."""
         for t in self._deque:
             self._redis_append(t)
+        if self._deque:
+            self._update_latest_cycle_id(max(t.cycle_id for t in self._deque))
         self._trim()
+
+    def _update_latest_cycle_id(self, cycle_id: int) -> None:
+        self._redis.eval(
+            """
+            local current = tonumber(redis.call("GET", KEYS[1]) or "0")
+            local incoming = tonumber(ARGV[1]) or 0
+            if incoming > current then
+              redis.call("SET", KEYS[1], incoming)
+              return incoming
+            end
+            return current
+            """,
+            1,
+            LATEST_CYCLE_KEY,
+            cycle_id,
+        )
 
 
 def _thought_to_dict(t: Thought) -> dict:
@@ -145,3 +179,13 @@ def _dict_to_thought(d: dict) -> Thought:
         attention_weight=d.get("attention_weight", 0.0),
         timestamp=datetime.fromisoformat(d["timestamp"]),
     )
+
+
+def _coerce_cycle_id(value) -> int:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    if isinstance(value, int):
+        return value
+    return 0

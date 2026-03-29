@@ -193,11 +193,16 @@ class ActionManager:
         if not thought.action_request:
             return None
         try:
-            plan = self._planner.plan(thought, conversation_source=conversation_source)
+            plan_result = self._planner.plan(thought, conversation_source=conversation_source)
         except PLANNER_EXCEPTIONS as exc:
             self._emit(f"行动规划失败 {thought.thought_id}: {exc}")
             return None
+        plan, skip_reason = _coerce_planner_result(plan_result)
         if not plan:
+            raw_action_type = str((thought.action_request or {}).get("type") or "custom")
+            logger.info("planner returned no plan for %s (action_type=%s)",
+                        thought.thought_id, raw_action_type)
+            self._emit_planner_feedback(thought, raw_action_type, skip_reason)
             return None
         return _action_from_plan(
             thought=thought,
@@ -511,6 +516,23 @@ class ActionManager:
         if self._log_callback:
             self._log_callback(text)
 
+    def _emit_planner_feedback(self, thought: Thought, raw_action_type: str, reason: str | None) -> None:
+        summary = (reason or "").strip() or "该行动本轮未执行"
+        result = _failure_result(summary, "ignored_by_planner", transport="planner")
+        self._emit(f"行动已跳过 {thought.thought_id} [{raw_action_type}]")
+        self._stimulus_queue.push(
+            "action_result",
+            2,
+            f"planner:{thought.thought_id}",
+            f"{raw_action_type} 未执行：{summary}",
+            metadata={
+                "status": "ignored",
+                "executor": "planner",
+                "source_thought_id": thought.thought_id,
+                "result": result,
+            },
+        )
+
     def _publish_action_event(self, action: ActionRecord, status: str, summary: str) -> None:
         if not self._event_callback:
             return
@@ -591,6 +613,12 @@ class ActionManager:
         status: str,
         result: ActionResultEnvelope,
     ) -> tuple[str, ActionResultEnvelope, bool]:
+        # Successful send_message should not produce a stimulus —
+        # the model already knows it sent the message, and an action_result
+        # like "send_message succeeded" misleads it into thinking all
+        # pending conversations have been addressed.
+        if action.type == "send_message" and status == "succeeded" and bool(result.get("ok", True)):
+            return status, result, False
         if status != "succeeded" or action.type != "news" or not bool(result.get("ok", True)):
             return status, result, True
         if not _is_structured_news_result(result):
@@ -831,7 +859,12 @@ class OllamaActionPlanner:
             "temperature": 0.1,
         }
 
-    def plan(self, thought: Thought, *, conversation_source: str | None = None) -> ActionPlan | None:
+    def plan(
+        self,
+        thought: Thought,
+        *,
+        conversation_source: str | None = None,
+    ) -> ActionPlan | tuple[None, str | None] | None:
         action_request = thought.action_request or {}
         response = self._client.chat(
             model=self._model_name,
@@ -842,6 +875,9 @@ class OllamaActionPlanner:
         )
         tool_calls = response["message"].get("tool_calls") or []
         if tool_calls:
+            tool_name = tool_calls[0]["function"]["name"]
+            logger.info("planner tool call: %s for %s (raw_type=%s)",
+                        tool_name, thought.thought_id, action_request.get("type"))
             return _plan_from_tool_call(
                 tool_calls[0]["function"]["name"],
                 tool_calls[0]["function"]["arguments"],
@@ -853,6 +889,8 @@ class OllamaActionPlanner:
                 self._ops_worker_agent_id,
                 conversation_source,
             )
+        logger.info("planner returned no tool call for %s (raw_type=%s), using fallback",
+                    thought.thought_id, action_request.get("type"))
         return _fallback_plan(
             raw_action_type=str(action_request.get("type") or "custom"),
             thought=thought,
@@ -1055,9 +1093,10 @@ def _plan_from_tool_call(
     worker_agent_id: str = "seedwake-worker",
     ops_worker_agent_id: str = "seedwake-ops",
     conversation_source: str | None = None,
-) -> ActionPlan | None:
+) -> ActionPlan | tuple[None, str | None] | None:
     if tool_name == "ignore_action":
-        return None
+        reason = str(arguments.get("reason") or "").strip() or None
+        return None, reason
 
     timeout_seconds = _clamp_timeout(arguments.get("timeout_seconds"), default_timeout_seconds)
     reason = str(arguments.get("reason") or thought.content)
@@ -1085,6 +1124,16 @@ def _plan_from_tool_call(
         ops_worker_agent_id=ops_worker_agent_id,
         conversation_source=conversation_source,
     )
+
+
+def _coerce_planner_result(plan_result) -> tuple[ActionPlan | None, str | None]:
+    if isinstance(plan_result, tuple) and len(plan_result) == 2:
+        plan, reason = plan_result
+        normalized_reason = str(reason or "").strip() or None
+        return plan if isinstance(plan, ActionPlan) else None, normalized_reason
+    if isinstance(plan_result, ActionPlan):
+        return plan_result, None
+    return None, None
 
 
 def _fallback_plan(

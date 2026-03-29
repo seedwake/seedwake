@@ -24,7 +24,7 @@ from core.embedding import embed_text
 from core.logging import resolve_log_path, setup_logging
 from core.memory.identity import load_identity
 from core.memory.long_term import LongTermMemory
-from core.memory.short_term import ShortTermMemory
+from core.memory.short_term import LATEST_CYCLE_KEY, ShortTermMemory
 from core.perception import PerceptionManager
 from core.runtime import connect_redis_from_env, load_yaml_config
 from core.stimulus import Stimulus, StimulusQueue
@@ -77,6 +77,13 @@ REDIS_EVENT_EXCEPTIONS = (
     TypeError,
     ValueError,
 )
+CYCLE_COUNTER_EXCEPTIONS = (
+    redis_lib.RedisError,
+    TypeError,
+    ValueError,
+    OSError,
+)
+CYCLE_COUNTER_KEY = "seedwake:cycle_counter"
 logger = logging.getLogger(__name__)
 
 
@@ -206,7 +213,7 @@ def _run_engine_loop(log_file, runtime: EngineRuntime, identity: dict[str, str])
     last_pg_reconnect = 0.0
 
     while True:
-        cycle_id += 1
+        cycle_id = _next_cycle_id(runtime.stm, cycle_id)
         (
             identity,
             last_redis_reconnect,
@@ -334,6 +341,42 @@ def _recover_runtime_services(
     if not had_pg and runtime.ltm.available:
         _publish_event(runtime.stm.redis_client, "status", _status_payload("postgres_recovered"))
     return identity, last_redis_reconnect, last_pg_reconnect
+
+
+def _next_cycle_id(stm: ShortTermMemory, last_cycle_id: int) -> int:
+    baseline_cycle_id = max(last_cycle_id, stm.latest_cycle_id())
+    fallback_cycle_id = baseline_cycle_id + 1
+    redis_client = stm.redis_client
+    if redis_client is None:
+        return fallback_cycle_id
+    try:
+        return int(
+            redis_client.eval(
+                """
+                local counter = tonumber(redis.call("GET", KEYS[1]) or "0")
+                local latest = tonumber(redis.call("GET", KEYS[2]) or "0")
+                local baseline = tonumber(ARGV[1]) or 0
+                if latest > baseline then
+                  baseline = latest
+                end
+                if counter > baseline then
+                  baseline = counter
+                end
+                local nextv = baseline + 1
+                redis.call("SET", KEYS[1], nextv)
+                if nextv > latest then
+                  redis.call("SET", KEYS[2], nextv)
+                end
+                return nextv
+                """,
+                2,
+                CYCLE_COUNTER_KEY,
+                LATEST_CYCLE_KEY,
+                baseline_cycle_id,
+            )
+        )
+    except CYCLE_COUNTER_EXCEPTIONS:
+        return fallback_cycle_id
 
 
 def _redis_recovered(

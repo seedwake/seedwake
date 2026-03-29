@@ -57,10 +57,15 @@ def _conversation_stimulus(source: str = "telegram:1", content: str = "你好") 
 
 
 class _Planner:
-    def __init__(self, plan: ActionPlan | None):
+    def __init__(self, plan: ActionPlan | tuple[None, str | None] | None):
         self._plan = plan
 
-    def plan(self, _thought: Thought, *, conversation_source: str | None = None) -> ActionPlan | None:
+    def plan(
+        self,
+        _thought: Thought,
+        *,
+        conversation_source: str | None = None,
+    ) -> ActionPlan | tuple[None, str | None] | None:
         _ = conversation_source
         return self._plan
 
@@ -932,6 +937,52 @@ class ActionManagerTests(unittest.TestCase):
         stimulus = queue.pop_many(limit=1)[0]
         self.assertEqual(stimulus.type, "weather")
         self.assertIn("多云", stimulus.content)
+
+    def test_planner_ignore_emits_feedback_stimulus(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        manager = _build_action_manager(
+            queue,
+            _Planner(None),
+            auto_execute=["news"],
+        )
+
+        try:
+            created = manager.submit_from_thoughts([
+                _make_thought(action_request={"type": "news", "params": ""})
+            ])
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(created, [])
+        stimulus = queue.pop_many(limit=1)[0]
+        self.assertEqual(stimulus.type, "action_result")
+        self.assertEqual(stimulus.source, "planner:C1-1")
+        self.assertIn("news 未执行", stimulus.content)
+        self.assertEqual(stimulus.metadata["status"], "ignored")
+        self.assertEqual(stimulus.metadata["result"]["error"], "ignored_by_planner")
+
+    def test_planner_ignore_preserves_reason_in_feedback_stimulus(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        manager = _build_action_manager(
+            queue,
+            _Planner((None, "参数不足，先不执行")),
+            auto_execute=["news"],
+        )
+
+        try:
+            created = manager.submit_from_thoughts([
+                _make_thought(action_request={"type": "news", "params": ""})
+            ])
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(created, [])
+        stimulus = queue.pop_many(limit=1)[0]
+        self.assertEqual(stimulus.type, "action_result")
+        self.assertIn("参数不足，先不执行", stimulus.content)
+        self.assertEqual(stimulus.metadata["result"]["summary"], "参数不足，先不执行")
 
     def test_weather_fallback_uses_default_location(self) -> None:
         thought = _make_thought(

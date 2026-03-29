@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -7,7 +8,8 @@ import psycopg
 import redis as redis_lib
 
 # noinspection PyProtectedMember
-from core.main import _maybe_reconnect_pg, _maybe_reconnect_redis, _open_log
+from core.main import _maybe_reconnect_pg, _maybe_reconnect_redis, _next_cycle_id, _open_log
+from core.memory.short_term import LATEST_CYCLE_KEY
 from core.memory.identity import load_identity
 from core.memory.long_term import LongTermMemory
 # noinspection PyProtectedMember
@@ -284,6 +286,76 @@ class CoreLogHandleTests(unittest.TestCase):
             handle.write("ok\n")
             handle.close()
             self.assertTrue(plain_log.exists())
+
+
+class CycleCounterTests(unittest.TestCase):
+    def test_next_cycle_id_uses_redis_counter(self) -> None:
+        redis_client = MagicMock()
+        redis_client.get.return_value = "0"
+        redis_client.zrange.return_value = []
+        redis_client.eval.return_value = 7
+        stm = ShortTermMemory(redis_client=redis_client, context_window=10)
+
+        cycle_id = _next_cycle_id(stm, 3)
+
+        self.assertEqual(cycle_id, 7)
+        redis_client.eval.assert_called_once()
+
+    def test_next_cycle_id_repairs_redis_counter_when_it_lags_local_state(self) -> None:
+        redis_client = MagicMock()
+        redis_client.get.return_value = "0"
+        redis_client.zrange.return_value = []
+        redis_client.eval.return_value = 6
+        stm = ShortTermMemory(redis_client=redis_client, context_window=10)
+
+        cycle_id = _next_cycle_id(stm, 5)
+
+        self.assertEqual(cycle_id, 6)
+        redis_client.eval.assert_called_once()
+
+    def test_next_cycle_id_falls_back_to_local_increment_without_redis(self) -> None:
+        stm = ShortTermMemory(redis_client=None, context_window=10)
+
+        cycle_id = _next_cycle_id(stm, 9)
+
+        self.assertEqual(cycle_id, 10)
+
+    def test_next_cycle_id_bootstraps_from_existing_redis_history_when_counter_missing(self) -> None:
+        redis_client = MagicMock()
+        redis_client.get.return_value = None
+        redis_client.zrange.return_value = [json.dumps(_thought_to_dict(_make_thought(8, 1, "old")))]
+        redis_client.eval.return_value = 9
+        stm = ShortTermMemory(redis_client=redis_client, context_window=10)
+
+        cycle_id = _next_cycle_id(stm, 0)
+
+        self.assertEqual(cycle_id, 9)
+        self.assertEqual(redis_client.eval.call_args.args[3], LATEST_CYCLE_KEY)
+        self.assertEqual(redis_client.eval.call_args.args[4], 8)
+
+    def test_next_cycle_id_prefers_existing_history_when_latest_key_is_stale(self) -> None:
+        redis_client = MagicMock()
+        redis_client.get.return_value = "5"
+        redis_client.zrange.return_value = [json.dumps(_thought_to_dict(_make_thought(8, 1, "old")))]
+        redis_client.eval.return_value = 9
+        stm = ShortTermMemory(redis_client=redis_client, context_window=10)
+
+        cycle_id = _next_cycle_id(stm, 0)
+
+        self.assertEqual(cycle_id, 9)
+        self.assertEqual(redis_client.eval.call_args.args[4], 8)
+
+    def test_next_cycle_id_does_not_use_stale_redis_client_after_degradation(self) -> None:
+        redis_client = MagicMock()
+        redis_client.get.return_value = None
+        redis_client.zrange.side_effect = ValueError("bad json")
+        stm = ShortTermMemory(redis_client=redis_client, context_window=10)
+
+        cycle_id = _next_cycle_id(stm, 3)
+
+        self.assertEqual(cycle_id, 4)
+        self.assertFalse(stm.redis_available)
+        redis_client.eval.assert_not_called()
 
 
 if __name__ == "__main__":
