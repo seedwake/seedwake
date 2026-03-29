@@ -507,11 +507,11 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             perception_cues=["了解外界动态——最近发生了什么？"],
         )
 
-        self.assertIn("## 有人对我说话了", prompt)
+        self.assertIn("说：", prompt)
         self.assertIn("你好", prompt)
-        self.assertIn("## 我正在等待的事", prompt)
+        self.assertIn("我正在等待的事", prompt)
         self.assertIn("search", prompt)
-        self.assertIn("## 好像有一阵子没有", prompt)
+        self.assertIn("好像有一阵子没有", prompt)
         self.assertIn("外界动态", prompt)
         self.assertIn("{action:web_fetch", prompt)
         self.assertIn("{action:system_change", prompt)

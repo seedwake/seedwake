@@ -109,7 +109,7 @@ def _build_system(identity: dict[str, str]) -> str:
 
 
 def _format_long_term(memories: list[str]) -> str:
-    lines = ["\n## 浮上来的记忆\n"]
+    lines = ["\n---\n（浮上来的记忆）"]
     for mem in memories:
         lines.append(f"- {mem}")
     return "\n".join(lines)
@@ -127,7 +127,7 @@ def _split_stimuli(stimuli: list[Stimulus]) -> tuple[list[Stimulus], list[Stimul
 
 
 def _format_conversations(conversations: list[Stimulus]) -> str:
-    lines = ["\n## 有人对我说话了\n"]
+    lines = ["\n---"]
     for conv in conversations:
         msg_id = conv.metadata.get("telegram_message_id")
         if msg_id:
@@ -140,7 +140,7 @@ def _format_conversations(conversations: list[Stimulus]) -> str:
 
 
 def _format_sensory_stimuli(stimuli: list[Stimulus]) -> str:
-    lines = ["\n## 此刻我注意到\n"]
+    lines = ["\n---\n（此刻我注意到）"]
     for stimulus in stimuli:
         lines.append(f"- {_sensory_label(stimulus.type)}{stimulus.content}")
     return "\n".join(lines)
@@ -174,7 +174,7 @@ def _format_thought_history(thoughts: list[Thought]) -> str:
 
 
 def _format_running_actions(actions: list[ActionRecord]) -> str:
-    lines = ["\n## 我正在等待的事\n"]
+    lines = ["\n---\n（我正在等待的事）"]
     for action in actions:
         task = str(action.request.get("task") or action.source_content)
         lines.append(f"- {task}（{action.type}，{action.status}）")
@@ -182,7 +182,7 @@ def _format_running_actions(actions: list[ActionRecord]) -> str:
 
 
 def _format_perception_cues(cues: list[str]) -> str:
-    lines = ["\n## 好像有一阵子没有……\n"]
+    lines = ["\n---\n（好像有一阵子没有……）"]
     for cue in cues:
         lines.append(f"- {cue}")
     return "\n".join(lines)
