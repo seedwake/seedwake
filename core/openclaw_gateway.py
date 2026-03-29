@@ -193,6 +193,7 @@ class OpenClawGatewayExecutor:
             headers={
                 "Authorization": f"Bearer {self._gateway_token}",
                 "Content-Type": "application/json",
+                "x-openclaw-scopes": "operator.read, operator.write",
                 "x-openclaw-session-key": session_key,
             },
             method="POST",

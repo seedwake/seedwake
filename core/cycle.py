@@ -1,23 +1,14 @@
 """Single thought-generation cycle: build prompt, call LLM, parse output."""
 
 from core.action import ActionRecord
-from ollama import Client
-
+from core.model_client import ModelClient
 from core.prompt_builder import build_prompt
 from core.stimulus import Stimulus
 from core.thought_parser import Thought, fallback_thought, parse_thoughts
 
 
-def create_client(base_url: str, auth_header: str = "", auth_value: str = "", timeout: float = 300.0) -> Client:
-    """Create an Ollama client with optional auth header."""
-    headers = {}
-    if auth_header and auth_value:
-        headers[auth_header] = auth_value
-    return Client(host=base_url, headers=headers, timeout=timeout)
-
-
 def run_cycle(
-    client: Client,
+    client: ModelClient,
     cycle_id: int,
     identity: dict[str, str],
     recent_thoughts: list[Thought],
@@ -45,15 +36,10 @@ def run_cycle(
     return thoughts
 
 
-def _call_ollama(client: Client, prompt: str, model_config: dict) -> str:
-    response = client.generate(
-        model=model_config["name"],
-        prompt=prompt,
-        options={
-            "num_predict": model_config.get("num_predict", 2048),
-            "num_ctx": model_config.get("num_ctx", 32768),
-            "temperature": model_config.get("temperature", 0.8),
-        },
-        think=False,
-    )
-    return response["response"]
+def _call_generation_model(client: ModelClient, prompt: str, model_config: dict) -> str:
+    return client.generate_text(prompt, model_config)
+
+
+def _call_ollama(client: ModelClient, prompt: str, model_config: dict) -> str:
+    """Backward-compatible alias for older tests and patches."""
+    return _call_generation_model(client, prompt, model_config)

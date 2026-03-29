@@ -8,6 +8,7 @@ from urllib import error
 # noinspection PyProtectedMember
 from core.action import (
     ACTION_REDIS_KEY,
+    ActionPlanner,
     ActionCallbacks,
     ActionManager,
     ActionPlan,
@@ -15,13 +16,15 @@ from core.action import (
     _fallback_plan,
     _native_send_message_plan,
     _plan_delegate_tool_call,
+    _planner_json_messages,
     _planner_tools,
     pop_action_controls,
     push_action_control,
 )
 # noinspection PyProtectedMember
 from core.main import _select_cycle_stimuli
-from core.openclaw_gateway import OpenClawUnavailableError
+from core.model_client import ModelClient
+from core.openclaw_gateway import OpenClawGatewayExecutor, OpenClawUnavailableError
 from core.perception import PerceptionManager
 from core.prompt_builder import build_prompt
 from core.rss import read_news_result, summarize_news_items
@@ -102,6 +105,37 @@ class _UnavailableOpenClawExecutor:
     def execute(self, action):
         self.calls.append(action.action_id)
         raise OpenClawUnavailableError(self._message)
+
+
+class _JsonPlannerClient(ModelClient):
+    provider = "openai_compatible"
+    supports_tool_calls = False
+
+    def __init__(self, content: str):
+        self._content = content
+
+    def generate_text(self, prompt: str, model_config: dict) -> str:
+        _ = prompt, model_config
+        return ""
+
+    def chat(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, object]],
+        tools: list[dict] | None = None,
+        options: dict | None = None,
+    ) -> dict:
+        _ = model, messages, tools, options
+        return {"message": {"content": self._content, "tool_calls": []}}
+
+    def embed_text(self, text: str, model: str) -> list[float]:
+        _ = text, model
+        return [0.0]
+
+    def embed_texts(self, texts: list[str], model: str) -> list[list[float]]:
+        _ = model
+        return [[0.0] for _ in texts]
 
 
 def _news_result(
@@ -1620,7 +1654,7 @@ class ActionManagerTests(unittest.TestCase):
                             action_request={"type": "send_message", "params": 'chat_id:"42", reply_to:"102", message:"收到"'},
                         )
                     ])
-            manager.shutdown()
+                    self.assertTrue(manager.shutdown_with_timeout(1.0))
         finally:
             manager.shutdown()
 
@@ -2015,6 +2049,129 @@ class ActionManagerTests(unittest.TestCase):
         stimulus = queue.pop_many(limit=1)[0]
         self.assertEqual(stimulus.type, "action_result")
         self.assertIn("管理员拒绝执行", stimulus.content)
+
+
+class PlannerProviderTests(unittest.TestCase):
+    def test_json_planner_prompt_includes_complete_tool_contracts(self) -> None:
+        messages = _planner_json_messages(
+            _make_thought(action_request={"type": "send_message", "params": 'message:"我在"'}),
+            conversation_source="telegram:1",
+        )
+
+        system_prompt = messages[0]["content"]
+        self.assertIn('{"tool":"<tool_name>","arguments":{...}}', system_prompt)
+        self.assertIn("delegate_openclaw", system_prompt)
+        self.assertIn("action_type（必填", system_prompt)
+        self.assertIn("task（必填", system_prompt)
+        self.assertIn("native_send_message", system_prompt)
+        self.assertIn("message（可选", system_prompt)
+        self.assertIn("target（可选", system_prompt)
+        self.assertIn("target_entity（可选", system_prompt)
+        self.assertIn("reply_to（可选", system_prompt)
+        self.assertIn("ignore_action", system_prompt)
+        self.assertIn("为什么本轮不执行该动作", system_prompt)
+
+    def test_json_planner_client_can_build_native_plan(self) -> None:
+        planner = ActionPlanner(
+            _JsonPlannerClient('{"tool":"native_get_time","arguments":{"reason":"测试"}}'),
+            {"name": "openclaw/main", "provider": "openclaw"},
+            30,
+            "Tallinn",
+            [],
+            "seedwake-worker",
+            "seedwake-ops",
+        )
+
+        plan = planner.plan(
+            _make_thought(action_request={"type": "time", "params": ""}),
+            conversation_source="telegram:1",
+        )
+
+        assert isinstance(plan, ActionPlan)
+        self.assertEqual(plan.action_type, "get_time")
+        self.assertEqual(plan.executor, "native")
+
+    def test_json_planner_client_accepts_stringified_arguments(self) -> None:
+        planner = ActionPlanner(
+            _JsonPlannerClient(
+                '{"tool":"native_send_message","arguments":"{\\"message\\":\\"我在\\",\\"target\\":\\"telegram:1\\"}"}'
+            ),
+            {"name": "openclaw/main", "provider": "openclaw"},
+            30,
+            "Tallinn",
+            [],
+            "seedwake-worker",
+            "seedwake-ops",
+        )
+
+        plan = planner.plan(
+            _make_thought(action_request={"type": "send_message", "params": 'message:"我在"'}),
+            conversation_source="telegram:9",
+        )
+
+        assert isinstance(plan, ActionPlan)
+        self.assertEqual(plan.action_type, "send_message")
+        self.assertEqual(plan.target_source, "telegram:1")
+        self.assertEqual(plan.message_text, "我在")
+
+    def test_json_planner_client_can_ignore_action_with_reason(self) -> None:
+        planner = ActionPlanner(
+            _JsonPlannerClient('{"tool":"ignore_action","arguments":{"reason":"暂时不需要"}}'),
+            {"name": "openclaw/main", "provider": "openclaw"},
+            30,
+            "Tallinn",
+            [],
+            "seedwake-worker",
+            "seedwake-ops",
+        )
+
+        plan = planner.plan(
+            _make_thought(action_request={"type": "news", "params": ""}),
+            conversation_source=None,
+        )
+
+        self.assertEqual(plan, (None, "暂时不需要"))
+
+
+class OpenClawHttpFallbackTests(unittest.TestCase):
+    def test_http_fallback_adds_scopes_header(self) -> None:
+        executor = OpenClawGatewayExecutor(
+            gateway_url="ws://127.0.0.1:18789",
+            gateway_token="gateway-token",
+            worker_agent_id="seedwake-worker",
+            ops_worker_agent_id="seedwake-ops",
+            session_key_prefix="seedwake:action",
+            http_base_url="http://127.0.0.1:18789",
+            use_http_fallback=True,
+        )
+        requests = []
+
+        class _Action:
+            action_id = "act_C1-1"
+            type = "search"
+            timeout_seconds = 30
+            source_content = "查一下资料"
+            request = {"task": "查一下资料"}
+
+        def fake_urlopen(req, timeout):
+            _ = timeout
+            requests.append(req)
+            response = MagicMock()
+            response.read.return_value = (
+                b'{"output":[{"type":"output_text","text":"{\\"ok\\":true,\\"summary\\":\\"ok\\",\\"data\\":{},\\"error\\":null}"}]}'
+            )
+            cm = MagicMock()
+            cm.__enter__.return_value = response
+            return cm
+
+        with patch("core.openclaw_gateway.request.urlopen", side_effect=fake_urlopen):
+            result = executor._execute_http(_Action(), RuntimeError("ws down"))
+
+        self.assertTrue(result["ok"])
+        self.assertIn(
+            ("X-openclaw-scopes", "operator.read, operator.write"),
+            requests[0].header_items(),
+        )
 
 
 class ActionControlQueueTests(unittest.TestCase):

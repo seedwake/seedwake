@@ -12,9 +12,9 @@ from datetime import datetime, timedelta, timezone
 from threading import Lock
 from urllib import error, request
 
-from ollama import RequestError as OllamaRequestError, ResponseError as OllamaResponseError
 from redis import exceptions as redis_exceptions
 
+from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient
 from core.openclaw_gateway import OpenClawUnavailableError
 from core.perception import collect_system_status_snapshot
 from core.rss import RSS_READ_EXCEPTIONS, read_news_result, summarize_news_items
@@ -62,17 +62,9 @@ ACTION_REDIS_EXCEPTIONS = (
     ValueError,
 )
 PLANNER_EXCEPTIONS = (
-    OllamaRequestError,
-    OllamaResponseError,
-    RuntimeError,
-    ValueError,
-    TypeError,
-    KeyError,
-    json.JSONDecodeError,
+    *MODEL_CLIENT_EXCEPTIONS,
 )
 ACTION_EXECUTION_EXCEPTIONS = (
-    OllamaRequestError,
-    OllamaResponseError,
     *RSS_READ_EXCEPTIONS,
     RuntimeError,
     OSError,
@@ -883,12 +875,12 @@ class ActionManager:
         self._prune_news_seen_redis(now_ts)
 
 
-class OllamaActionPlanner:
-    """Second-pass planner using Ollama chat+tools."""
+class ActionPlanner:
+    """Second-pass planner using the configured chat provider."""
 
     def __init__(
         self,
-        client,
+        client: ModelClient,
         model_config: dict,
         default_timeout_seconds: int,
         default_weather_location: str,
@@ -915,33 +907,51 @@ class OllamaActionPlanner:
         conversation_source: str | None = None,
     ) -> ActionPlan | tuple[None, str | None] | None:
         action_request = thought.action_request or {}
+        if self._client.supports_tool_calls:
+            response = self._client.chat(
+                model=self._model_name,
+                messages=_planner_messages(thought, conversation_source=conversation_source),
+                tools=_planner_tools(),
+                options=self._options,
+            )
+            tool_calls = response["message"].get("tool_calls") or []
+            if tool_calls:
+                tool_name = tool_calls[0]["function"]["name"]
+                logger.info("planner tool call: %s for %s (raw_type=%s)",
+                            tool_name, thought.thought_id, action_request.get("type"))
+                return _plan_from_tool_call(
+                    tool_calls[0]["function"]["name"],
+                    tool_calls[0]["function"]["arguments"],
+                    thought,
+                    self._default_timeout_seconds,
+                    self._default_weather_location,
+                    self._news_feed_urls,
+                    self._worker_agent_id,
+                    self._ops_worker_agent_id,
+                    conversation_source,
+                )
+            logger.info("planner returned no tool call for %s (raw_type=%s), using fallback",
+                        thought.thought_id, action_request.get("type"))
+            return _fallback_plan(
+                raw_action_type=str(action_request.get("type") or "custom"),
+                thought=thought,
+                default_timeout_seconds=self._default_timeout_seconds,
+                default_weather_location=self._default_weather_location,
+                news_feed_urls=self._news_feed_urls,
+                worker_agent_id=self._worker_agent_id,
+                ops_worker_agent_id=self._ops_worker_agent_id,
+                conversation_source=conversation_source,
+            )
+
         response = self._client.chat(
             model=self._model_name,
-            messages=_planner_messages(thought, conversation_source=conversation_source),
-            tools=_planner_tools(),
-            think=False,
-            options=self._options,
+            messages=_planner_json_messages(thought, conversation_source=conversation_source),
+            options={**self._options, "max_tokens": 512},
         )
-        tool_calls = response["message"].get("tool_calls") or []
-        if tool_calls:
-            tool_name = tool_calls[0]["function"]["name"]
-            logger.info("planner tool call: %s for %s (raw_type=%s)",
-                        tool_name, thought.thought_id, action_request.get("type"))
-            return _plan_from_tool_call(
-                tool_calls[0]["function"]["name"],
-                tool_calls[0]["function"]["arguments"],
-                thought,
-                self._default_timeout_seconds,
-                self._default_weather_location,
-                self._news_feed_urls,
-                self._worker_agent_id,
-                self._ops_worker_agent_id,
-                conversation_source,
-            )
-        logger.info("planner returned no tool call for %s (raw_type=%s), using fallback",
+        logger.info("planner json decision for %s (raw_type=%s)",
                     thought.thought_id, action_request.get("type"))
-        return _fallback_plan(
-            raw_action_type=str(action_request.get("type") or "custom"),
+        return _plan_from_json_reply(
+            raw_content=str(response["message"].get("content") or ""),
             thought=thought,
             default_timeout_seconds=self._default_timeout_seconds,
             default_weather_location=self._default_weather_location,
@@ -955,7 +965,7 @@ class OllamaActionPlanner:
 def create_action_manager(
     redis_client,
     stimulus_queue: StimulusQueue,
-    ollama_client,
+    planner_client: ModelClient,
     model_config: dict,
     action_config: dict,
     *,
@@ -966,8 +976,8 @@ def create_action_manager(
     log_callback=None,
     event_callback=None,
 ) -> ActionManager:
-    planner = OllamaActionPlanner(
-        ollama_client,
+    planner = ActionPlanner(
+        planner_client,
         model_config,
         int(action_config.get("default_timeout_seconds", 300)),
         str(action_config.get("default_weather_location", "")),
@@ -1016,23 +1026,183 @@ def _planner_messages(thought: Thought, *, conversation_source: str | None = Non
     return [
         {
             "role": "system",
-            "content": (
-                "我是 Seedwake 的前额叶行动规划器。"
-                "不要执行动作，只能通过一个 tool call 返回结构化决定。"
-                "纯本地、无副作用、一次函数调用即可完成的时间读取、系统状态读取、固定 RSS 新闻读取，以及 Telegram 消息发送可选 native。"
-                "天气、阅读、网页搜索、网页抓取、浏览器和多步探索委托普通 OpenClaw worker。"
-                "系统变更和文件修改委托 OpenClaw ops worker。"
-                "news 只读取配置里的固定 RSS feed 列表，不需要 topic，也不委托 OpenClaw。"
-                "reading 的阅读方向由 Seedwake 自己决定；如果原始 action 带了 query/topic/keywords，就保留它。"
-                "如果 reading 没带参数，也应围绕原始念头内容组织任务，不要把阅读主题交给 OpenClaw 自己决定。"
-                "weather 不写 location 时使用配置中的默认位置；只有想查特定地点时才带 location。"
-                "send_message 只有在真的想发消息时才使用，不需要因为收到对话刺激而强制回复。"
-                "send_message 优先发送到当前 conversation_source；只有明确给了 target/chat_id/source 时才覆盖。"
-                "如果想联系某个已知实体，可以使用 target_entity，例如 person:alice。"
-            ),
+            "content": _planner_system_prompt()
         },
         {"role": "user", "content": user_prompt},
     ]
+
+
+def _planner_json_messages(thought: Thought, *, conversation_source: str | None = None) -> list[dict[str, str]]:
+    action_request = thought.action_request or {}
+    user_prompt = "\n".join([
+        f"thought_id: {thought.thought_id}",
+        f"thought_type: {thought.type}",
+        f"thought_content: {thought.content}",
+        f"raw_action_type: {action_request.get('type', '')}",
+        f"raw_action_params: {action_request.get('params', '')}",
+        f"conversation_source: {conversation_source or ''}",
+    ])
+    return [
+        {
+            "role": "system",
+            "content": _planner_json_system_prompt(),
+        },
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def _planner_system_prompt() -> str:
+    return (
+        "我是 Seedwake 的前额叶行动规划器。"
+        "不要执行动作，只能返回结构化决定。"
+        "纯本地、无副作用、一次函数调用即可完成的时间读取、系统状态读取、固定 RSS 新闻读取，以及 Telegram 消息发送可选 native。"
+        "天气、阅读、网页搜索、网页抓取、浏览器和多步探索委托普通 OpenClaw worker。"
+        "系统变更和文件修改委托 OpenClaw ops worker。"
+        "news 只读取配置里的固定 RSS feed 列表，不需要 topic，也不委托 OpenClaw。"
+        "reading 的阅读方向由 Seedwake 自己决定；如果原始 action 带了 query/topic/keywords，就保留它。"
+        "如果 reading 没带参数，也应围绕原始念头内容组织任务，不要把阅读主题交给 OpenClaw 自己决定。"
+        "weather 不写 location 时使用配置中的默认位置；只有想查特定地点时才带 location。"
+        "send_message 只有在真的想发消息时才使用。"
+        "send_message 优先发送到当前 conversation_source；只有明确给了 target/chat_id/source 时才覆盖。"
+        "如果想联系某个已知实体，可以使用 target_entity，例如 person:alice。"
+    )
+
+
+def _planner_json_system_prompt() -> str:
+    return (
+        _planner_system_prompt()
+        + "返回 JSON only。"
+        + '顶层格式只能是 {"tool":"<tool_name>","arguments":{...}}。'
+        + "不要输出解释、前后缀、markdown、额外字段或多个对象。"
+        + "arguments 必须是 object，不要返回字符串化 JSON。"
+        + "不用的可选字段直接省略，不要编造未列出的字段。"
+        + _planner_json_tool_contract()
+    )
+
+
+def _planner_json_tool_contract() -> str:
+    parts = ["可用 tool 与 arguments 约束如下："]
+    for tool in _planner_tools():
+        function = tool.get("function") or {}
+        if not isinstance(function, dict):
+            continue
+        name = str(function.get("name") or "").strip()
+        if not name:
+            continue
+        description = str(function.get("description") or "").strip()
+        parameters = function.get("parameters") or {}
+        if not isinstance(parameters, dict):
+            parts.append(f"{name}：{description} arguments 返回 {{}}。")
+            continue
+        required_fields = {
+            str(item).strip()
+            for item in (parameters.get("required") or [])
+            if str(item).strip()
+        }
+        properties = parameters.get("properties") or {}
+        if not isinstance(properties, dict) or not properties:
+            parts.append(f"{name}：{description} arguments 返回 {{}}。")
+            continue
+        field_parts: list[str] = []
+        for field_name, schema in properties.items():
+            if not isinstance(schema, dict):
+                continue
+            field_parts.append(_planner_json_field_contract(
+                field_name=str(field_name),
+                schema=schema,
+                required=field_name in required_fields,
+            ))
+        joined_fields = "；".join(item for item in field_parts if item)
+        parts.append(f"{name}：{description} arguments 字段：{joined_fields}。")
+    return "".join(parts)
+
+
+def _planner_json_field_contract(*, field_name: str, schema: dict, required: bool) -> str:
+    required_label = "必填" if required else "可选"
+    type_label = str(schema.get("type") or "any").strip()
+    description = str(schema.get("description") or "").strip()
+    enum_values = schema.get("enum")
+    enum_label = ""
+    if isinstance(enum_values, list) and enum_values:
+        enum_items = [str(item).strip() for item in enum_values if str(item).strip()]
+        if enum_items:
+            enum_label = f"，可选值仅限 {', '.join(enum_items)}"
+    detail = f"{field_name}（{required_label}，{type_label}{enum_label}）"
+    if description:
+        return f"{detail}：{description}"
+    return detail
+
+
+def _plan_from_json_reply(
+    *,
+    raw_content: str,
+    thought: Thought,
+    default_timeout_seconds: int,
+    default_weather_location: str,
+    news_feed_urls: list[str],
+    worker_agent_id: str,
+    ops_worker_agent_id: str,
+    conversation_source: str | None,
+) -> ActionPlan | tuple[None, str | None] | None:
+    payload = _parse_planner_json_payload(raw_content)
+    if payload is None:
+        return _fallback_plan(
+            raw_action_type=str((thought.action_request or {}).get("type") or "custom"),
+            thought=thought,
+            default_timeout_seconds=default_timeout_seconds,
+            default_weather_location=default_weather_location,
+            news_feed_urls=news_feed_urls,
+            worker_agent_id=worker_agent_id,
+            ops_worker_agent_id=ops_worker_agent_id,
+            conversation_source=conversation_source,
+        )
+    tool_name = str(payload.get("tool") or "").strip()
+    arguments = _coerce_planner_arguments(payload.get("arguments"))
+    return _plan_from_tool_call(
+        tool_name,
+        arguments,
+        thought,
+        default_timeout_seconds,
+        default_weather_location,
+        news_feed_urls,
+        worker_agent_id,
+        ops_worker_agent_id,
+        conversation_source,
+    )
+
+
+def _parse_planner_json_payload(raw_content: str) -> dict | None:
+    content = raw_content.strip()
+    if not content:
+        return None
+    if content.startswith("```"):
+        lines = content.splitlines()
+        if len(lines) >= 3 and lines[-1].strip() == "```":
+            content = "\n".join(lines[1:-1]).strip()
+            if content.lower().startswith("json"):
+                content = content[4:].strip()
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        logger.warning("planner returned non-json content: %s", raw_content)
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _coerce_planner_arguments(raw_arguments: object) -> dict:
+    if isinstance(raw_arguments, dict):
+        return raw_arguments
+    if not isinstance(raw_arguments, str):
+        return {}
+    content = raw_arguments.strip()
+    if not content:
+        return {}
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        logger.warning("planner returned non-json arguments: %s", raw_arguments)
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _planner_tools() -> list[dict]:
@@ -1046,10 +1216,23 @@ def _planner_tools() -> list[dict]:
                     "type": "object",
                     "required": ["action_type", "task"],
                     "properties": {
-                        "action_type": {"type": "string", "enum": sorted(OPENCLAW_ACTION_TYPES)},
-                        "task": {"type": "string"},
-                        "timeout_seconds": {"type": "integer"},
-                        "reason": {"type": "string"},
+                        "action_type": {
+                            "type": "string",
+                            "enum": sorted(OPENCLAW_ACTION_TYPES),
+                            "description": "委托给 OpenClaw 的动作类型。",
+                        },
+                        "task": {
+                            "type": "string",
+                            "description": "发给 OpenClaw 的具体任务文本，必须写清要做什么和返回要求。",
+                        },
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "description": "本次动作的超时时间；不写则使用默认值。",
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "为什么选择委托这个动作；不写则默认使用当前念头内容。",
+                        },
                     },
                 },
             },
@@ -1062,8 +1245,11 @@ def _planner_tools() -> list[dict]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "reason": {"type": "string"},
-                        "timeout_seconds": {"type": "integer"},
+                        "reason": {"type": "string", "description": "为什么读取时间。"},
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "description": "本次动作的超时时间；不写则使用默认值。",
+                        },
                     },
                 },
             },
@@ -1076,8 +1262,11 @@ def _planner_tools() -> list[dict]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "reason": {"type": "string"},
-                        "timeout_seconds": {"type": "integer"},
+                        "reason": {"type": "string", "description": "为什么读取系统状态。"},
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "description": "本次动作的超时时间；不写则使用默认值。",
+                        },
                     },
                 },
             },
@@ -1090,8 +1279,11 @@ def _planner_tools() -> list[dict]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "reason": {"type": "string"},
-                        "timeout_seconds": {"type": "integer"},
+                        "reason": {"type": "string", "description": "为什么读取新闻。"},
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "description": "本次动作的超时时间；不写则使用默认值。",
+                        },
                     },
                 },
             },
@@ -1107,12 +1299,30 @@ def _planner_tools() -> list[dict]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "message": {"type": "string"},
-                        "target": {"type": "string"},
-                        "target_entity": {"type": "string"},
-                        "reply_to": {"type": "string", "description": "Telegram message_id to reply to (optional)"},
-                        "timeout_seconds": {"type": "integer"},
-                        "reason": {"type": "string"},
+                        "message": {
+                            "type": "string",
+                            "description": "要发送的消息正文。",
+                        },
+                        "target": {
+                            "type": "string",
+                            "description": "显式 Telegram 目标，可写 telegram:<chat_id> 或纯数字 chat_id。",
+                        },
+                        "target_entity": {
+                            "type": "string",
+                            "description": "联系人实体标识，例如 person:alice；用于解析联系人默认渠道。",
+                        },
+                        "reply_to": {
+                            "type": "string",
+                            "description": "要回复的 Telegram message_id；不写则按默认规则处理。",
+                        },
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "description": "本次动作的超时时间；不写则使用默认值。",
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "为什么发送这条消息；不写则默认使用当前念头内容。",
+                        },
                     },
                 },
             },
@@ -1125,7 +1335,10 @@ def _planner_tools() -> list[dict]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "reason": {"type": "string"},
+                        "reason": {
+                            "type": "string",
+                            "description": "为什么本轮不执行该动作；这条原因会回流给主意识。",
+                        },
                     },
                 },
             },

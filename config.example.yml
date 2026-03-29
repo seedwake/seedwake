@@ -5,6 +5,12 @@
 models:
   # Main model for thought generation
   primary:
+    provider: "ollama"   # ollama | openclaw | openai_compatible
+    # supports_tool_calls:
+    #   ollama 默认 true
+    #   openclaw 默认 false
+    #   openai_compatible 默认 true
+    # 如需覆盖 provider 默认能力，可显式设为 true / false
     name: "qwen3.5:27b"
     num_predict: 2048
     num_ctx: 32768
@@ -12,6 +18,7 @@ models:
 
   # Auxiliary model for memory consolidation, sleep tasks, etc. (Phase 2+)
   auxiliary:
+    provider: "ollama"
     name: "qwen3.5:9b"
     num_predict: 1024
     num_ctx: 16384
@@ -19,6 +26,7 @@ models:
 
   # Embedding model for semantic retrieval (Phase 2+)
   embedding:
+    provider: "ollama"   # Usually keep local even when primary uses remote provider
     name: "qwen3-embedding"
 
 short_term_memory:

@@ -1,15 +1,13 @@
-"""Embedding service using Ollama."""
+"""Embedding service using the configured model provider."""
 
-from ollama import Client
+from core.model_client import ModelClient
 
 
-def embed_text(client: Client, text: str, model: str) -> list[float]:
+def embed_text(client: ModelClient, text: str, model: str) -> list[float]:
     """Get embedding vector for a single text."""
-    response = client.embed(model=model, input=text)
-    return list(response.embeddings[0])
+    return client.embed_text(text, model)
 
 
-def embed_texts(client: Client, texts: list[str], model: str) -> list[list[float]]:
+def embed_texts(client: ModelClient, texts: list[str], model: str) -> list[list[float]]:
     """Get embedding vectors for multiple texts."""
-    response = client.embed(model=model, input=texts)
-    return [list(v) for v in response.embeddings]
+    return client.embed_texts(texts, model)

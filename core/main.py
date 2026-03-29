@@ -13,18 +13,18 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ollama import Client, RequestError as OllamaRequestError, ResponseError as OllamaResponseError
 import psycopg
 import redis as redis_lib
 from dotenv import load_dotenv
 
 from core.action import ActionManager, ActionRecord, create_action_manager, pop_action_controls
-from core.cycle import create_client, run_cycle
+from core.cycle import run_cycle
 from core.embedding import embed_text
 from core.logging import resolve_log_path, setup_logging
 from core.memory.identity import load_identity
 from core.memory.long_term import LongTermMemory
 from core.memory.short_term import LATEST_CYCLE_KEY, ShortTermMemory
+from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient, create_model_client
 from core.perception import PerceptionManager
 from core.runtime import connect_redis_from_env, load_yaml_config
 from core.stimulus import Stimulus, StimulusQueue
@@ -41,8 +41,7 @@ C_TYPE = {
 }
 EVENT_CHANNEL = "seedwake:events"
 MAIN_LOOP_EXCEPTIONS = (
-    OllamaRequestError,
-    OllamaResponseError,
+    *MODEL_CLIENT_EXCEPTIONS,
     redis_lib.RedisError,
     psycopg.Error,
     RuntimeError,
@@ -53,8 +52,7 @@ MAIN_LOOP_EXCEPTIONS = (
     json.JSONDecodeError,
 )
 EMBEDDING_EXCEPTIONS = (
-    OllamaRequestError,
-    OllamaResponseError,
+    *MODEL_CLIENT_EXCEPTIONS,
     RuntimeError,
     OSError,
     ValueError,
@@ -89,7 +87,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class EngineRuntime:
-    ollama_client: Client
+    primary_client: ModelClient
+    embedding_client: ModelClient
     stm: ShortTermMemory
     ltm: LongTermMemory
     stimulus_queue: StimulusQueue
@@ -111,32 +110,34 @@ def main() -> None:
     setup_logging(config, component="core")
     log_file = _open_log(args.log, config)
 
-    ollama_client, redis_client, pg_conn = _create_connections(config)
-    runtime, identity = _build_runtime_components(config, log_file, ollama_client, redis_client, pg_conn)
+    primary_client, embedding_client, redis_client, pg_conn = _create_connections(config)
+    runtime, identity = _build_runtime_components(
+        config,
+        log_file,
+        primary_client,
+        embedding_client,
+        redis_client,
+        pg_conn,
+    )
 
     _install_signal_handler(log_file, runtime.action_manager)
-    _emit_startup(log_file, runtime.model_config["name"], runtime.context_window,
+    _emit_startup(log_file, runtime.model_config, runtime.context_window,
                   redis_client, pg_conn)
     _run_engine_loop(log_file, runtime, identity)
 
 
 def _create_connections(config: dict):
-    ollama_timeout = float(
-        config.get("models", {}).get("primary", {}).get("timeout", 300)
-    )
-    ollama_client = create_client(
-        os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
-        os.environ.get("OLLAMA_AUTH_HEADER", ""),
-        os.environ.get("OLLAMA_AUTH_VALUE", ""),
-        timeout=ollama_timeout,
-    )
-    return ollama_client, _connect_redis(), _connect_pg()
+    models_config = config.get("models", {})
+    primary_client = create_model_client(dict(models_config.get("primary") or {}))
+    embedding_client = create_model_client(dict(models_config.get("embedding") or {}))
+    return primary_client, embedding_client, _connect_redis(), _connect_pg()
 
 
 def _build_runtime_components(
     config: dict,
     log_file,
-    ollama_client: Client,
+    primary_client: ModelClient,
+    embedding_client: ModelClient,
     redis_client,
     pg_conn,
 ) -> tuple[EngineRuntime, dict[str, str]]:
@@ -156,7 +157,7 @@ def _build_runtime_components(
     action_manager = create_action_manager(
         redis_client,
         stimulus_queue,
-        ollama_client,
+        primary_client,
         model_config,
         config.get("actions", {}),
         contact_resolver=ltm.resolve_telegram_target_for_entity,
@@ -167,7 +168,8 @@ def _build_runtime_components(
         event_callback=lambda event_type, payload: _publish_event(stm.redis_client, event_type, payload),
     )
     runtime = EngineRuntime(
-        ollama_client=ollama_client,
+        primary_client=primary_client,
+        embedding_client=embedding_client,
         stm=stm,
         ltm=ltm,
         stimulus_queue=stimulus_queue,
@@ -201,9 +203,11 @@ def _perception_config(config: dict) -> dict:
     return perception_config
 
 
-def _emit_startup(log_file, model_name: str, context_window: int, redis_client, pg_conn) -> None:
+def _emit_startup(log_file, model_config: dict, context_window: int, redis_client, pg_conn) -> None:
+    model_name = str(model_config.get("name") or "")
+    provider = str(model_config.get("provider") or "ollama")
     _output(log_file, "Seedwake v0.2 — 心相续引擎启动")
-    _output(log_file, f"模型: {model_name}  上下文窗口: {context_window} 轮")
+    _output(log_file, f"模型: {model_name} [{provider}]  上下文窗口: {context_window} 轮")
     _output(log_file, f"Redis: {'已连接' if redis_client else '未连接（使用内存）'}")
     _output(log_file, f"PostgreSQL: {'已连接' if pg_conn else '未连接（跳过长期记忆）'}")
     _output(log_file, "─" * 60)
@@ -477,12 +481,12 @@ def _execute_cycle(
 ) -> list[Thought]:
     ltm_context = _retrieve_associations(
         runtime.ltm,
-        runtime.ollama_client,
+        runtime.embedding_client,
         runtime.stm,
         runtime.embedding_model,
     )
     thoughts = run_cycle(
-        runtime.ollama_client,
+        runtime.primary_client,
         cycle_id,
         identity,
         runtime.stm.get_context(),
@@ -494,7 +498,7 @@ def _execute_cycle(
         perception_cues=perception_cues,
     )
     runtime.stm.append(thoughts)
-    _store_to_ltm(runtime.ltm, runtime.ollama_client, thoughts, runtime.embedding_model, cycle_id)
+    _store_to_ltm(runtime.ltm, runtime.embedding_client, thoughts, runtime.embedding_model, cycle_id)
     runtime.action_manager.submit_from_thoughts(thoughts, stimuli=stimuli)
     return thoughts
 
@@ -523,7 +527,7 @@ def _finish_cycle(log_file, cycle_id: int, stimuli: list[Stimulus], thoughts: li
 
 def _retrieve_associations(
     ltm: LongTermMemory,
-    ollama_client,
+    embedding_client,
     stm: ShortTermMemory,
     embedding_model: str,
 ) -> list[str] | None:
@@ -540,7 +544,7 @@ def _retrieve_associations(
         return None
     anchor = context[-1]
     try:
-        vec = embed_text(ollama_client, anchor.content, embedding_model)
+        vec = embed_text(embedding_client, anchor.content, embedding_model)
     except EMBEDDING_EXCEPTIONS:
         return None
     try:
@@ -556,7 +560,7 @@ def _retrieve_associations(
 
 def _store_to_ltm(
     ltm: LongTermMemory,
-    ollama_client,
+    embedding_client,
     thoughts: list[Thought],
     embedding_model: str,
     cycle_id: int,
@@ -566,7 +570,7 @@ def _store_to_ltm(
         return
     for t in thoughts:
         try:
-            vec = embed_text(ollama_client, t.content, embedding_model)
+            vec = embed_text(embedding_client, t.content, embedding_model)
         except EMBEDDING_EXCEPTIONS:
             continue
         try:
