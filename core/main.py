@@ -364,11 +364,15 @@ def _partition_cycle_stimuli(
 
 def _merge_conversation_stimuli(conversation_group: list[Stimulus]) -> Stimulus:
     first = conversation_group[0]
+    last = conversation_group[-1]
     merged_metadata = dict(first.metadata)
     merged_metadata["merged_count"] = len(conversation_group)
     merged_metadata["merged_stimulus_ids"] = [
         stimulus.stimulus_id for stimulus in conversation_group
     ]
+    latest_message_id = last.metadata.get("telegram_message_id")
+    if latest_message_id is not None:
+        merged_metadata["telegram_message_id"] = latest_message_id
     return Stimulus(
         stimulus_id=first.stimulus_id,
         type=first.type,

@@ -100,6 +100,8 @@ def _make_update(
     message = FakeTelegramMessage(
         text=text,
         reply_text=AsyncMock(),
+        message_id=1001,
+        reply_to_message=None,
     )
     return _as_update(SimpleNamespace(
         effective_user=SimpleNamespace(

@@ -29,6 +29,7 @@ SYSTEM_PROMPT = """\
 - {action:search, query:"关键词"}
 - {action:web_fetch, url:"https://example.com"}
 - {action:send_message, message:"我想说的话"}
+- {action:send_message, message:"针对那条消息的回复", reply_to:"294"}
 - {action:send_message, target:"telegram:123456", message:"发给特定的人"}
 - {action:send_message, target_entity:"person:alice", message:"发给已知实体"}
 - {action:file_modify, path:"文件路径", instruction:"修改要求"}
@@ -127,7 +128,11 @@ def _split_stimuli(stimuli: list[Stimulus]) -> tuple[list[Stimulus], list[Stimul
 def _format_conversations(conversations: list[Stimulus]) -> str:
     lines = ["\n## 有人对我说话了\n"]
     for conv in conversations:
-        lines.append(f"{conv.source} 说：")
+        msg_id = conv.metadata.get("telegram_message_id")
+        if msg_id:
+            lines.append(f"{conv.source}（msg:{msg_id}）说：")
+        else:
+            lines.append(f"{conv.source} 说：")
         lines.append(conv.content)
         lines.append("")
     return "\n".join(lines)

@@ -413,9 +413,27 @@ class StimulusQueueTests(unittest.TestCase):
 
     def test_select_cycle_stimuli_merges_same_source_conversation(self) -> None:
         queue = StimulusQueue(redis_client=None)
-        first = queue.push("conversation", 1, "telegram:1", "你好")
-        queue.push("conversation", 1, "telegram:1", "你在做什么？")
-        queue.push("conversation", 1, "telegram:1", "你是谁？")
+        first = queue.push(
+            "conversation",
+            1,
+            "telegram:1",
+            "你好",
+            metadata={"telegram_message_id": 101},
+        )
+        queue.push(
+            "conversation",
+            1,
+            "telegram:1",
+            "你在做什么？",
+            metadata={"telegram_message_id": 102},
+        )
+        queue.push(
+            "conversation",
+            1,
+            "telegram:1",
+            "你是谁？",
+            metadata={"telegram_message_id": 103},
+        )
 
         selected = _select_cycle_stimuli(queue)
 
@@ -425,6 +443,7 @@ class StimulusQueueTests(unittest.TestCase):
         self.assertEqual(selected[0].content, "你好\n你在做什么？\n你是谁？")
         self.assertEqual(selected[0].metadata["merged_count"], 3)
         self.assertEqual(len(selected[0].metadata["merged_stimulus_ids"]), 3)
+        self.assertEqual(selected[0].metadata["telegram_message_id"], 103)
 
     def test_select_cycle_stimuli_keeps_other_sources_for_later_rounds(self) -> None:
         queue = StimulusQueue(redis_client=None)

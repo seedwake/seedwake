@@ -22,6 +22,7 @@ class ActionRequestPayload(TypedDict):
     target_source: NotRequired[str]
     target_entity: NotRequired[str]
     message_text: NotRequired[str]
+    reply_to_message_id: NotRequired[str]
 
 
 class ActionControl(TypedDict):

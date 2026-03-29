@@ -104,6 +104,7 @@ class ActionPlan:
     target_source: str = ""
     target_entity: str = ""
     message_text: str = ""
+    reply_to_message_id: str = ""
 
 
 @dataclass
@@ -384,10 +385,12 @@ class ActionManager:
                 "delivery_state_unavailable",
                 transport="native",
             )
+        reply_to = str(action.request.get("reply_to_message_id") or "").strip()
         send_error = _send_telegram_message(
             target_source,
             message_text,
             timeout_seconds=action.timeout_seconds,
+            reply_to_message_id=reply_to,
         )
         if send_error:
             self._update_action(action_id, dispatch_started_at=None)
@@ -1080,6 +1083,7 @@ def _planner_tools() -> list[dict]:
                         "message": {"type": "string"},
                         "target": {"type": "string"},
                         "target_entity": {"type": "string"},
+                        "reply_to": {"type": "string", "description": "Telegram message_id to reply to (optional)"},
                         "timeout_seconds": {"type": "integer"},
                         "reason": {"type": "string"},
                     },
@@ -1675,6 +1679,7 @@ def _build_action_request_payload(
     target_source: str = "",
     target_entity: str = "",
     message_text: str = "",
+    reply_to_message_id: str = "",
 ) -> ActionRequestPayload:
     payload: ActionRequestPayload = {
         "task": task,
@@ -1691,6 +1696,8 @@ def _build_action_request_payload(
         payload["target_entity"] = target_entity
     if message_text:
         payload["message_text"] = message_text
+    if reply_to_message_id:
+        payload["reply_to_message_id"] = reply_to_message_id
     return payload
 
 
@@ -1709,6 +1716,7 @@ def _action_from_plan(
         target_source=plan.target_source or str(conversation_source or "").strip(),
         target_entity=plan.target_entity,
         message_text=plan.message_text,
+        reply_to_message_id=plan.reply_to_message_id,
     )
     return ActionRecord(
         action_id=f"act_{thought.thought_id}",
@@ -1755,10 +1763,12 @@ def _native_send_message_plan(
     explicit_message: str = "",
     explicit_target: str = "",
     explicit_target_entity: str = "",
+    explicit_reply_to: str = "",
 ) -> ActionPlan:
     message_text = explicit_message or _build_send_message_text(raw_params, thought)
     target_source = _normalize_telegram_target(explicit_target) or _build_send_message_target(raw_params)
     target_entity = explicit_target_entity or _build_send_message_target_entity(raw_params)
+    reply_to = explicit_reply_to or _extract_action_first_param(raw_params, "reply_to") or ""
     if not target_source and not target_entity:
         target_source = str(conversation_source or "").strip()
     target_label = target_source or target_entity or "当前 Telegram 对话"
@@ -1772,6 +1782,7 @@ def _native_send_message_plan(
         target_source=target_source,
         target_entity=target_entity,
         message_text=message_text,
+        reply_to_message_id=reply_to,
     )
 
 
@@ -1806,6 +1817,7 @@ def _plan_native_tool_call(
         explicit_message=str(arguments.get("message") or "").strip(),
         explicit_target=str(arguments.get("target") or "").strip(),
         explicit_target_entity=str(arguments.get("target_entity") or "").strip(),
+        explicit_reply_to=str(arguments.get("reply_to") or "").strip(),
     )
 
 
@@ -1919,17 +1931,26 @@ def _strip_action_marker(content: str) -> str:
     return ACTION_MARKER_PATTERN.sub("", content).strip()
 
 
-def _send_telegram_message(target_source: str, message_text: str, *, timeout_seconds: int) -> str | None:
+def _send_telegram_message(
+    target_source: str,
+    message_text: str,
+    *,
+    timeout_seconds: int,
+    reply_to_message_id: str = "",
+) -> str | None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         return "telegram_token_missing"
     chat_id = _telegram_chat_id_from_source(target_source)
     if chat_id is None:
         return "invalid_telegram_target"
-    body = json.dumps({
+    body_dict: dict[str, object] = {
         "chat_id": chat_id,
         "text": message_text,
-    }).encode("utf-8")
+    }
+    if reply_to_message_id.strip().isdigit():
+        body_dict["reply_parameters"] = {"message_id": int(reply_to_message_id)}
+    body = json.dumps(body_dict).encode("utf-8")
     req = request.Request(
         url=f"https://api.telegram.org/bot{token}/sendMessage",
         data=body,

@@ -198,17 +198,19 @@ async def _handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
     text = str(message.text or "").strip()
     if not text:
         return
+    content = _build_conversation_content(message, text)
     queue = StimulusQueue(redis_client)
     queue.push(
         "conversation",
         1,
         f"telegram:{user['chat_id']}",
-        text,
+        content,
         metadata={
             "telegram_user_id": user["user_id"],
             "telegram_chat_id": user["chat_id"],
             "telegram_username": user["username"],
             "telegram_full_name": user["full_name"],
+            "telegram_message_id": message.message_id,
         },
     )
     if not queue.redis_available:
@@ -446,6 +448,17 @@ def _ensure_redis_client(application: Application):
 
 def _mark_redis_unavailable(application: Application) -> None:
     application.bot_data["redis"] = None
+
+
+def _build_conversation_content(message, text: str) -> str:
+    reply = getattr(message, "reply_to_message", None)
+    if reply is None:
+        return text
+    quoted_text = str(getattr(reply, "text", "") or "").strip()
+    if not quoted_text:
+        return text
+    quoted_preview = quoted_text[:200] + "..." if len(quoted_text) > 200 else quoted_text
+    return f"（引用：{quoted_preview}）\n{text}"
 
 
 def _read_env(name: str) -> str:
