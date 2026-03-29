@@ -1,8 +1,15 @@
+import json
+import io
 import unittest
 from unittest.mock import MagicMock, patch
 
 from core.cycle import run_cycle
-from core.model_client import create_model_client
+from core.model_client import (
+    OPENAI_COMPAT_GENERATE_SYSTEM_PROMPT,
+    OPENAI_COMPAT_GENERATE_USER_GUARD,
+    OPENAI_COMPAT_GENERATE_USER_MARKER,
+    create_model_client,
+)
 from core.thought_parser import fallback_thought, parse_thoughts
 
 
@@ -103,6 +110,26 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(len(thoughts), 3)
         self.assertEqual([t.thought_id for t in thoughts], ["C4-1", "C4-2", "C4-3"])
 
+    @patch("core.cycle._call_ollama", return_value="[思考] a\n[意图] b\n[反应] c\n")
+    def test_run_cycle_writes_final_prompt_to_prompt_log(self, _) -> None:
+        prompt_log = io.StringIO()
+
+        run_cycle(
+            MagicMock(),
+            cycle_id=4,
+            identity={"self_description": "我", "core_goals": "学", "self_understanding": "知"},
+            recent_thoughts=[],
+            context_window=30,
+            model_config={"name": "test-model"},
+            prompt_log_file=prompt_log,
+        )
+
+        logged_prompt = prompt_log.getvalue()
+        self.assertIn("PROMPT C4", logged_prompt)
+        self.assertIn("🔥" * 8, logged_prompt)
+        self.assertIn("我是 Seedwake", logged_prompt)
+        self.assertIn("--- 第 4 轮 ---", logged_prompt)
+
     @patch("core.cycle._call_ollama", return_value="无法解析的输出")
     def test_run_cycle_fallback_on_unparseable(self, _) -> None:
         mock_client = MagicMock()
@@ -197,6 +224,11 @@ class ModelClientTests(unittest.TestCase):
         self.assertEqual(text, "[思考] a\n[意图] b\n[反应] c")
         self.assertEqual(requests[0].full_url, "https://api.example.com/v1/chat/completions")
         self.assertEqual(requests[0].get_header("Authorization"), "Bearer secret")
+        payload = json.loads(requests[0].data.decode("utf-8"))
+        self.assertEqual(payload["messages"][1]["content"], OPENAI_COMPAT_GENERATE_USER_MARKER)
+        self.assertIn(OPENAI_COMPAT_GENERATE_SYSTEM_PROMPT, payload["messages"][0]["content"])
+        self.assertIn(OPENAI_COMPAT_GENERATE_USER_GUARD, payload["messages"][0]["content"])
+        self.assertIn("prompt-body", payload["messages"][0]["content"])
 
     def test_openclaw_provider_adds_scopes_header(self) -> None:
         requests = []

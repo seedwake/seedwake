@@ -548,6 +548,19 @@ class StimulusQueueTests(unittest.TestCase):
         self.assertEqual(len(second_round), 1)
         self.assertEqual(second_round[0].source, "telegram:2")
 
+    def test_select_cycle_stimuli_drops_background_passive_stimuli_during_conversation(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        queue.push("conversation", 1, "telegram:1", "我之前问你最近有什么新闻？")
+        queue.push("system_status", 4, "system:status", "1 分钟负载 0.71 / CPU 32；磁盘 20%；内存 22%")
+        queue.push("time", 4, "system:clock", "现在是晚上")
+
+        selected = _select_cycle_stimuli(queue)
+        next_round = _select_cycle_stimuli(queue)
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].type, "conversation")
+        self.assertEqual(next_round, [])
+
 
 class PromptBuilderPhase3Tests(unittest.TestCase):
     def test_prompt_includes_stimuli_and_running_actions(self) -> None:
@@ -573,6 +586,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         self.assertIn("说：", prompt)
         self.assertIn("你好", prompt)
+        self.assertIn("如果我决定回应，需要用 {action:send_message} 真正把话发出去", prompt)
         self.assertIn("我正在等待的事", prompt)
         self.assertIn("search", prompt)
         self.assertIn("好像有一阵子没有", prompt)
@@ -582,6 +596,8 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("不要发明未列出的 action 名称", prompt)
         self.assertIn("我想说的话", prompt)
         self.assertIn("我自己想读的内容", prompt)
+        self.assertIn("这种回应必须外化成 {action:send_message, ...}", prompt)
+        self.assertIn("对话是前景，时间感和身体感觉只是背景", prompt)
         self.assertNotIn("你想发出的内容", prompt)
 
 

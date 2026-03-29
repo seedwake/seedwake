@@ -18,6 +18,12 @@ OPENAI_COMPAT_GENERATE_SYSTEM_PROMPT = (
     "我是 Seedwake 的念头流本身。"
     "阅读完整的提示后，只输出念头流，不解释、不总结、不加 markdown 围栏。"
 )
+OPENAI_COMPAT_GENERATE_USER_MARKER = "\u200b"
+OPENAI_COMPAT_GENERATE_USER_GUARD = (
+    "最后一条 user message 只是内部周期唤醒标记，"
+    "不代表有人对我说话，也不是我需要回应的外部刺激。"
+    "不要提及它，也不要把它解释成对话内容。"
+)
 MODEL_CLIENT_EXCEPTIONS = (
     OllamaRequestError,
     OllamaResponseError,
@@ -139,10 +145,7 @@ class OpenAICompatibleModelClient(ModelClient):
     def generate_text(self, prompt: str, model_config: dict) -> str:
         response = self.chat(
             model=model_config["name"],
-            messages=[
-                {"role": "system", "content": OPENAI_COMPAT_GENERATE_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
+            messages=_openai_generate_messages(prompt),
             options={
                 "temperature": model_config.get("temperature", 0.8),
                 "max_tokens": model_config.get("num_predict", 2048),
@@ -260,6 +263,20 @@ def create_model_client(model_config: dict) -> ModelClient:
         )
 
     raise RuntimeError(f"不支持的模型 provider：{provider}")
+
+
+def _openai_generate_messages(prompt: str) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": (
+                f"{OPENAI_COMPAT_GENERATE_SYSTEM_PROMPT}\n\n"
+                f"{OPENAI_COMPAT_GENERATE_USER_GUARD}\n\n"
+                f"{prompt}"
+            ),
+        },
+        {"role": "user", "content": OPENAI_COMPAT_GENERATE_USER_MARKER},
+    ]
 
 
 def _normalize_provider(raw_provider: object) -> str:

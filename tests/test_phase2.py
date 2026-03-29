@@ -8,7 +8,13 @@ import psycopg
 import redis as redis_lib
 
 # noinspection PyProtectedMember
-from core.main import _maybe_reconnect_pg, _maybe_reconnect_redis, _next_cycle_id, _open_log
+from core.main import (
+    _maybe_reconnect_pg,
+    _maybe_reconnect_redis,
+    _next_cycle_id,
+    _open_log,
+    _open_prompt_log,
+)
 from core.memory.short_term import LATEST_CYCLE_KEY
 from core.memory.identity import load_identity
 from core.memory.long_term import LongTermMemory
@@ -292,6 +298,18 @@ class CoreLogHandleTests(unittest.TestCase):
             handle.write("ok\n")
             handle.close()
             self.assertTrue(plain_log.exists())
+
+    def test_open_prompt_log_defaults_to_prompt_txt_and_truncates_existing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config = {"runtime": {"logging": {"directory": tmp_dir}}}
+            prompt_path = Path(tmp_dir) / "prompt.txt"
+            prompt_path.write_text("old", encoding="utf-8")
+
+            handle = _open_prompt_log(config, plain_log_path=None)
+
+            handle.write("new\n")
+            handle.close()
+            self.assertEqual(prompt_path.read_text(encoding="utf-8"), "new\n")
 
 
 class CycleCounterTests(unittest.TestCase):

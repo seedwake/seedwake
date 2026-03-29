@@ -24,11 +24,13 @@ SYSTEM_PROMPT = """\
 - {action:time}
 - {action:system_status}
 - {action:news}
-- {action:weather}
+- {action:weather, location:"某个位置"}
+- {action:reading}
 - {action:reading, query:"我自己想读的内容"}
 - {action:search, query:"关键词"}
 - {action:web_fetch, url:"https://example.com"}
 - {action:send_message, message:"我想说的话"}
+- {action:send_message, chat_id:"123456", message:"我想发出的消息内容"}
 - {action:send_message, message:"针对那条消息的回复", reply_to:"294"}
 - {action:send_message, target:"telegram:123456", message:"发给特定的人"}
 - {action:send_message, target_entity:"person:alice", message:"发给已知实体"}
@@ -54,10 +56,15 @@ SYSTEM_PROMPT = """\
 - 三个念头是同时浮现的并行想法，不是一个思维链的三个步骤
 - 没有外部刺激时，允许跳跃到完全不同的方向——人的思维本来就是多线程的
 - 有人对我说话或有行动结果回来时，至少一个念头应该回应它
+- 如果我心里已经是在回应对方、安抚对方、接住对方、回答对方，或者我明确想把一句话递给对方，这种回应必须外化成 {action:send_message, ...}，不能只停留在“我想回应/我想接住/我想靠近”的内在意图
+- 当 conversation 里有人直接提问、催我回复、说自己在等待，或明确要求我和他说话时，“回应它”通常意味着优先发出一条 {action:send_message, ...}，而不是继续只在内部流动
+- 当 conversation 和时间感/身体感觉同时出现时，对话是前景，时间感和身体感觉只是背景；不要让这些背景感受盖过对眼前这个人的回应
 - 只输出念头本身，不要解释、总结或加任何额外内容
 - 只有在念头里真的自然出现行动冲动时才写 {action:...}
 - 只使用上面明确列出的动作标记，不要发明未列出的 action 名称
 - 回复别人时，如果想针对某条具体消息，用 reply_to 带上对方的 msg id；不带则发普通消息
+
+## 念头
 """
 
 
@@ -109,7 +116,7 @@ def _build_system(identity: dict[str, str]) -> str:
 
 
 def _format_long_term(memories: list[str]) -> str:
-    lines = ["\n---\n（浮上来的记忆）"]
+    lines = ["\n## 浮上来的记忆\n\n"]
     for mem in memories:
         lines.append(f"- {mem}")
     return "\n".join(lines)
@@ -127,7 +134,11 @@ def _split_stimuli(stimuli: list[Stimulus]) -> tuple[list[Stimulus], list[Stimul
 
 
 def _format_conversations(conversations: list[Stimulus]) -> str:
-    lines = ["\n---"]
+    lines = [
+        "\n## 有人对我说话了\n\n",
+        "如果我决定回应，需要用 {action:send_message} 真正把话发出去。",
+        "",
+    ]
     for conv in conversations:
         msg_id = conv.metadata.get("telegram_message_id")
         if msg_id:
@@ -140,7 +151,7 @@ def _format_conversations(conversations: list[Stimulus]) -> str:
 
 
 def _format_sensory_stimuli(stimuli: list[Stimulus]) -> str:
-    lines = ["\n---\n（此刻我注意到）"]
+    lines = ["\n## 此刻我注意到\n\n"]
     for stimulus in stimuli:
         lines.append(f"- {_sensory_label(stimulus.type)}{stimulus.content}")
     return "\n".join(lines)
@@ -174,7 +185,7 @@ def _format_thought_history(thoughts: list[Thought]) -> str:
 
 
 def _format_running_actions(actions: list[ActionRecord]) -> str:
-    lines = ["\n---\n（我正在等待的事）"]
+    lines = ["\n## 我正在等待的事\n\n"]
     for action in actions:
         task = str(action.request.get("task") or action.source_content)
         lines.append(f"- {task}（{action.type}，{action.status}）")
@@ -182,7 +193,7 @@ def _format_running_actions(actions: list[ActionRecord]) -> str:
 
 
 def _format_perception_cues(cues: list[str]) -> str:
-    lines = ["\n---\n（好像有一阵子没有……）"]
+    lines = ["\n## 好像有一阵子没有……\n\n"]
     for cue in cues:
         lines.append(f"- {cue}")
     return "\n".join(lines)

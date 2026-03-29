@@ -41,6 +41,7 @@ runtime:
   max_error_retry_delay_seconds: 10.0
   logging:
     directory: "data/logs"
+    prompt_path: "data/logs/prompt.txt"
     level: "INFO"
     rotate_when: "midnight"
     backup_count: 30

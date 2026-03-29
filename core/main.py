@@ -109,6 +109,7 @@ def main() -> None:
     config = _load_config(args.config)
     setup_logging(config, component="core")
     log_file = _open_log(args.log, config)
+    prompt_log_file = _open_prompt_log(config, plain_log_path=args.log)
 
     primary_client, embedding_client, redis_client, pg_conn = _create_connections(config)
     runtime, identity = _build_runtime_components(
@@ -120,10 +121,10 @@ def main() -> None:
         pg_conn,
     )
 
-    _install_signal_handler(log_file, runtime.action_manager)
+    _install_signal_handler(log_file, prompt_log_file, runtime.action_manager)
     _emit_startup(log_file, runtime.model_config, runtime.context_window,
                   redis_client, pg_conn)
-    _run_engine_loop(log_file, runtime, identity)
+    _run_engine_loop(log_file, prompt_log_file, runtime, identity)
 
 
 def _create_connections(config: dict):
@@ -214,7 +215,7 @@ def _emit_startup(log_file, model_config: dict, context_window: int, redis_clien
     _publish_event(redis_client, "status", _status_payload("core_started"))
 
 
-def _run_engine_loop(log_file, runtime: EngineRuntime, identity: dict[str, str]) -> None:
+def _run_engine_loop(log_file, prompt_log_file, runtime: EngineRuntime, identity: dict[str, str]) -> None:
     cycle_id = 0
     current_retry_delay = runtime.retry_delay
     last_redis_reconnect = 0.0
@@ -247,6 +248,7 @@ def _run_engine_loop(log_file, runtime: EngineRuntime, identity: dict[str, str])
                 stimuli,
                 running_actions,
                 perception_cues,
+                prompt_log_file,
             )
         except KeyboardInterrupt:
             raise
@@ -355,6 +357,8 @@ def _partition_cycle_stimuli(
             else:
                 deferred.append(stimulus)
             continue
+        if _is_background_stimulus_during_conversation(stimulus):
+            continue
         if selected_non_conversation is None:
             selected_non_conversation = (index, stimulus)
             continue
@@ -369,6 +373,10 @@ def _partition_cycle_stimuli(
         selected.append(selected_non_conversation)
     selected.sort(key=lambda pair: pair[0])
     return [stimulus for _, stimulus in selected], deferred
+
+
+def _is_background_stimulus_during_conversation(stimulus: Stimulus) -> bool:
+    return stimulus.type in {"time", "system_status"}
 
 
 def _merge_conversation_stimuli(conversation_group: list[Stimulus]) -> Stimulus:
@@ -478,6 +486,7 @@ def _execute_cycle(
     stimuli: list[Stimulus],
     running_actions: list[ActionRecord],
     perception_cues: list[str],
+    prompt_log_file,
 ) -> list[Thought]:
     ltm_context = _retrieve_associations(
         runtime.ltm,
@@ -496,6 +505,7 @@ def _execute_cycle(
         stimuli=stimuli,
         running_actions=running_actions,
         perception_cues=perception_cues,
+        prompt_log_file=prompt_log_file,
     )
     runtime.stm.append(thoughts)
     _store_to_ltm(runtime.ltm, runtime.embedding_client, thoughts, runtime.embedding_model, cycle_id)
@@ -745,13 +755,37 @@ def _open_log(path: str | None, config: dict):
     return target.open("w", encoding="utf-8")
 
 
-def _install_signal_handler(log_file, action_manager) -> None:
+def _open_prompt_log(config: dict, *, plain_log_path: str | None):
+    target = _resolve_prompt_log_path(config)
+    reserved_paths = {resolve_log_path(config, component="core")}
+    if plain_log_path:
+        reserved_paths.add(Path(plain_log_path).expanduser().resolve())
+    if target in reserved_paths:
+        logger.warning("prompt log path %s conflicts with other logs; using sibling prompt.txt", target)
+        target = target.with_name("prompt.txt")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target.open("w", encoding="utf-8")
+
+
+def _resolve_prompt_log_path(config: dict) -> Path:
+    runtime = dict((config or {}).get("runtime") or {})
+    logging_config = dict(runtime.get("logging") or {})
+    configured_path = str(logging_config.get("prompt_path") or "").strip()
+    if configured_path:
+        return Path(configured_path).expanduser().resolve()
+    directory = str(logging_config.get("directory") or "data/logs").strip() or "data/logs"
+    return (Path(directory) / "prompt.txt").expanduser().resolve()
+
+
+def _install_signal_handler(log_file, prompt_log_file, action_manager) -> None:
     def handler(sig, frame):
         _ = sig, frame
         print(f"\n\n{C_DIM}心相续止息。{C_RESET}")
         drained = action_manager.shutdown_with_timeout(wait_timeout_seconds=5.0)
         if log_file:
             log_file.close()
+        if prompt_log_file:
+            prompt_log_file.close()
         if not drained:
             logger.warning("forced exit with running actions still active")
             os._exit(0)
