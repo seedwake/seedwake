@@ -1,5 +1,7 @@
 """Single thought-generation cycle: build prompt, call LLM, parse output."""
 
+from typing import TextIO
+
 from core.action import ActionRecord
 from core.model_client import ModelClient
 from core.prompt_builder import build_prompt
@@ -18,7 +20,7 @@ def run_cycle(
     stimuli: list[Stimulus] | None = None,
     running_actions: list[ActionRecord] | None = None,
     perception_cues: list[str] | None = None,
-    prompt_log_file=None,
+    prompt_log_file: TextIO | None = None,
 ) -> list[Thought]:
     """Execute one cycle and return parsed thoughts."""
     prompt = build_prompt(
@@ -47,7 +49,7 @@ def _call_ollama(client: ModelClient, prompt: str, model_config: dict) -> str:
     return _call_generation_model(client, prompt, model_config)
 
 
-def _write_prompt_log(prompt_log_file, cycle_id: int, prompt: str) -> None:
+def _write_prompt_log(prompt_log_file: TextIO | None, cycle_id: int, prompt: str) -> None:
     if prompt_log_file is None:
         return
     start_banner = "🟢" * 24

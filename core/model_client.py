@@ -42,7 +42,7 @@ MODEL_CLIENT_EXCEPTIONS = (
 class ModelClient:
     """Common provider surface for generation, chat, and embeddings."""
 
-    def __init__(self, *, provider: str, supports_tool_calls: bool):
+    def __init__(self, *, provider: str, supports_tool_calls: bool) -> None:
         self.provider = provider
         self.supports_tool_calls = supports_tool_calls
 
@@ -69,7 +69,13 @@ class ModelClient:
 class OllamaModelClient(ModelClient):
     """Ollama-backed model client."""
 
-    def __init__(self, base_url: str, auth_header: str = "", auth_value: str = "", timeout: float = 300.0):
+    def __init__(
+        self,
+        base_url: str,
+        auth_header: str = "",
+        auth_value: str = "",
+        timeout: float = 300.0,
+    ) -> None:
         super().__init__(provider="ollama", supports_tool_calls=True)
         headers = {}
         if auth_header and auth_value:
@@ -135,7 +141,7 @@ class OpenAICompatibleModelClient(ModelClient):
         api_key: str,
         timeout: float = 300.0,
         extra_headers: dict[str, str] | None = None,
-    ):
+    ) -> None:
         super().__init__(provider=provider, supports_tool_calls=supports_tool_calls)
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key.strip()

@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import RLock
+import redis as redis_lib
 from redis import exceptions as redis_exceptions
 from uuid import uuid4
 
@@ -42,7 +43,7 @@ class Stimulus:
 class StimulusQueue:
     """Priority queue backed by Redis List with in-memory fallback."""
 
-    def __init__(self, redis_client):
+    def __init__(self, redis_client: redis_lib.Redis | None) -> None:
         self._redis = redis_client
         self._deque: deque[Stimulus] = deque()
         self._lock = RLock()
@@ -131,7 +132,7 @@ class StimulusQueue:
         with self._lock:
             return self._redis is not None
 
-    def attach_redis(self, redis_client) -> bool:
+    def attach_redis(self, redis_client: redis_lib.Redis | None) -> bool:
         with self._lock:
             self._redis = redis_client
         try:
@@ -141,7 +142,7 @@ class StimulusQueue:
                 self._redis = None
         return self.redis_available
 
-    def _redis_pop_many(self, redis_client, limit: int) -> list[Stimulus]:
+    def _redis_pop_many(self, redis_client: redis_lib.Redis, limit: int) -> list[Stimulus]:
         raw_items = redis_client.lrange(REDIS_KEY, 0, -1)
         if not raw_items:
             return []
@@ -163,7 +164,7 @@ class StimulusQueue:
         self._drop_shadow_items([stimulus.stimulus_id for stimulus in chosen_items])
         return chosen_items
 
-    def _redis_pop_all(self, redis_client) -> list[Stimulus]:
+    def _redis_pop_all(self, redis_client: redis_lib.Redis) -> list[Stimulus]:
         raw_items = redis_client.lrange(REDIS_KEY, 0, -1)
         if not raw_items:
             return []
@@ -219,7 +220,7 @@ class StimulusQueue:
 
 
 def append_conversation_history(
-    redis_client,
+    redis_client: redis_lib.Redis | None,
     *,
     role: str,
     source: str,
@@ -243,7 +244,10 @@ def append_conversation_history(
     return entry
 
 
-def load_conversation_history(redis_client, limit: int = 100) -> list[ConversationEntry]:
+def load_conversation_history(
+    redis_client: redis_lib.Redis | None,
+    limit: int = 100,
+) -> list[ConversationEntry]:
     if redis_client is None or limit <= 0:
         return []
     raw_items = redis_client.lrange(CONVERSATION_HISTORY_KEY, -limit, -1)

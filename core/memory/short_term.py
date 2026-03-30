@@ -37,10 +37,10 @@ class ShortTermMemory:
 
     def __init__(
         self,
-        redis_client,
+        redis_client: redis_lib.Redis | None,
         context_window: int = 30,
         buffer_size: int = 500,
-    ):
+    ) -> None:
         self._redis = redis_client
         self._context_window = context_window
         self._buffer_size = buffer_size
@@ -96,10 +96,10 @@ class ShortTermMemory:
         return self._redis is not None
 
     @property
-    def redis_client(self):
+    def redis_client(self) -> redis_lib.Redis | None:
         return self._redis
 
-    def attach_redis(self, redis_client) -> bool:
+    def attach_redis(self, redis_client: redis_lib.Redis | None) -> bool:
         """Reattach Redis and repopulate it from the in-memory shadow copy."""
         self._redis = redis_client
         try:
@@ -200,7 +200,7 @@ def _dict_to_thought(d: dict) -> Thought:
     )
 
 
-def _coerce_cycle_id(value) -> int:
+def _coerce_cycle_id(value: object) -> int:
     if isinstance(value, bytes):
         value = value.decode("utf-8")
     if isinstance(value, str) and value.isdigit():

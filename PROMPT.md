@@ -167,3 +167,21 @@ C278 prompt 中出现：
 ## 有人对我说话了
 ## 接下来的念头
 ```
+
+## 24. bot/main.py 中 `_build_conversation_metadata` 的 `message` 参数缺少类型标注
+
+`def _build_conversation_metadata(message, user: AuthorizedTelegramUser)` 的 `message` 参数没有类型标注。应标注为 `telegram.Message`（或对应的 python-telegram-bot 类型）。同文件中 `_telegram_message_preview(message, limit: int = 200)` 也缺少 `message` 的类型标注。
+
+## 25. 全面排查缺失类型标注的函数参数
+
+CLAUDE.md 要求"参数、函数使用类型标注"。需要全面排查所有模块中缺失类型标注的函数参数和返回值，包括但不限于：
+- `bot/main.py` 中多处 `message` 参数
+- `core/cycle.py` 中 `prompt_log_file` 参数
+- `core/main.py` 中 `log_file`、`prompt_log_file` 等文件句柄参数
+- `core/prompt_builder.py` 中新增的各函数
+
+逐个文件检查，补全遗漏的类型标注。
+
+## 26. bot/main.py 中滥用 getattr 访问已知类型的属性
+
+`_build_conversation_metadata` 和 `_telegram_message_preview` 中大量使用 `getattr(message, "reply_to_message", None)`、`getattr(reply, "message_id", None)` 等写法。但如果参数标注了正确的类型（如 `telegram.Message`），这些属性在类型上是确定存在的，不存在时值为 `None`，直接用 `message.reply_to_message` 即可。`getattr` 应留给真正不确定类型的场景，已知类型的属性直接点访问更清晰。需要排查所有模块中是否还有类似的 getattr 滥用。

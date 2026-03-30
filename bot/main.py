@@ -7,7 +7,7 @@ from contextlib import suppress
 
 import redis as redis_lib
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
@@ -62,7 +62,10 @@ def main() -> None:
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
-def create_application(config: dict | None = None, redis_client=None) -> Application:
+def create_application(
+    config: dict | None = None,
+    redis_client: redis_lib.Redis | None = None,
+) -> Application:
     load_dotenv()
     cfg = config or load_yaml_config("config.yml")
     setup_logging(cfg, component="bot")
@@ -283,13 +286,16 @@ async def _start_event_forwarder(application: Application) -> None:
     await asyncio.sleep(0)
 
 
-async def _open_event_pubsub(redis_client):
+async def _open_event_pubsub(redis_client: redis_lib.Redis) -> redis_lib.client.PubSub:
     pubsub = redis_client.pubsub(ignore_subscribe_messages=True)
     await asyncio.to_thread(pubsub.subscribe, EVENT_CHANNEL)
     return pubsub
 
 
-async def _forward_event_messages(application: Application, pubsub) -> None:
+async def _forward_event_messages(
+    application: Application,
+    pubsub: redis_lib.client.PubSub,
+) -> None:
     while True:
         envelope = await _read_event_envelope(pubsub)
         if envelope is None:
@@ -298,7 +304,7 @@ async def _forward_event_messages(application: Application, pubsub) -> None:
         await _dispatch_event(application, envelope)
 
 
-async def _read_event_envelope(pubsub) -> EventEnvelope | None:
+async def _read_event_envelope(pubsub: redis_lib.client.PubSub) -> EventEnvelope | None:
     message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
     if message is None:
         return None
@@ -405,7 +411,7 @@ async def _ensure_private_user(update: Update) -> AuthorizedTelegramUser | None:
     chat = update.effective_chat
     if user is None or chat is None:
         return None
-    if str(getattr(chat, "type", "")) != "private":
+    if chat.type != "private":
         await _reply_text(update, "仅支持私聊。")
         return None
     authorized_user: AuthorizedTelegramUser = {
@@ -431,7 +437,7 @@ async def _reply_text(update: Update, text: str) -> None:
     await message.reply_text(text)
 
 
-def _ensure_redis_client(application: Application):
+def _ensure_redis_client(application: Application) -> redis_lib.Redis | None:
     redis_client = application.bot_data.get("redis")
     if redis_client is not None:
         return redis_client
@@ -448,7 +454,7 @@ def _build_conversation_content(text: str) -> str:
     return text.strip()
 
 
-def _build_conversation_metadata(message, user: AuthorizedTelegramUser) -> JsonObject:
+def _build_conversation_metadata(message: Message, user: AuthorizedTelegramUser) -> JsonObject:
     metadata: JsonObject = {
         "telegram_user_id": user["user_id"],
         "telegram_chat_id": user["chat_id"],
@@ -456,34 +462,34 @@ def _build_conversation_metadata(message, user: AuthorizedTelegramUser) -> JsonO
         "telegram_full_name": user["full_name"],
         "telegram_message_id": message.message_id,
     }
-    reply = getattr(message, "reply_to_message", None)
+    reply = message.reply_to_message
     if reply is None:
         return metadata
-    reply_message_id = getattr(reply, "message_id", None)
+    reply_message_id = reply.message_id
     if isinstance(reply_message_id, int):
         metadata["reply_to_message_id"] = reply_message_id
     reply_preview = _telegram_message_preview(reply)
     if reply_preview:
         metadata["reply_to_preview"] = reply_preview
-    reply_user = getattr(reply, "from_user", None)
+    reply_user = reply.from_user
     if reply_user is None:
         return metadata
     bot_user_id = _telegram_bot_user_id_from_token(_read_env("TELEGRAM_BOT_TOKEN"))
-    reply_user_id = getattr(reply_user, "id", None)
+    reply_user_id = reply_user.id
     if isinstance(reply_user_id, int):
         metadata["reply_to_user_id"] = reply_user_id
         metadata["reply_to_from_self"] = bool(bot_user_id and reply_user_id == bot_user_id)
-    reply_username = str(getattr(reply_user, "username", "") or "").strip()
+    reply_username = str(reply_user.username or "").strip()
     if reply_username:
         metadata["reply_to_username"] = reply_username
-    reply_full_name = str(getattr(reply_user, "full_name", "") or "").strip()
+    reply_full_name = str(reply_user.full_name or "").strip()
     if reply_full_name:
         metadata["reply_to_full_name"] = reply_full_name
     return metadata
 
 
-def _telegram_message_preview(message, limit: int = 200) -> str:
-    text = str(getattr(message, "text", "") or getattr(message, "caption", "") or "").strip()
+def _telegram_message_preview(message: Message, limit: int = 200) -> str:
+    text = str(message.text or message.caption or "").strip()
     if not text:
         return ""
     if len(text) <= limit:
@@ -505,13 +511,13 @@ def _read_env(name: str) -> str:
     return os.environ.get(name, "")
 
 
-def _decode_pubsub_value(value) -> str:
+def _decode_pubsub_value(value: object) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8")
     return str(value or "")
 
 
-def _load_actions(redis_client) -> list[JsonObject]:
+def _load_actions(redis_client: redis_lib.Redis | None) -> list[JsonObject]:
     if redis_client is None:
         return []
     try:
@@ -525,7 +531,7 @@ async def _safe_send_message(
     *,
     chat_id: int,
     text: str,
-    reply_markup=None,
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> bool:
     try:
         await application.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)

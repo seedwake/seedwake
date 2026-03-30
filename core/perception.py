@@ -34,13 +34,16 @@ class PerceptionConfig:
 class PerceptionManager:
     """Tracks passive sensing cadence and proactive perception opportunities."""
 
-    def __init__(self, config: PerceptionConfig):
+    def __init__(self, config: PerceptionConfig) -> None:
         self._config = config
         self._last_seen_cycle: dict[str, int] = {}
         self._last_cue_cycle: dict[str, int] = {}
 
     @classmethod
-    def from_config(cls, raw_config: dict | None) -> "PerceptionManager":
+    def from_config(
+        cls: type["PerceptionManager"],
+        raw_config: dict | None,
+    ) -> "PerceptionManager":
         cfg = raw_config or {}
         return cls(PerceptionConfig(
             passive_time_interval_cycles=max(1, int(cfg.get("passive_time_interval_cycles", 12))),
@@ -113,7 +116,7 @@ class PerceptionManager:
 
     def observe_stimuli(self, cycle_id: int, stimuli: list[Stimulus]) -> None:
         for stimulus in stimuli:
-            stimulus_type = str(getattr(stimulus, "type", "")).strip()
+            stimulus_type = str(stimulus.type).strip()
             self.observe_types(cycle_id, [stimulus_type])
 
     def observe_types(self, cycle_id: int, stimulus_types: list[str]) -> None:

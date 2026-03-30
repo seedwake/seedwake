@@ -94,7 +94,7 @@ def _build_result(
     ok: bool,
     summary: str,
     data: JsonObject,
-    error_detail,
+    error_detail: object | None,
 ) -> ActionResultEnvelope:
     return {
         "ok": ok,

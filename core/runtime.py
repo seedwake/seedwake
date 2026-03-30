@@ -17,7 +17,7 @@ def load_yaml_config(path: str, *, required: bool = False) -> dict:
         return yaml.safe_load(file) or {}
 
 
-def connect_redis_from_env():
+def connect_redis_from_env() -> redis_lib.Redis | None:
     try:
         client = redis_lib.Redis(
             host=os.environ.get("REDIS_HOST", "localhost"),

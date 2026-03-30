@@ -25,7 +25,7 @@ class LongTermEntry:
 class LongTermMemory:
     """Long-term memory backed by PostgreSQL + pgvector."""
 
-    def __init__(self, pg_conn, retrieval_top_k: int = 5):
+    def __init__(self, pg_conn: psycopg.Connection | None, retrieval_top_k: int = 5) -> None:
         self._conn = pg_conn
         self._top_k = retrieval_top_k
 
@@ -195,7 +195,7 @@ class LongTermMemory:
                 return target
         return None
 
-    def attach_connection(self, pg_conn) -> None:
+    def attach_connection(self, pg_conn: psycopg.Connection | None) -> None:
         self._conn = pg_conn
 
     def disconnect(self) -> None:

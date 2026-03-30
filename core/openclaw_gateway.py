@@ -8,11 +8,15 @@ import os
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib import error, request
 from uuid import uuid4
 
 from ollama import RequestError as OllamaRequestError, ResponseError as OllamaResponseError
 from core.types import ActionResultEnvelope, JsonObject
+
+if TYPE_CHECKING:
+    from core.action import ActionRecord
 
 try:
     from websockets import exceptions as ws_exceptions
@@ -70,7 +74,7 @@ class OpenClawGatewayExecutor:
         http_base_url: str = "",
         use_http_fallback: bool = False,
         device_identity_path: str | None = None,
-    ):
+    ) -> None:
         self._gateway_url = gateway_url.strip()
         self._gateway_token = gateway_token.strip()
         self._worker_agent_id = worker_agent_id.strip()
@@ -80,7 +84,7 @@ class OpenClawGatewayExecutor:
         self._use_http_fallback = use_http_fallback
         self._device_identity_path = device_identity_path or "data/openclaw/device.json"
 
-    def execute(self, action) -> ActionResultEnvelope:
+    def execute(self, action: "ActionRecord") -> ActionResultEnvelope:
         if not self._gateway_url:
             raise OpenClawUnavailableError("OPENCLAW_GATEWAY_URL 未配置")
         if not self._gateway_token:
@@ -96,7 +100,7 @@ class OpenClawGatewayExecutor:
             except OPENCLAW_TRANSPORT_EXCEPTIONS as fallback_exc:
                 raise OpenClawUnavailableError(str(fallback_exc)) from fallback_exc
 
-    async def _execute_ws(self, action) -> ActionResultEnvelope:
+    async def _execute_ws(self, action: "ActionRecord") -> ActionResultEnvelope:
         websockets = _import_websockets()
         identity = _load_or_create_device_identity(self._device_identity_path)
 
@@ -121,7 +125,7 @@ class OpenClawGatewayExecutor:
                 request_id = uuid4().hex
                 worker_agent_id = self._resolve_worker_agent_id(action)
                 session_key = f"agent:{worker_agent_id}:{self._session_key_prefix}:{action.action_id}"
-                timeout_seconds = int(getattr(action, "timeout_seconds", 300))
+                timeout_seconds = int(action.timeout_seconds)
                 await client.send_request(
                     request_id,
                     "agent",
@@ -176,7 +180,7 @@ class OpenClawGatewayExecutor:
             finally:
                 await client.close()
 
-    def _execute_http(self, action, ws_error: Exception) -> ActionResultEnvelope:
+    def _execute_http(self, action: "ActionRecord", ws_error: Exception) -> ActionResultEnvelope:
         if not self._http_base_url:
             raise RuntimeError(f"WS 失败且未配置 HTTP fallback: {ws_error}") from ws_error
 
@@ -200,7 +204,7 @@ class OpenClawGatewayExecutor:
         )
 
         try:
-            with request.urlopen(req, timeout=int(getattr(action, "timeout_seconds", 300)) + 10) as resp:
+            with request.urlopen(req, timeout=int(action.timeout_seconds) + 10) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
         except error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -220,11 +224,11 @@ class OpenClawGatewayExecutor:
         normalized["transport"] = "http"
         return normalized
 
-    def _resolve_worker_agent_id(self, action) -> str:
+    def _resolve_worker_agent_id(self, action: "ActionRecord") -> str:
         request_worker = str(action.request.get("worker_agent_id") or "").strip()
         if request_worker:
             return request_worker
-        if getattr(action, "type", "") in {"system_change", "file_modify"} and self._ops_worker_agent_id:
+        if action.type in {"system_change", "file_modify"} and self._ops_worker_agent_id:
             return self._ops_worker_agent_id
         return self._worker_agent_id
 
@@ -270,7 +274,7 @@ class OpenClawGatewayExecutor:
 
 
 class _GatewayRpcClient:
-    def __init__(self, ws):
+    def __init__(self, ws: object) -> None:
         self._ws = ws
         self._responses: dict[str, asyncio.Queue] = {}
         self._events: dict[str, asyncio.Queue] = {}
@@ -303,7 +307,7 @@ class _GatewayRpcClient:
         frame = await self._recv_from_queue(queue, timeout_seconds)
         return frame
 
-    async def _recv_from_queue(self, queue: asyncio.Queue, timeout_seconds: int):
+    async def _recv_from_queue(self, queue: asyncio.Queue, timeout_seconds: int) -> dict:
         frame = await asyncio.wait_for(queue.get(), timeout_seconds)
         if frame is self._sentinel:
             raise RuntimeError("Gateway 连接已关闭") from self._reader_error
@@ -450,7 +454,7 @@ def _build_gateway_result(
     ok: bool,
     summary: str,
     data: JsonObject,
-    error_detail,
+    error_detail: object | None,
     run_id: str | None,
     session_key: str | None,
     transport: str,
@@ -478,7 +482,7 @@ def _format_gateway_error(frame: dict) -> str:
     return "OpenClaw Gateway 请求失败"
 
 
-def _import_websockets():
+def _import_websockets() -> object:
     try:
         import websockets
     except ImportError as exc:
@@ -488,7 +492,7 @@ def _import_websockets():
     return websockets
 
 
-def _import_crypto():
+def _import_crypto() -> tuple[object, object]:
     try:
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric import ed25519

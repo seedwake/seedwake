@@ -165,21 +165,21 @@ class ActionManager:
 
     def __init__(
         self,
-        redis_client,
+        redis_client: object | None,
         stimulus_queue: StimulusQueue,
-        planner,
-        openclaw_executor,
+        planner: "ActionPlanner",
+        openclaw_executor: object,
         *,
         auto_execute: list[str],
         require_confirmation: list[str],
         forbidden: list[str],
         news_seen_ttl_hours: int = 720,
         news_seen_max_items: int = 5000,
-        news_reader=read_news_result,
-        contact_resolver=None,
+        news_reader: Callable[..., ActionResultEnvelope] = read_news_result,
+        contact_resolver: Callable[[str], str | None] | None = None,
         openclaw_retry_delay_seconds: float = 5.0,
         callbacks: ActionCallbacks | None = None,
-    ):
+    ) -> None:
         self._redis = redis_client
         self._stimulus_queue = stimulus_queue
         self._planner = planner
@@ -305,7 +305,7 @@ class ActionManager:
             self._perception_observations.clear()
         return observations
 
-    def attach_redis(self, redis_client) -> bool:
+    def attach_redis(self, redis_client: object | None) -> bool:
         self._redis = redis_client
         try:
             self._restore_from_redis()
@@ -829,7 +829,7 @@ class ActionManager:
         with self._lock:
             return self._actions[action_id]
 
-    def _update_action(self, action_id: str, **changes) -> ActionRecord:
+    def _update_action(self, action_id: str, **changes: object) -> ActionRecord:
         with self._lock:
             action = self._actions[action_id]
             for key, value in changes.items():
@@ -920,7 +920,7 @@ class ActionPlanner:
         news_feed_urls: list[str],
         worker_agent_id: str,
         ops_worker_agent_id: str,
-    ):
+    ) -> None:
         self._client = client
         self._model_name = model_config["name"]
         self._default_timeout_seconds = default_timeout_seconds
@@ -996,18 +996,18 @@ class ActionPlanner:
 
 
 def create_action_manager(
-    redis_client,
+    redis_client: object | None,
     stimulus_queue: StimulusQueue,
     planner_client: ModelClient,
     model_config: dict,
     action_config: dict,
     *,
-    contact_resolver=None,
+    contact_resolver: Callable[[str], str | None] | None = None,
     news_feed_urls: list[str] | None = None,
     news_seen_ttl_hours: int = 720,
     news_seen_max_items: int = 5000,
-    log_callback=None,
-    event_callback=None,
+    log_callback: Callable[[str], None] | None = None,
+    event_callback: Callable[[str, JsonObject], None] | None = None,
 ) -> ActionManager:
     planner = ActionPlanner(
         planner_client,
@@ -1432,7 +1432,7 @@ def _plan_from_tool_call(
     )
 
 
-def _coerce_planner_result(plan_result) -> tuple[ActionPlan | None, str | None]:
+def _coerce_planner_result(plan_result: object) -> tuple[ActionPlan | None, str | None]:
     if isinstance(plan_result, tuple) and len(plan_result) == 2:
         plan, reason = plan_result
         normalized_reason = str(reason or "").strip() or None
@@ -1506,8 +1506,8 @@ def _fallback_plan(
 def _run_native_action(
     action: ActionRecord,
     *,
-    news_reader=read_news_result,
-    contact_resolver=None,
+    news_reader: Callable[..., ActionResultEnvelope] = read_news_result,
+    contact_resolver: Callable[[str], str | None] | None = None,
 ) -> ActionResultEnvelope:
     if action.type == "get_time":
         now = datetime.now().astimezone()
@@ -1560,7 +1560,7 @@ def _run_native_action(
     raise RuntimeError(f"不支持的 native action: {action.type}")
 
 
-def _clamp_timeout(raw_value, default_timeout_seconds: int) -> int:
+def _clamp_timeout(raw_value: object, default_timeout_seconds: int) -> int:
     if isinstance(raw_value, int):
         return max(1, raw_value)
     return max(1, default_timeout_seconds)
@@ -1762,7 +1762,7 @@ def _build_action_result(
     ok: bool,
     summary: str,
     data: JsonObject,
-    error_detail,
+    error_detail: object | None,
     run_id: str | None,
     session_key: str | None,
     transport: str,
@@ -1782,7 +1782,12 @@ def _build_action_result(
     return result
 
 
-def _failure_result(summary: str, error_detail, *, transport: str) -> ActionResultEnvelope:
+def _failure_result(
+    summary: str,
+    error_detail: object | None,
+    *,
+    transport: str,
+) -> ActionResultEnvelope:
     return _build_action_result(
         ok=False,
         summary=summary,
@@ -1800,7 +1805,7 @@ def _copy_action_result(
     ok: bool | None = None,
     summary: str | None = None,
     data: JsonObject | None = None,
-    error_detail=None,
+    error_detail: object | None = None,
 ) -> ActionResultEnvelope:
     copied_data = _result_data_or_default(result, data)
     copied = _build_action_result(
@@ -1875,7 +1880,7 @@ def _normalize_news_item(item: JsonObject) -> NewsItem:
     }
 
 
-def _stringify_json_field(value) -> str:
+def _stringify_json_field(value: object) -> str:
     return str(value).strip() if value is not None else ""
 
 
@@ -1883,7 +1888,7 @@ def _build_action_request_payload(
     *,
     task: str,
     reason: str,
-    raw_action,
+    raw_action: object,
     news_feed_urls: list[str],
     worker_agent_id: str = "",
     target_source: str = "",
@@ -2214,7 +2219,7 @@ def _telegram_chat_id_from_source(source: str) -> str | None:
 def _prepare_send_message(
     action: ActionRecord,
     *,
-    contact_resolver=None,
+    contact_resolver: Callable[[str], str | None] | None = None,
 ) -> tuple[str, str, str, ActionResultEnvelope | None]:
     target_source = str(action.request.get("target_source") or "").strip()
     target_entity = str(action.request.get("target_entity") or "").strip()
@@ -2248,7 +2253,7 @@ def _prepare_send_message(
     return target_source, target_entity, message_text, None
 
 
-def _coerce_news_feed_urls(value) -> list[str]:
+def _coerce_news_feed_urls(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
@@ -2343,7 +2348,7 @@ def _action_result_succeeded(status: str, result: ActionResultEnvelope) -> bool:
     return status == "succeeded" and bool(result.get("ok", True))
 
 
-def _search_stimulus_content(summary: str, data) -> str:
+def _search_stimulus_content(summary: str, data: object) -> str:
     if not isinstance(data, dict):
         return summary
     raw_results = data.get("results")
@@ -2390,7 +2395,7 @@ def _send_message_success_summary(target_source: str, message_text: str) -> str:
     return f"已成功发送给 {target_source}"
 
 
-def _reading_stimulus_content(summary: str, data) -> str:
+def _reading_stimulus_content(summary: str, data: object) -> str:
     if not isinstance(data, dict):
         return summary
     excerpt, excerpt_truncated = _clip_prompt_text(
@@ -2414,7 +2419,7 @@ NEWS_STIMULUS_MAX_ITEMS = 5
 NEWS_STIMULUS_SUMMARY_MAX_CHARS = 200
 
 
-def _news_stimulus_content(summary: str, data) -> str:
+def _news_stimulus_content(summary: str, data: object) -> str:
     if not isinstance(data, dict):
         return summary
     items = data.get("items")
@@ -2508,7 +2513,7 @@ def _clip_prompt_text(text: str, limit: int) -> tuple[str, bool]:
 
 
 def push_action_control(
-    redis_client,
+    redis_client: object | None,
     action_id: str,
     *,
     approved: bool,
@@ -2531,7 +2536,7 @@ def push_action_control(
     return True
 
 
-def load_action_items(redis_client) -> list[JsonObject]:
+def load_action_items(redis_client: object | None) -> list[JsonObject]:
     if redis_client is None:
         return []
     try:
@@ -2555,7 +2560,7 @@ def load_action_items(redis_client) -> list[JsonObject]:
     return items
 
 
-def pop_action_controls(redis_client, limit: int = 20) -> list[ActionControl]:
+def pop_action_controls(redis_client: object | None, limit: int = 20) -> list[ActionControl]:
     if redis_client is None or limit <= 0:
         return []
     controls = []
@@ -2712,7 +2717,7 @@ def _coerce_action_request_payload(value: JsonObject, source_content: str) -> Ac
     return payload
 
 
-def _coerce_restored_action_result(value) -> ActionResultEnvelope | None:
+def _coerce_restored_action_result(value: object) -> ActionResultEnvelope | None:
     if not isinstance(value, dict):
         return None
     restored_data = _coerce_json_object(value.get("data"))
@@ -2731,7 +2736,7 @@ def _coerce_restored_action_result(value) -> ActionResultEnvelope | None:
     return restored
 
 
-def _coerce_raw_action_request(value) -> RawActionRequest | None:
+def _coerce_raw_action_request(value: object) -> RawActionRequest | None:
     if not isinstance(value, dict):
         return None
     action_type = _stringify_json_field(value.get("type"))
@@ -2745,7 +2750,7 @@ def _coerce_raw_action_request(value) -> RawActionRequest | None:
     return raw_action
 
 
-def _parse_action_datetime(value) -> datetime | None:
+def _parse_action_datetime(value: object) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
@@ -2754,7 +2759,7 @@ def _parse_action_datetime(value) -> datetime | None:
         return None
 
 
-def _coerce_json_object(value) -> JsonObject:
+def _coerce_json_object(value: object) -> JsonObject:
     if not isinstance(value, dict):
         return {}
     return value

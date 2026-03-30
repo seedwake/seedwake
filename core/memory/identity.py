@@ -12,7 +12,10 @@ import psycopg
 logger = logging.getLogger(__name__)
 
 
-def load_identity(pg_conn, bootstrap: dict[str, str]) -> dict[str, str]:
+def load_identity(
+    pg_conn: psycopg.Connection | None,
+    bootstrap: dict[str, str],
+) -> dict[str, str]:
     """Load identity from PostgreSQL, bootstrap if empty, fallback to config.
 
     DB results override bootstrap per-section, but missing sections
@@ -31,7 +34,7 @@ def load_identity(pg_conn, bootstrap: dict[str, str]) -> dict[str, str]:
     return merged
 
 
-def _read_from_db(conn) -> dict[str, str]:
+def _read_from_db(conn: psycopg.Connection) -> dict[str, str]:
     """Read all identity sections. Returns empty dict on any DB error."""
     try:
         with conn.cursor() as cur:
@@ -44,7 +47,7 @@ def _read_from_db(conn) -> dict[str, str]:
         return {}
 
 
-def _bootstrap_to_db(conn, bootstrap: dict[str, str]) -> None:
+def _bootstrap_to_db(conn: psycopg.Connection, bootstrap: dict[str, str]) -> None:
     """Write initial identity from config into PostgreSQL. Silently skips on error."""
     try:
         with conn.cursor() as cur:

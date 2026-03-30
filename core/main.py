@@ -13,6 +13,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TextIO
 
 import psycopg
 import redis as redis_lib
@@ -23,7 +24,7 @@ from core.cycle import run_cycle
 from core.embedding import embed_text
 from core.logging import resolve_log_path, setup_logging
 from core.memory.identity import load_identity
-from core.memory.long_term import LongTermMemory
+from core.memory.long_term import LongTermEntry, LongTermMemory
 from core.memory.short_term import LATEST_CYCLE_KEY, ShortTermMemory
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient, create_model_client
 from core.perception import PerceptionManager
@@ -144,7 +145,9 @@ def main() -> None:
     _run_engine_loop(log_file, prompt_log_file, runtime, identity)
 
 
-def _create_connections(config: dict):
+def _create_connections(
+    config: dict,
+) -> tuple[ModelClient, ModelClient, redis_lib.Redis | None, psycopg.Connection | None]:
     models_config = config.get("models", {})
     primary_client = create_model_client(dict(models_config.get("primary") or {}))
     embedding_client = create_model_client(dict(models_config.get("embedding") or {}))
@@ -153,11 +156,11 @@ def _create_connections(config: dict):
 
 def _build_runtime_components(
     config: dict,
-    log_file,
+    log_file: TextIO | None,
     primary_client: ModelClient,
     embedding_client: ModelClient,
-    redis_client,
-    pg_conn,
+    redis_client: redis_lib.Redis | None,
+    pg_conn: psycopg.Connection | None,
 ) -> tuple[EngineRuntime, dict[str, str]]:
     model_config = config["models"]["primary"]
     embedding_model = config["models"]["embedding"]["name"]
@@ -221,7 +224,13 @@ def _perception_config(config: dict) -> dict:
     return perception_config
 
 
-def _emit_startup(log_file, model_config: dict, context_window: int, redis_client, pg_conn) -> None:
+def _emit_startup(
+    log_file: TextIO | None,
+    model_config: dict,
+    context_window: int,
+    redis_client: redis_lib.Redis | None,
+    pg_conn: psycopg.Connection | None,
+) -> None:
     model_name = str(model_config.get("name") or "")
     provider = str(model_config.get("provider") or "ollama")
     _output(log_file, "Seedwake v0.2 — 心相续引擎启动")
@@ -232,7 +241,12 @@ def _emit_startup(log_file, model_config: dict, context_window: int, redis_clien
     _publish_event(redis_client, "status", _status_payload("core_started"))
 
 
-def _run_engine_loop(log_file, prompt_log_file, runtime: EngineRuntime, identity: dict[str, str]) -> None:
+def _run_engine_loop(
+    log_file: TextIO | None,
+    prompt_log_file: TextIO | None,
+    runtime: EngineRuntime,
+    identity: dict[str, str],
+) -> None:
     cycle_id = 0
     current_retry_delay = runtime.retry_delay
     last_redis_reconnect = 0.0
@@ -299,7 +313,7 @@ def _run_engine_loop(log_file, prompt_log_file, runtime: EngineRuntime, identity
 
 
 def _prepare_cycle(
-    log_file,
+    log_file: TextIO | None,
     cycle_id: int,
     runtime: EngineRuntime,
     identity: dict[str, str],
@@ -443,7 +457,7 @@ def _merged_conversation_message(stimulus: Stimulus) -> dict:
 
 
 def _recover_runtime_services(
-    log_file,
+    log_file: TextIO | None,
     runtime: EngineRuntime,
     identity: dict[str, str],
     bootstrap_identity: dict[str, str],
@@ -507,7 +521,7 @@ def _next_cycle_id(stm: ShortTermMemory, last_cycle_id: int) -> int:
 def _redis_recovered(
     stm: ShortTermMemory,
     stimulus_queue: StimulusQueue,
-    action_manager,
+    action_manager: ActionManager,
     had_redis: bool,
 ) -> bool:
     if not stm.redis_available or stm.redis_client is None:
@@ -526,7 +540,7 @@ def _execute_cycle(
     stimuli: list[Stimulus],
     running_actions: list[ActionRecord],
     perception_cues: list[str],
-    prompt_log_file,
+    prompt_log_file: TextIO | None,
 ) -> list[Thought]:
     recent_thoughts = runtime.stm.get_context()
     ltm_context = _retrieve_associations(
@@ -556,7 +570,7 @@ def _execute_cycle(
 
 
 def _handle_cycle_failure(
-    log_file,
+    log_file: TextIO | None,
     cycle_id: int,
     stimuli: list[Stimulus],
     stimulus_queue: StimulusQueue,
@@ -570,7 +584,12 @@ def _handle_cycle_failure(
     return min(retry_delay * 2, max_retry_delay)
 
 
-def _finish_cycle(log_file, cycle_id: int, stimuli: list[Stimulus], thoughts: list[Thought]) -> None:
+def _finish_cycle(
+    log_file: TextIO | None,
+    cycle_id: int,
+    stimuli: list[Stimulus],
+    thoughts: list[Thought],
+) -> None:
     _print_stimuli(log_file, stimuli)
     _print_cycle(log_file, cycle_id, thoughts)
 
@@ -593,7 +612,7 @@ def _sanitize_cycle_trigger_refs(thoughts: list[Thought], recent_thoughts: list[
 
 def _retrieve_associations(
     ltm: LongTermMemory,
-    embedding_client,
+    embedding_client: ModelClient,
     stm: ShortTermMemory,
     embedding_model: str,
 ) -> list[str] | None:
@@ -630,7 +649,7 @@ def _retrieve_associations(
 
 def _store_to_ltm(
     ltm: LongTermMemory,
-    embedding_client,
+    embedding_client: ModelClient,
     thoughts: list[Thought],
     embedding_model: str,
     cycle_id: int,
@@ -660,7 +679,11 @@ def _store_to_ltm(
             return
 
 
-def _dedupe_ltm_contents(entries, *, limit: int | None = None) -> tuple[list[int], list[str]]:
+def _dedupe_ltm_contents(
+    entries: list[LongTermEntry],
+    *,
+    limit: int | None = None,
+) -> tuple[list[int], list[str]]:
     memory_ids: list[int] = []
     contents: list[str] = []
     seen_contents: set[str] = set()
@@ -677,7 +700,7 @@ def _dedupe_ltm_contents(entries, *, limit: int | None = None) -> tuple[list[int
 
 
 def _ltm_result_limit(ltm: LongTermMemory) -> int:
-    retrieval_top_k = getattr(ltm, "retrieval_top_k", None)
+    retrieval_top_k = ltm.retrieval_top_k
     if not isinstance(retrieval_top_k, int) or retrieval_top_k <= 0:
         return 5
     return retrieval_top_k
@@ -693,7 +716,7 @@ def _sanitize_ltm_content(content: str) -> str:
 
 
 def _maybe_reconnect_redis(
-    log_file,
+    log_file: TextIO | None,
     stm: ShortTermMemory,
     now: float,
     last_attempt: float,
@@ -708,7 +731,7 @@ def _maybe_reconnect_redis(
 
 
 def _maybe_reconnect_pg(
-    log_file,
+    log_file: TextIO | None,
     ltm: LongTermMemory,
     identity: dict[str, str],
     bootstrap_identity: dict[str, str],
@@ -728,12 +751,12 @@ def _maybe_reconnect_pg(
 
 # -- Connections -----------------------------------------------------------
 
-def _connect_redis():
+def _connect_redis() -> redis_lib.Redis | None:
     """Try to connect to Redis using env vars. Returns None on failure."""
     return connect_redis_from_env()
 
 
-def _connect_pg():
+def _connect_pg() -> psycopg.Connection | None:
     """Try to connect to PostgreSQL using env vars. Returns None on failure."""
     db_password = os.environ.get("DB_PASSWORD", "")
     if not db_password:
@@ -753,7 +776,7 @@ def _connect_pg():
 
 # -- Terminal output -------------------------------------------------------
 
-def _print_cycle(log_file, cycle_id: int, thoughts: list[Thought]) -> None:
+def _print_cycle(log_file: TextIO | None, cycle_id: int, thoughts: list[Thought]) -> None:
     print(f"\n{C_DIM}── C{cycle_id} ──{C_RESET}")
     lines = [f"── C{cycle_id} ──"]
     for t in thoughts:
@@ -765,7 +788,7 @@ def _print_cycle(log_file, cycle_id: int, thoughts: list[Thought]) -> None:
     _write_log_message(log_file, "\n".join(lines))
 
 
-def _print_stimuli(log_file, stimuli: list[Stimulus]) -> None:
+def _print_stimuli(log_file: TextIO | None, stimuli: list[Stimulus]) -> None:
     if not stimuli:
         return
 
@@ -788,18 +811,29 @@ def _push_passive_stimuli(stimulus_queue: StimulusQueue, stimuli: list[Perceptio
         )
 
 
-def _output(log_file, text: str) -> None:
+def _output(log_file: TextIO | None, text: str) -> None:
     print(text)
     _write_log_message(log_file, text)
 
 
-def _print_error(log_file, cycle_id: int, error: Exception, retry_delay: float) -> None:
+def _print_error(
+    log_file: TextIO | None,
+    cycle_id: int,
+    error: Exception,
+    retry_delay: float,
+) -> None:
     msg = f"── C{cycle_id} ERROR: {error} (retry in {retry_delay:.1f}s)"
     print(f"\n\033[31m{msg}\033[0m", file=sys.stderr)
     _write_log_message(log_file, msg, level=logging.WARNING, exc_info=True)
 
 
-def _write_log_message(log_file, text: str, *, level: int = logging.INFO, exc_info: bool = False) -> None:
+def _write_log_message(
+    log_file: TextIO | None,
+    text: str,
+    *,
+    level: int = logging.INFO,
+    exc_info: bool = False,
+) -> None:
     logger.log(level, text, exc_info=exc_info)
     if log_file is None:
         return
@@ -807,7 +841,11 @@ def _write_log_message(log_file, text: str, *, level: int = logging.INFO, exc_in
     log_file.flush()
 
 
-def _publish_event(redis_client, event_type: str, payload: EventPayload) -> None:
+def _publish_event(
+    redis_client: redis_lib.Redis | None,
+    event_type: str,
+    payload: EventPayload,
+) -> None:
     if redis_client is None:
         return
     try:
@@ -841,7 +879,7 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _open_log(path: str | None, config: dict):
+def _open_log(path: str | None, config: dict) -> TextIO | None:
     if not path:
         return None
     target = Path(path).expanduser().resolve()
@@ -852,7 +890,7 @@ def _open_log(path: str | None, config: dict):
     return target.open("w", encoding="utf-8")
 
 
-def _open_prompt_log(config: dict, *, plain_log_path: str | None):
+def _open_prompt_log(config: dict, *, plain_log_path: str | None) -> TextIO:
     target = _resolve_prompt_log_path(config)
     reserved_paths = {resolve_log_path(config, component="core")}
     if plain_log_path:
@@ -874,8 +912,12 @@ def _resolve_prompt_log_path(config: dict) -> Path:
     return (Path(directory) / "prompt.txt").expanduser().resolve()
 
 
-def _install_signal_handler(log_file, prompt_log_file, action_manager) -> None:
-    def handler(sig, frame):
+def _install_signal_handler(
+    log_file: TextIO | None,
+    prompt_log_file: TextIO | None,
+    action_manager: ActionManager,
+) -> None:
+    def handler(sig: int, frame: object) -> None:
         _ = sig, frame
         print(f"\n\n{C_DIM}心相续止息。{C_RESET}")
         drained = action_manager.shutdown_with_timeout(wait_timeout_seconds=5.0)
