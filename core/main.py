@@ -20,7 +20,7 @@ import redis as redis_lib
 from dotenv import load_dotenv
 
 from core.action import ActionManager, ActionRecord, create_action_manager, pop_action_controls
-from core.cycle import run_cycle
+from core.cycle import run_cycle, write_prompt_log_block
 from core.embedding import embed_text
 from core.logging import resolve_log_path, setup_logging
 from core.memory.identity import load_identity
@@ -598,38 +598,83 @@ def _execute_cycle(
     perception_cues: list[str],
     prompt_log_file: TextIO | None,
 ) -> list[Thought]:
+    cycle_started_at = time.perf_counter()
+    cycle_status = "failed"
     recent_thoughts = runtime.stm.get_context()
-    ltm_context = _retrieve_associations(
-        runtime.ltm,
-        runtime.embedding_client,
-        runtime.stm,
-        runtime.embedding_model,
-    )
-    recent_conversations = _load_recent_conversations(runtime, stimuli)
-    thoughts = run_cycle(
-        runtime.primary_client,
-        cycle_id,
-        identity,
-        recent_thoughts,
-        runtime.context_window,
-        runtime.model_config,
-        long_term_context=ltm_context,
-        stimuli=stimuli,
-        running_actions=running_actions,
-        perception_cues=perception_cues,
-        recent_conversations=recent_conversations,
-        prompt_log_file=prompt_log_file,
-    )
-    _sanitize_cycle_trigger_refs(thoughts, recent_thoughts)
-    runtime.stm.append(thoughts)
-    _store_to_ltm(runtime.ltm, runtime.embedding_client, thoughts, runtime.embedding_model, cycle_id)
-    runtime.action_manager.submit_from_thoughts(thoughts, stimuli=stimuli)
-    return thoughts
+    try:
+        ltm_started_at = time.perf_counter()
+        ltm_context = _retrieve_associations(
+            runtime.ltm,
+            runtime.embedding_client,
+            runtime.stm,
+            runtime.embedding_model,
+        )
+        logger.info(
+            "cycle C%s association retrieval finished in %.1f ms (count=%d)",
+            cycle_id,
+            _elapsed_ms(ltm_started_at),
+            len(ltm_context or []),
+        )
+        conversations_started_at = time.perf_counter()
+        recent_conversations = _load_recent_conversations(runtime, cycle_id, stimuli, prompt_log_file)
+        logger.info(
+            "cycle C%s recent conversations loaded in %.1f ms (count=%d)",
+            cycle_id,
+            _elapsed_ms(conversations_started_at),
+            len(recent_conversations),
+        )
+        thought_cycle_started_at = time.perf_counter()
+        thoughts = run_cycle(
+            runtime.primary_client,
+            cycle_id,
+            identity,
+            recent_thoughts,
+            runtime.context_window,
+            runtime.model_config,
+            long_term_context=ltm_context,
+            stimuli=stimuli,
+            running_actions=running_actions,
+            perception_cues=perception_cues,
+            recent_conversations=recent_conversations,
+            prompt_log_file=prompt_log_file,
+        )
+        logger.info(
+            "cycle C%s thought generation finished in %.1f ms (count=%d)",
+            cycle_id,
+            _elapsed_ms(thought_cycle_started_at),
+            len(thoughts),
+        )
+        _sanitize_cycle_trigger_refs(thoughts, recent_thoughts)
+        stm_started_at = time.perf_counter()
+        runtime.stm.append(thoughts)
+        logger.info("cycle C%s stm append finished in %.1f ms", cycle_id, _elapsed_ms(stm_started_at))
+        ltm_store_started_at = time.perf_counter()
+        _store_to_ltm(runtime.ltm, runtime.embedding_client, thoughts, runtime.embedding_model, cycle_id)
+        logger.info("cycle C%s ltm store finished in %.1f ms", cycle_id, _elapsed_ms(ltm_store_started_at))
+        action_submit_started_at = time.perf_counter()
+        created_actions = runtime.action_manager.submit_from_thoughts(thoughts, stimuli=stimuli)
+        logger.info(
+            "cycle C%s action submission finished in %.1f ms (created=%d)",
+            cycle_id,
+            _elapsed_ms(action_submit_started_at),
+            len(created_actions),
+        )
+        cycle_status = "ok"
+        return thoughts
+    finally:
+        logger.info(
+            "cycle C%s total execution finished in %.1f ms (status=%s)",
+            cycle_id,
+            _elapsed_ms(cycle_started_at),
+            cycle_status,
+        )
 
 
 def _load_recent_conversations(
     runtime: EngineRuntime,
+    cycle_id: int,
     stimuli: list[Stimulus],
+    prompt_log_file: TextIO | None,
 ) -> list[RecentConversationPrompt]:
     return load_recent_conversations(
         runtime.stm.redis_client,
@@ -638,9 +683,11 @@ def _load_recent_conversations(
         summary_builder=lambda source_name, existing_summary, entries: _summarize_recent_conversation(
             runtime.primary_client,
             runtime.model_config,
+            cycle_id,
             source_name,
             existing_summary,
             entries,
+            prompt_log_file,
         ),
     )
 
@@ -648,29 +695,41 @@ def _load_recent_conversations(
 def _summarize_recent_conversation(
     client: ModelClient,
     model_config: dict,
+    cycle_id: int,
     source_name: str,
     existing_summary: str,
     entries: list[ConversationEntry],
+    prompt_log_file: TextIO | None,
 ) -> str | None:
     existing = str(existing_summary or "").strip()
     transcripts = _recent_conversation_summary_batches(entries, source_name)
     if not transcripts:
         return existing
     current_summary = existing
-    for transcript in transcripts:
+    total_started_at = time.perf_counter()
+    total_batches = len(transcripts)
+    for index, transcript in enumerate(transcripts, start=1):
+        user_prompt = _recent_conversation_summary_request(
+            source_name,
+            current_summary,
+            transcript,
+        )
+        _write_recent_conversation_summary_prompt_log(
+            prompt_log_file,
+            cycle_id,
+            source_name,
+            index,
+            total_batches,
+            RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT,
+            user_prompt,
+        )
+        batch_started_at = time.perf_counter()
         try:
             response = client.chat(
                 model=str(model_config["name"]),
                 messages=[
                     {"role": "system", "content": RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": _recent_conversation_summary_request(
-                            source_name,
-                            current_summary,
-                            transcript,
-                        ),
-                    },
+                    {"role": "user", "content": user_prompt},
                 ],
                 options={"temperature": 0.2, "max_tokens": 180},
             )
@@ -678,11 +737,52 @@ def _summarize_recent_conversation(
             logger.warning("recent conversation summary failed for %s: %s", source_name, exc)
             return None
         summary = _clean_recent_conversation_summary(response["message"].get("content"))
+        logger.info(
+            "cycle C%s recent conversation summary batch %d/%d for %s finished in %.1f ms (input_chars=%d, output_chars=%d)",
+            cycle_id,
+            index,
+            total_batches,
+            source_name,
+            _elapsed_ms(batch_started_at),
+            len(user_prompt),
+            len(summary or ""),
+        )
         if not summary:
             logger.warning("recent conversation summary returned empty text for %s", source_name)
             return None
         current_summary = summary
+    logger.info(
+        "cycle C%s recent conversation summary for %s finished in %.1f ms (batches=%d, output_chars=%d)",
+        cycle_id,
+        source_name,
+        _elapsed_ms(total_started_at),
+        total_batches,
+        len(current_summary),
+    )
     return current_summary
+
+
+def _write_recent_conversation_summary_prompt_log(
+    prompt_log_file: TextIO | None,
+    cycle_id: int,
+    source_name: str,
+    batch_index: int,
+    total_batches: int,
+    system_prompt: str,
+    user_prompt: str,
+) -> None:
+    if prompt_log_file is None:
+        return
+    write_prompt_log_block(
+        prompt_log_file,
+        title=f"SUMMARY PROMPT C{cycle_id} {source_name} B{batch_index}/{total_batches}",
+        prompt=f"[SYSTEM]\n{system_prompt}\n\n[USER]\n{user_prompt}",
+        emoji="🟣",
+    )
+
+
+def _elapsed_ms(started_at: float) -> float:
+    return (time.perf_counter() - started_at) * 1000.0
 
 
 def _handle_cycle_failure(

@@ -4,7 +4,9 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
+import time
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +56,7 @@ Do not rename fields, add sibling fields, or replace the requested shape with a 
 If a requested field is unavailable, use "", [], {}, false, or null as appropriate instead of inventing a new key.
 Do not wrap the JSON in markdown fences.
 """
+logger = logging.getLogger(__name__)
 
 
 class OpenClawUnavailableError(RuntimeError):
@@ -85,20 +88,38 @@ class OpenClawGatewayExecutor:
         self._device_identity_path = device_identity_path or "data/openclaw/device.json"
 
     def execute(self, action: "ActionRecord") -> ActionResultEnvelope:
+        started_at = time.perf_counter()
+        transport = "unavailable"
+        status = "failed"
         if not self._gateway_url:
             raise OpenClawUnavailableError("OPENCLAW_GATEWAY_URL 未配置")
         if not self._gateway_token:
             raise OpenClawUnavailableError("OPENCLAW_GATEWAY_TOKEN 未配置")
 
         try:
-            return asyncio.run(self._execute_ws(action))
+            transport = "ws"
+            result = asyncio.run(self._execute_ws(action))
+            status = _result_status(result)
+            return result
         except OPENCLAW_TRANSPORT_EXCEPTIONS as exc:
             if not self._use_http_fallback:
                 raise OpenClawUnavailableError(str(exc)) from exc
             try:
-                return self._execute_http(action, exc)
+                transport = "http_fallback"
+                result = self._execute_http(action, exc)
+                status = _result_status(result)
+                return result
             except OPENCLAW_TRANSPORT_EXCEPTIONS as fallback_exc:
                 raise OpenClawUnavailableError(str(fallback_exc)) from fallback_exc
+        finally:
+            logger.info(
+                "openclaw action %s [%s] finished in %.1f ms (status=%s, transport=%s)",
+                action.action_id,
+                action.type,
+                _elapsed_ms(started_at),
+                status,
+                transport,
+            )
 
     async def _execute_ws(self, action: "ActionRecord") -> ActionResultEnvelope:
         websockets = _import_websockets()
@@ -608,3 +629,11 @@ def _build_device_auth_payload(
 
 def _base64url_encode(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _elapsed_ms(started_at: float) -> float:
+    return (time.perf_counter() - started_at) * 1000.0
+
+
+def _result_status(result: "ActionResultEnvelope") -> str:
+    return "ok" if bool(result.get("ok", True)) else "failed"

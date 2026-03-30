@@ -2,8 +2,9 @@ import json
 import io
 import unittest
 from unittest.mock import MagicMock, patch
+from urllib import error
 
-from core.cycle import run_cycle
+from core.cycle import run_cycle, write_prompt_log_block
 from core.model_client import (
     OPENAI_COMPAT_GENERATE_SYSTEM_PROMPT,
     OPENAI_COMPAT_GENERATE_USER_GUARD,
@@ -131,6 +132,52 @@ class CycleTests(unittest.TestCase):
         self.assertIn("我是 Seedwake", logged_prompt)
         self.assertIn("--- 第 4 轮 ---", logged_prompt)
 
+    @patch("core.cycle._call_ollama", return_value="[思考] a\n[意图] b\n[反应] c\n")
+    def test_run_cycle_logs_final_openai_generate_request(self, _) -> None:
+        prompt_log = io.StringIO()
+
+        with patch.dict("os.environ", {
+            "OPENAI_COMPAT_BASE_URL": "https://api.example.com",
+            "OPENAI_COMPAT_API_KEY": "secret",
+        }, clear=False):
+            client = create_model_client({
+                "provider": "openai_compatible",
+                "name": "gpt-compat",
+                "timeout": 5,
+            })
+
+        run_cycle(
+            client,
+            cycle_id=4,
+            identity={"self_description": "我", "core_goals": "学", "self_understanding": "知"},
+            recent_thoughts=[],
+            context_window=30,
+            model_config={"name": "gpt-compat"},
+            prompt_log_file=prompt_log,
+        )
+
+        logged_prompt = prompt_log.getvalue()
+        self.assertIn("[SYSTEM]", logged_prompt)
+        self.assertIn(OPENAI_COMPAT_GENERATE_SYSTEM_PROMPT, logged_prompt)
+        self.assertIn(OPENAI_COMPAT_GENERATE_USER_GUARD, logged_prompt)
+        self.assertIn("[USER]\n\\u200b", logged_prompt)
+
+    def test_write_prompt_log_block_supports_distinct_summary_banner(self) -> None:
+        prompt_log = io.StringIO()
+
+        write_prompt_log_block(
+            prompt_log,
+            title="SUMMARY PROMPT C4 Jam B1/1",
+            prompt="[SYSTEM]\n系统提示\n\n[USER]\n用户提示",
+            emoji="🟣",
+        )
+
+        logged_prompt = prompt_log.getvalue()
+        self.assertIn("SUMMARY PROMPT C4 Jam B1/1", logged_prompt)
+        self.assertIn("🟣" * 8, logged_prompt)
+        self.assertIn("[SYSTEM]", logged_prompt)
+        self.assertIn("[USER]", logged_prompt)
+
     @patch("core.cycle._call_ollama", return_value="无法解析的输出")
     def test_run_cycle_fallback_on_unparseable(self, _) -> None:
         mock_client = MagicMock()
@@ -230,6 +277,91 @@ class ModelClientTests(unittest.TestCase):
         self.assertIn(OPENAI_COMPAT_GENERATE_SYSTEM_PROMPT, payload["messages"][0]["content"])
         self.assertIn(OPENAI_COMPAT_GENERATE_USER_GUARD, payload["messages"][0]["content"])
         self.assertIn("prompt-body", payload["messages"][0]["content"])
+
+    def test_openai_compatible_generate_logs_once_without_chat_duplicate(self) -> None:
+        def fake_urlopen(req, timeout):
+            _ = req, timeout
+            response = MagicMock()
+            response.read.return_value = (
+                '{"choices":[{"message":{"content":"[思考] a\\n[意图] b\\n[反应] c"}}]}'.encode("utf-8")
+            )
+            cm = MagicMock()
+            cm.__enter__.return_value = response
+            return cm
+
+        with patch.dict("os.environ", {
+            "OPENAI_COMPAT_BASE_URL": "https://api.example.com",
+            "OPENAI_COMPAT_API_KEY": "secret",
+        }, clear=False):
+            with patch("core.model_client.request.urlopen", side_effect=fake_urlopen):
+                client = create_model_client({
+                    "provider": "openai_compatible",
+                    "name": "gpt-compat",
+                    "timeout": 5,
+                })
+                with self.assertLogs("core.model_client", level="INFO") as logs:
+                    client.generate_text("prompt-body", {
+                        "name": "gpt-compat",
+                        "num_predict": 128,
+                        "temperature": 0.7,
+                    })
+
+        output = "\n".join(logs.output)
+        self.assertIn("model call [openai_compatible/generate] gpt-compat", output)
+        self.assertNotIn("model call [openai_compatible/chat] gpt-compat", output)
+
+    def test_openai_compatible_chat_logs_failed_duration(self) -> None:
+        with patch.dict("os.environ", {
+            "OPENAI_COMPAT_BASE_URL": "https://api.example.com",
+            "OPENAI_COMPAT_API_KEY": "secret",
+        }, clear=False):
+            with patch("core.model_client.request.urlopen", side_effect=error.URLError("boom")):
+                client = create_model_client({
+                    "provider": "openai_compatible",
+                    "name": "gpt-compat",
+                    "timeout": 5,
+                })
+                with self.assertLogs("core.model_client", level="INFO") as logs:
+                    with self.assertRaises(error.URLError):
+                        client.chat(
+                            model="gpt-compat",
+                            messages=[{"role": "user", "content": "hello"}],
+                        )
+
+        output = "\n".join(logs.output)
+        self.assertIn("model call [openai_compatible/chat] gpt-compat", output)
+        self.assertIn("status=failed", output)
+
+    def test_openai_compatible_generate_logs_failed_when_response_shape_is_invalid(self) -> None:
+        def fake_urlopen(req, timeout):
+            _ = req, timeout
+            response = MagicMock()
+            response.read.return_value = b'{"choices":[{}]}'
+            cm = MagicMock()
+            cm.__enter__.return_value = response
+            return cm
+
+        with patch.dict("os.environ", {
+            "OPENAI_COMPAT_BASE_URL": "https://api.example.com",
+            "OPENAI_COMPAT_API_KEY": "secret",
+        }, clear=False):
+            with patch("core.model_client.request.urlopen", side_effect=fake_urlopen):
+                client = create_model_client({
+                    "provider": "openai_compatible",
+                    "name": "gpt-compat",
+                    "timeout": 5,
+                })
+                with self.assertLogs("core.model_client", level="INFO") as logs:
+                    with self.assertRaises(RuntimeError):
+                        client.generate_text("prompt-body", {
+                            "name": "gpt-compat",
+                            "num_predict": 128,
+                            "temperature": 0.7,
+                        })
+
+        output = "\n".join(logs.output)
+        self.assertIn("model call [openai_compatible/generate] gpt-compat", output)
+        self.assertIn("status=failed", output)
 
     def test_openclaw_provider_adds_scopes_header(self) -> None:
         requests = []

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
@@ -363,6 +364,8 @@ class ActionManager:
 
     def _run_action(self, action_id: str) -> None:
         action = self._get_action(action_id)
+        started_at = time.perf_counter()
+        terminal_status = "unknown"
         try:
             self._publish_action_event(action, "running", "执行中")
 
@@ -370,10 +373,17 @@ class ActionManager:
                 result = self._run_native_action(action_id)
             else:
                 result = self._openclaw_executor.execute(action)
+            result = _normalize_action_result(result, action)
+            status = "succeeded" if result.get("ok", True) else "failed"
+            terminal_status = status
+            self._safe_finalize_action(action_id, status=status, result=result)
+            return
         except OpenClawUnavailableError as exc:
+            terminal_status = "deferred"
             self._defer_openclaw_action(action_id, str(exc))
             return
         except TimeoutError:
+            terminal_status = "timeout"
             self._safe_finalize_action(
                 action_id,
                 status="timeout",
@@ -381,6 +391,7 @@ class ActionManager:
             )
             return
         except ACTION_EXECUTION_EXCEPTIONS as exc:
+            terminal_status = "failed"
             self._safe_finalize_action(
                 action_id,
                 status="failed",
@@ -389,13 +400,19 @@ class ActionManager:
             return
         # noinspection PyBroadException
         except Exception as exc:
+            terminal_status = "failed"
             logger.exception("unexpected action worker failure: %s", action_id)
             self._force_fail_action(action_id, f"行动内部错误：{exc}")
             return
-
-        result = _normalize_action_result(result, action)
-        status = "succeeded" if result.get("ok", True) else "failed"
-        self._safe_finalize_action(action_id, status=status, result=result)
+        finally:
+            logger.info(
+                "action %s [%s/%s] finished in %.1f ms (status=%s)",
+                action.action_id,
+                action.type,
+                action.executor,
+                _elapsed_ms(started_at),
+                terminal_status,
+            )
 
     def _run_native_action(self, action_id: str) -> ActionResultEnvelope:
         action = self._get_action(action_id)
@@ -2173,11 +2190,31 @@ def _send_telegram_message(
     timeout_seconds: int,
     reply_to_message_id: str = "",
 ) -> str | None:
+    started_at = time.perf_counter()
+    logger.info(
+        "telegram send started (target=%s, reply_to=%s, chars=%d, timeout=%ds)",
+        target_source,
+        reply_to_message_id or "-",
+        len(message_text),
+        timeout_seconds,
+    )
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
+        logger.info(
+            "telegram send finished in %.1f ms (target=%s, status=%s)",
+            _elapsed_ms(started_at),
+            target_source,
+            "telegram_token_missing",
+        )
         return "telegram_token_missing"
     chat_id = _telegram_chat_id_from_source(target_source)
     if chat_id is None:
+        logger.info(
+            "telegram send finished in %.1f ms (target=%s, status=%s)",
+            _elapsed_ms(started_at),
+            target_source,
+            "invalid_telegram_target",
+        )
         return "invalid_telegram_target"
     body_dict: dict[str, object] = {
         "chat_id": chat_id,
@@ -2196,14 +2233,37 @@ def _send_telegram_message(
         with request.urlopen(req, timeout=max(1, timeout_seconds)) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except error.HTTPError as exc:
+        logger.info(
+            "telegram send finished in %.1f ms (target=%s, status=http_%s)",
+            _elapsed_ms(started_at),
+            target_source,
+            exc.code,
+        )
         return f"http_{exc.code}"
     except TELEGRAM_SEND_EXCEPTIONS as exc:
+        logger.info(
+            "telegram send finished in %.1f ms (target=%s, status=%s)",
+            _elapsed_ms(started_at),
+            target_source,
+            str(exc),
+        )
         return str(exc)
     if not isinstance(payload, dict) or not bool(payload.get("ok")):
         description = ""
         if isinstance(payload, dict):
             description = str(payload.get("description") or "").strip()
+        logger.info(
+            "telegram send finished in %.1f ms (target=%s, status=%s)",
+            _elapsed_ms(started_at),
+            target_source,
+            description or "telegram_send_failed",
+        )
         return description or "telegram_send_failed"
+    logger.info(
+        "telegram send finished in %.1f ms (target=%s, status=ok)",
+        _elapsed_ms(started_at),
+        target_source,
+    )
     return None
 
 
@@ -2763,3 +2823,7 @@ def _coerce_json_object(value: object) -> JsonObject:
     if not isinstance(value, dict):
         return {}
     return value
+
+
+def _elapsed_ms(started_at: float) -> float:
+    return (time.perf_counter() - started_at) * 1000.0

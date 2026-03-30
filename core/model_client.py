@@ -1,7 +1,9 @@
 """Provider-aware model clients for thought generation, planning, and embeddings."""
 
 import json
+import logging
 import os
+import time
 from urllib import error, request
 
 from ollama import Client, RequestError as OllamaRequestError, ResponseError as OllamaResponseError
@@ -37,6 +39,7 @@ MODEL_CLIENT_EXCEPTIONS = (
     KeyError,
     json.JSONDecodeError,
 )
+logger = logging.getLogger(__name__)
 
 
 class ModelClient:
@@ -66,6 +69,12 @@ class ModelClient:
         raise NotImplementedError
 
 
+def build_generation_request_log(client: ModelClient, prompt: str) -> str:
+    if client.provider not in {"openclaw", "openai_compatible"}:
+        return prompt
+    return _format_generation_messages_for_log(_openai_generate_messages(prompt))
+
+
 class OllamaModelClient(ModelClient):
     """Ollama-backed model client."""
 
@@ -83,17 +92,31 @@ class OllamaModelClient(ModelClient):
         self._client = Client(host=base_url, headers=headers, timeout=timeout)
 
     def generate_text(self, prompt: str, model_config: dict) -> str:
-        response = self._client.generate(
-            model=model_config["name"],
-            prompt=prompt,
-            options={
-                "num_predict": model_config.get("num_predict", 2048),
-                "num_ctx": model_config.get("num_ctx", 32768),
-                "temperature": model_config.get("temperature", 0.8),
-            },
-            think=False,
-        )
-        return str(response["response"])
+        started_at = time.perf_counter()
+        status = "failed"
+        try:
+            response = self._client.generate(
+                model=model_config["name"],
+                prompt=prompt,
+                options={
+                    "num_predict": model_config.get("num_predict", 2048),
+                    "num_ctx": model_config.get("num_ctx", 32768),
+                    "temperature": model_config.get("temperature", 0.8),
+                },
+                think=False,
+            )
+            text = str(response["response"])
+            status = "ok"
+            return text
+        finally:
+            _log_model_call(
+                provider=self.provider,
+                operation="generate",
+                model=model_config["name"],
+                started_at=started_at,
+                status=status,
+                detail=f"prompt_chars={len(prompt)}",
+            )
 
     def chat(
         self,
@@ -103,30 +126,73 @@ class OllamaModelClient(ModelClient):
         tools: list[dict] | None = None,
         options: dict | None = None,
     ) -> dict:
-        payload: dict[str, object] = {
-            "model": model,
-            "messages": messages,
-            "think": False,
-        }
-        if tools:
-            payload["tools"] = tools
-        if options:
-            payload["options"] = _normalize_ollama_chat_options(options)
-        response = self._client.chat(**payload)
-        return {
-            "message": {
-                "content": str(response["message"].get("content") or ""),
-                "tool_calls": response["message"].get("tool_calls") or [],
-            },
-        }
+        started_at = time.perf_counter()
+        status = "failed"
+        try:
+            payload: dict[str, object] = {
+                "model": model,
+                "messages": messages,
+                "think": False,
+            }
+            if tools:
+                payload["tools"] = tools
+            if options:
+                payload["options"] = _normalize_ollama_chat_options(options)
+            response = self._client.chat(**payload)
+            message = response["message"]
+            normalized = {
+                "message": {
+                    "content": str(message.get("content") or ""),
+                    "tool_calls": message.get("tool_calls") or [],
+                },
+            }
+            status = "ok"
+            return normalized
+        finally:
+            _log_model_call(
+                provider=self.provider,
+                operation="chat",
+                model=model,
+                started_at=started_at,
+                status=status,
+                detail=f"messages={len(messages)}, tools={len(tools or [])}",
+            )
 
     def embed_text(self, text: str, model: str) -> list[float]:
-        response = self._client.embed(model=model, input=text)
-        return list(response.embeddings[0])
+        started_at = time.perf_counter()
+        status = "failed"
+        try:
+            response = self._client.embed(model=model, input=text)
+            embedding = list(response.embeddings[0])
+            status = "ok"
+            return embedding
+        finally:
+            _log_model_call(
+                provider=self.provider,
+                operation="embed",
+                model=model,
+                started_at=started_at,
+                status=status,
+                detail=f"texts=1, chars={len(text)}",
+            )
 
     def embed_texts(self, texts: list[str], model: str) -> list[list[float]]:
-        response = self._client.embed(model=model, input=texts)
-        return [list(vector) for vector in response.embeddings]
+        started_at = time.perf_counter()
+        status = "failed"
+        try:
+            response = self._client.embed(model=model, input=texts)
+            embeddings = [list(vector) for vector in response.embeddings]
+            status = "ok"
+            return embeddings
+        finally:
+            _log_model_call(
+                provider=self.provider,
+                operation="embed",
+                model=model,
+                started_at=started_at,
+                status=status,
+                detail=f"texts={len(texts)}, chars={sum(len(text) for text in texts)}",
+            )
 
 
 class OpenAICompatibleModelClient(ModelClient):
@@ -149,15 +215,31 @@ class OpenAICompatibleModelClient(ModelClient):
         self._extra_headers = dict(extra_headers or {})
 
     def generate_text(self, prompt: str, model_config: dict) -> str:
-        response = self.chat(
-            model=model_config["name"],
-            messages=_openai_generate_messages(prompt),
-            options={
-                "temperature": model_config.get("temperature", 0.8),
-                "max_tokens": model_config.get("num_predict", 2048),
-            },
-        )
-        return str(response["message"].get("content") or "")
+        started_at = time.perf_counter()
+        status = "failed"
+        try:
+            body = self._chat_completions(
+                model=model_config["name"],
+                messages=_openai_generate_messages(prompt),
+                tools=None,
+                options={
+                    "temperature": model_config.get("temperature", 0.8),
+                    "max_tokens": model_config.get("num_predict", 2048),
+                },
+            )
+            response = _normalize_openai_chat_response(body)
+            text = str(response["message"].get("content") or "")
+            status = "ok"
+            return text
+        finally:
+            _log_model_call(
+                provider=self.provider,
+                operation="generate",
+                model=model_config["name"],
+                started_at=started_at,
+                status=status,
+                detail=f"prompt_chars={len(prompt)}",
+            )
 
     def chat(
         self,
@@ -166,6 +248,73 @@ class OpenAICompatibleModelClient(ModelClient):
         messages: list[dict[str, object]],
         tools: list[dict] | None = None,
         options: dict | None = None,
+    ) -> dict:
+        started_at = time.perf_counter()
+        status = "failed"
+        try:
+            body = self._chat_completions(
+                model=model,
+                messages=messages,
+                tools=tools,
+                options=options,
+            )
+            response = _normalize_openai_chat_response(body)
+            status = "ok"
+            return response
+        finally:
+            _log_model_call(
+                provider=self.provider,
+                operation="chat",
+                model=model,
+                started_at=started_at,
+                status=status,
+                detail=f"messages={len(messages)}, tools={len(tools or [])}",
+            )
+
+    def embed_text(self, text: str, model: str) -> list[float]:
+        return self.embed_texts([text], model)[0]
+
+    def embed_texts(self, texts: list[str], model: str) -> list[list[float]]:
+        started_at = time.perf_counter()
+        status = "failed"
+        try:
+            payload = {
+                "model": model,
+                "input": texts,
+            }
+            body = self._post_json("/v1/embeddings", payload)
+            raw_data = body.get("data")
+            if not isinstance(raw_data, list):
+                raise RuntimeError("embeddings response missing data")
+            embeddings: list[list[float]] = []
+            for item in raw_data:
+                if not isinstance(item, dict):
+                    continue
+                raw_embedding = item.get("embedding")
+                if not isinstance(raw_embedding, list):
+                    continue
+                embeddings.append([float(value) for value in raw_embedding])
+            if len(embeddings) != len(texts):
+                raise RuntimeError("embeddings response count mismatch")
+            status = "ok"
+            return embeddings
+        finally:
+            _log_model_call(
+                provider=self.provider,
+                operation="embed",
+                model=model,
+                started_at=started_at,
+                status=status,
+                detail=f"texts={len(texts)}, chars={sum(len(text) for text in texts)}",
+            )
+
+    def _chat_completions(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, object]],
+        tools: list[dict] | None,
+        options: dict | None,
     ) -> dict:
         payload: dict[str, object] = {
             "model": model,
@@ -180,32 +329,7 @@ class OpenAICompatibleModelClient(ModelClient):
             max_tokens = options.get("max_tokens")
             if max_tokens is not None:
                 payload["max_tokens"] = max_tokens
-        body = self._post_json("/v1/chat/completions", payload)
-        return _normalize_openai_chat_response(body)
-
-    def embed_text(self, text: str, model: str) -> list[float]:
-        return self.embed_texts([text], model)[0]
-
-    def embed_texts(self, texts: list[str], model: str) -> list[list[float]]:
-        payload = {
-            "model": model,
-            "input": texts,
-        }
-        body = self._post_json("/v1/embeddings", payload)
-        raw_data = body.get("data")
-        if not isinstance(raw_data, list):
-            raise RuntimeError("embeddings response missing data")
-        embeddings: list[list[float]] = []
-        for item in raw_data:
-            if not isinstance(item, dict):
-                continue
-            raw_embedding = item.get("embedding")
-            if not isinstance(raw_embedding, list):
-                continue
-            embeddings.append([float(value) for value in raw_embedding])
-        if len(embeddings) != len(texts):
-            raise RuntimeError("embeddings response count mismatch")
-        return embeddings
+        return self._post_json("/v1/chat/completions", payload)
 
     def _post_json(self, path: str, payload: dict[str, object]) -> dict:
         req = request.Request(
@@ -278,6 +402,30 @@ def _normalize_ollama_chat_options(options: dict) -> dict:
     return normalized
 
 
+def _elapsed_ms(started_at: float) -> float:
+    return (time.perf_counter() - started_at) * 1000.0
+
+
+def _log_model_call(
+    *,
+    provider: str,
+    operation: str,
+    model: str,
+    started_at: float,
+    status: str,
+    detail: str,
+) -> None:
+    logger.info(
+        "model call [%s/%s] %s finished in %.1f ms (status=%s, %s)",
+        provider,
+        operation,
+        model,
+        _elapsed_ms(started_at),
+        status,
+        detail,
+    )
+
+
 def _openai_generate_messages(prompt: str) -> list[dict[str, str]]:
     return [
         {
@@ -290,6 +438,21 @@ def _openai_generate_messages(prompt: str) -> list[dict[str, str]]:
         },
         {"role": "user", "content": OPENAI_COMPAT_GENERATE_USER_MARKER},
     ]
+
+
+def _format_generation_messages_for_log(messages: list[dict[str, str]]) -> str:
+    parts: list[str] = []
+    for message in messages:
+        role = str(message.get("role") or "message").upper()
+        content = _generation_log_message_content(str(message.get("content") or ""))
+        parts.append(f"[{role}]\n{content}")
+    return "\n\n".join(parts)
+
+
+def _generation_log_message_content(content: str) -> str:
+    if content == OPENAI_COMPAT_GENERATE_USER_MARKER:
+        return "\\u200b"
+    return content
 
 
 def _normalize_provider(raw_provider: object) -> str:

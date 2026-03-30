@@ -10,6 +10,7 @@ import redis as redis_lib
 
 # noinspection PyProtectedMember
 from core.main import (
+    _execute_cycle,
     _run_engine_loop,
     _maybe_reconnect_pg,
     _maybe_reconnect_redis,
@@ -407,6 +408,40 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(last_attempt, 10.0)
         self.assertTrue(ltm.available)
         mock_load_identity.assert_called_once_with(mock_conn, {"self_description": "配置版本"})
+
+
+class CycleTimingLogTests(unittest.TestCase):
+    @patch("core.main.run_cycle", side_effect=RuntimeError("boom"))
+    def test_execute_cycle_logs_total_duration_on_failure(self, _) -> None:
+        runtime = SimpleNamespace(
+            stm=MagicMock(),
+            ltm=MagicMock(),
+            embedding_client=MagicMock(),
+            embedding_model="embed-model",
+            primary_client=MagicMock(),
+            context_window=30,
+            model_config={"name": "test-model"},
+            action_manager=MagicMock(),
+        )
+        runtime.stm.get_context.return_value = []
+        runtime.stm.redis_client = None
+        runtime.ltm.available = False
+
+        with self.assertLogs("core.main", level="INFO") as logs:
+            with self.assertRaises(RuntimeError):
+                _execute_cycle(
+                    runtime,
+                    cycle_id=42,
+                    identity={"self_description": "我"},
+                    stimuli=[],
+                    running_actions=[],
+                    perception_cues=[],
+                    prompt_log_file=None,
+                )
+
+        output = "\n".join(logs.output)
+        self.assertIn("cycle C42 total execution finished", output)
+        self.assertIn("status=failed", output)
 
 
 class CoreLogHandleTests(unittest.TestCase):

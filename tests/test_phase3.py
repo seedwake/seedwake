@@ -3,7 +3,7 @@ import io
 import unittest
 from email.message import Message
 from threading import Barrier
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from urllib import error
 
 # noinspection PyProtectedMember
@@ -276,7 +276,9 @@ def _submit_send_message_success(
             response = MagicMock()
             response.read.return_value = b'{"ok": true}'
             mock_urlopen.return_value.__enter__.return_value = response
-            return manager.submit_from_thoughts(thoughts, stimuli=stimuli)
+            created = manager.submit_from_thoughts(thoughts, stimuli=stimuli)
+            manager.shutdown_with_timeout(1.0)
+            return created
 
 
 def _build_action_manager(
@@ -1252,12 +1254,14 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         summary = _summarize_recent_conversation(
             client,
             {"name": "openclaw/main"},
+            1,
             "Jam",
             "",
             [
                 {"role": "user", "source": "telegram:1", "content": "你好", "timestamp": "", "stimulus_id": None, "metadata": {}},
                 {"role": "assistant", "source": "telegram:1", "content": "你好，我在。", "timestamp": "", "stimulus_id": None, "metadata": {}},
             ],
+            None,
         )
 
         self.assertEqual(summary, "Jam 先打了个招呼，我回应了。")
@@ -1292,9 +1296,11 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         summary = _summarize_recent_conversation(
             client,
             {"name": "openclaw/main"},
+            1,
             "Jam",
             "",
             entries,
+            None,
         )
 
         self.assertEqual(summary, f"第{client.chat.call_count}段总结。")
@@ -1303,6 +1309,29 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         last_request = client.chat.call_args_list[-1].kwargs["messages"][1]["content"]
         self.assertIn("Jam：第1句", first_request)
         self.assertIn("Jam：第30句", last_request)
+
+    def test_summarize_recent_conversation_writes_summary_prompt_to_prompt_log(self) -> None:
+        client = MagicMock()
+        client.chat.return_value = {"message": {"content": "摘要：Jam 先打了个招呼。"}}
+        prompt_log = io.StringIO()
+
+        summary = _summarize_recent_conversation(
+            client,
+            {"name": "openclaw/main"},
+            12,
+            "Jam",
+            "",
+            [
+                {"role": "user", "source": "telegram:1", "content": "你好", "timestamp": "", "stimulus_id": None, "metadata": {}},
+            ],
+            prompt_log,
+        )
+
+        self.assertEqual(summary, "Jam 先打了个招呼。")
+        logged_prompt = prompt_log.getvalue()
+        self.assertIn("SUMMARY PROMPT C12 Jam B1/1", logged_prompt)
+        self.assertIn("[SYSTEM]", logged_prompt)
+        self.assertIn("[USER]", logged_prompt)
 
     def test_running_send_message_summary_uses_request_not_source_content(self) -> None:
         action = MagicMock()
@@ -2341,6 +2370,7 @@ class ActionManagerTests(unittest.TestCase):
                         [_make_thought(action_request={"type": "send_message", "params": 'message:"我在。"'})],
                         stimuli=[_conversation_stimulus(message_id=103)],
                     )
+                    manager.shutdown_with_timeout(1.0)
             manager.shutdown()
         finally:
             manager.shutdown()
@@ -3102,6 +3132,58 @@ class OpenClawHttpFallbackTests(unittest.TestCase):
             ("X-openclaw-scopes", "operator.read, operator.write"),
             requests[0].header_items(),
         )
+
+    def test_execute_logs_failed_duration_when_ws_transport_fails(self) -> None:
+        executor = OpenClawGatewayExecutor(
+            gateway_url="ws://127.0.0.1:18789",
+            gateway_token="gateway-token",
+            worker_agent_id="seedwake-worker",
+            ops_worker_agent_id="seedwake-ops",
+            session_key_prefix="seedwake:action",
+            use_http_fallback=False,
+        )
+
+        class _Action:
+            action_id = "act_C1-1"
+            type = "reading"
+
+        with patch.object(executor, "_execute_ws", AsyncMock(side_effect=OSError("boom"))):
+            with self.assertLogs("core.openclaw_gateway", level="INFO") as logs:
+                with self.assertRaises(OpenClawUnavailableError):
+                    executor.execute(_Action())
+
+        output = "\n".join(logs.output)
+        self.assertIn("openclaw action act_C1-1 [reading] finished", output)
+        self.assertIn("status=failed", output)
+        self.assertIn("transport=ws", output)
+
+    def test_execute_logs_failed_when_ws_returns_failure_envelope(self) -> None:
+        executor = OpenClawGatewayExecutor(
+            gateway_url="ws://127.0.0.1:18789",
+            gateway_token="gateway-token",
+            worker_agent_id="seedwake-worker",
+            ops_worker_agent_id="seedwake-ops",
+            session_key_prefix="seedwake:action",
+            use_http_fallback=False,
+        )
+
+        class _Action:
+            action_id = "act_C1-2"
+            type = "reading"
+
+        with patch.object(
+            executor,
+            "_execute_ws",
+            AsyncMock(return_value={"ok": False, "summary": "行动超时", "data": {}, "error": "timeout"}),
+        ):
+            with self.assertLogs("core.openclaw_gateway", level="INFO") as logs:
+                result = executor.execute(_Action())
+
+        self.assertFalse(result["ok"])
+        output = "\n".join(logs.output)
+        self.assertIn("openclaw action act_C1-2 [reading] finished", output)
+        self.assertIn("status=failed", output)
+        self.assertIn("transport=ws", output)
 
 
 class ActionControlQueueTests(unittest.TestCase):
