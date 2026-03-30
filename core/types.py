@@ -92,13 +92,14 @@ class ConversationEntry(TypedDict):
 
 class RecentConversationMessage(TypedDict):
     role: str
-    speaker_label: str
+    speaker_name: str
     content: str
     timestamp: str
 
 
 class RecentConversationPrompt(TypedDict):
     source: str
+    source_name: str
     source_label: str
     summary: str
     last_timestamp: str

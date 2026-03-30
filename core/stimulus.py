@@ -2,6 +2,7 @@
 
 import json
 import logging
+from collections.abc import Callable
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -18,8 +19,21 @@ CONVERSATION_HISTORY_LIMIT = 500
 CONVERSATION_SUMMARY_KEY = "seedwake:conversation_summaries"
 RECENT_CONVERSATION_RAW_LIMIT = 10
 RECENT_CONVERSATION_WINDOW_HOURS = 24
-RECENT_CONVERSATION_SUMMARY_INPUT_LIMIT = 6
+RECENT_CONVERSATION_SUMMARY_VERSION = 2
 RECENT_CONVERSATION_SUMMARY_MAX_CHARS = 280
+MERGED_CONVERSATION_HISTORY_METADATA_KEYS = (
+    "telegram_user_id",
+    "telegram_chat_id",
+    "telegram_username",
+    "telegram_full_name",
+    "telegram_message_id",
+    "reply_to_message_id",
+    "reply_to_preview",
+    "reply_to_user_id",
+    "reply_to_from_self",
+    "reply_to_username",
+    "reply_to_full_name",
+)
 STIMULUS_REDIS_EXCEPTIONS = (
     redis_exceptions.RedisError,
     ConnectionError,
@@ -208,20 +222,13 @@ class StimulusQueue:
             json.loads(item)["stimulus_id"]
             for item in existing
         }
+        history_ids = _conversation_history_stimulus_ids(redis_client)
         for stimulus in shadow_items:
             if stimulus.stimulus_id in existing_ids:
                 continue
             redis_client.rpush(REDIS_KEY, _stimulus_to_json(stimulus))
             if stimulus.type == "conversation":
-                append_conversation_history(
-                    redis_client,
-                    role="user",
-                    source=stimulus.source,
-                    content=stimulus.content,
-                    stimulus_id=stimulus.stimulus_id,
-                    metadata=stimulus.metadata,
-                    timestamp=stimulus.timestamp,
-                )
+                _sync_conversation_history(redis_client, stimulus, history_ids)
 
 
 def append_conversation_history(
@@ -247,6 +254,104 @@ def append_conversation_history(
         redis_client.rpush(CONVERSATION_HISTORY_KEY, json.dumps(entry, ensure_ascii=False))
         redis_client.ltrim(CONVERSATION_HISTORY_KEY, -CONVERSATION_HISTORY_LIMIT, -1)
     return entry
+
+
+def _sync_conversation_history(
+    redis_client: redis_lib.Redis,
+    stimulus: Stimulus,
+    existing_history_ids: set[str],
+) -> None:
+    merged_messages = stimulus.metadata.get("merged_messages")
+    merged_ids = stimulus.metadata.get("merged_stimulus_ids")
+    if isinstance(merged_messages, list) and isinstance(merged_ids, list) and len(merged_messages) == len(merged_ids):
+        for index, message in enumerate(merged_messages):
+            history_stimulus_id = str(merged_ids[index] or "").strip()
+            if history_stimulus_id and history_stimulus_id in existing_history_ids:
+                continue
+            _append_merged_conversation_history_entry(
+                redis_client,
+                stimulus,
+                message,
+                history_stimulus_id or None,
+            )
+            if history_stimulus_id:
+                existing_history_ids.add(history_stimulus_id)
+        return
+    history_stimulus_id = str(stimulus.stimulus_id or "").strip()
+    if history_stimulus_id and history_stimulus_id in existing_history_ids:
+        return
+    append_conversation_history(
+        redis_client,
+        role="user",
+        source=stimulus.source,
+        content=stimulus.content,
+        stimulus_id=stimulus.stimulus_id,
+        metadata=stimulus.metadata,
+        timestamp=stimulus.timestamp,
+    )
+    if history_stimulus_id:
+        existing_history_ids.add(history_stimulus_id)
+
+
+def _append_merged_conversation_history_entry(
+    redis_client: redis_lib.Redis,
+    stimulus: Stimulus,
+    message: object,
+    stimulus_id: str | None,
+) -> None:
+    if not isinstance(message, dict):
+        append_conversation_history(
+            redis_client,
+            role="user",
+            source=stimulus.source,
+            content=str(message or ""),
+            stimulus_id=stimulus_id,
+            metadata={},
+            timestamp=stimulus.timestamp,
+        )
+        return
+    append_conversation_history(
+        redis_client,
+        role="user",
+        source=str(message.get("source") or stimulus.source),
+        content=str(message.get("content") or ""),
+        stimulus_id=stimulus_id,
+        metadata=_conversation_history_metadata_from_merged_message(message),
+        timestamp=_conversation_history_timestamp_from_merged_message(message, stimulus.timestamp),
+    )
+
+
+def _conversation_history_metadata_from_merged_message(message: dict) -> JsonObject:
+    metadata: JsonObject = {}
+    for key in MERGED_CONVERSATION_HISTORY_METADATA_KEYS:
+        if key in message:
+            metadata[key] = message[key]
+    return metadata
+
+
+def _conversation_history_timestamp_from_merged_message(
+    message: dict,
+    fallback: datetime,
+) -> datetime:
+    raw_timestamp = str(message.get("timestamp") or "").strip()
+    if not raw_timestamp:
+        return fallback
+    try:
+        return datetime.fromisoformat(raw_timestamp)
+    except ValueError:
+        return fallback
+
+
+def _conversation_history_stimulus_ids(redis_client: redis_lib.Redis) -> set[str]:
+    history = load_conversation_history(redis_client, limit=CONVERSATION_HISTORY_LIMIT)
+    return {
+        stimulus_id
+        for stimulus_id in (
+            str(entry.get("stimulus_id") or "").strip()
+            for entry in history
+        )
+        if stimulus_id
+    }
 
 
 def load_conversation_history(
@@ -275,6 +380,7 @@ def load_recent_conversations(
     *,
     include_sources: set[str] | None = None,
     exclude_stimulus_ids: set[str] | None = None,
+    summary_builder: Callable[[str, str, list[ConversationEntry]], str | None] | None = None,
     raw_limit: int = RECENT_CONVERSATION_RAW_LIMIT,
     within_hours: int = RECENT_CONVERSATION_WINDOW_HOURS,
 ) -> list[RecentConversationPrompt]:
@@ -300,28 +406,42 @@ def load_recent_conversations(
         if not _conversation_is_recent(source, last_timestamp, forced_sources, within_hours):
             continue
         display_entries = _conversation_display_entries(entries, hidden_stimulus_ids)
-        existing_summary, absorbed_until = stored_summaries.get(source, ("", ""))
-        summary = _refresh_conversation_summary(
+        metadata = _latest_named_metadata(entries)
+        source_name = _conversation_source_name(source, metadata)
+        source_label = _conversation_source_label(source, metadata)
+        existing_summary, absorbed_until, summary_current = stored_summaries.get(source, ("", "", False))
+        stored_summary = _refresh_conversation_summary(
             redis_client,
             source,
+            source_name,
             existing_summary,
             absorbed_until,
-            display_entries,
+            summary_current,
+            entries,
+            summary_builder,
             raw_limit,
         )
-        recent_entries = display_entries[-raw_limit:]
-        if not recent_entries and not summary and source not in forced_sources:
+        summary = _prompt_conversation_summary(
+            source_name,
+            stored_summary,
+            entries,
+            display_entries,
+            summary_builder,
+            raw_limit,
+        )
+        recent_entries = display_entries[-raw_limit:] if raw_limit > 0 else []
+        if not recent_entries and not summary:
             continue
-        source_label = _conversation_source_label(source, _latest_named_metadata(entries))
         recent_conversations.append((
             last_timestamp,
             {
                 "source": source,
+                "source_name": source_name,
                 "source_label": source_label,
                 "summary": summary,
                 "last_timestamp": last_timestamp.isoformat(),
                 "messages": [
-                    _recent_conversation_message(entry, source_label) for entry in recent_entries
+                    _recent_conversation_message(entry, source_name) for entry in recent_entries
                 ],
             },
         ))
@@ -329,12 +449,12 @@ def load_recent_conversations(
     return [item for _, item in recent_conversations]
 
 
-def _load_conversation_summaries(redis_client: redis_lib.Redis) -> dict[str, tuple[str, str]]:
+def _load_conversation_summaries(redis_client: redis_lib.Redis) -> dict[str, tuple[str, str, bool]]:
     try:
         raw_map = redis_client.hgetall(CONVERSATION_SUMMARY_KEY)
     except STIMULUS_REDIS_EXCEPTIONS:
         return {}
-    summaries: dict[str, tuple[str, str]] = {}
+    summaries: dict[str, tuple[str, str, bool]] = {}
     for raw_source, raw_value in raw_map.items():
         source = str(raw_source or "").strip()
         if source:
@@ -345,9 +465,12 @@ def _load_conversation_summaries(redis_client: redis_lib.Redis) -> dict[str, tup
 def _refresh_conversation_summary(
     redis_client: redis_lib.Redis,
     source: str,
+    source_name: str,
     existing_summary: str,
     absorbed_until: str,
+    summary_current: bool,
     entries: list[ConversationEntry],
+    summary_builder: Callable[[str, str, list[ConversationEntry]], str | None] | None,
     raw_limit: int,
 ) -> str:
     older_entries = entries[:-raw_limit] if len(entries) > raw_limit else []
@@ -355,13 +478,26 @@ def _refresh_conversation_summary(
         entry for entry in older_entries
         if _conversation_entry_is_newer(entry, absorbed_until)
     ]
-    summary = _conversation_summary(existing_summary, incremental_entries)
+    original_summary = str(existing_summary or "").strip()
+    summary = original_summary
+    entries_to_summarize = older_entries if older_entries and not summary_current else incremental_entries
+    if entries_to_summarize:
+        if summary_builder is None:
+            return summary
+        summary_seed = summary if summary_current else ""
+        next_summary = summary_builder(source_name, summary_seed, entries_to_summarize)
+        if next_summary is None:
+            return summary
+        summary = str(next_summary).strip()
     next_absorbed_until = str(older_entries[-1].get("timestamp") or "").strip() if older_entries else absorbed_until
+    if not entries_to_summarize and next_absorbed_until == absorbed_until:
+        return summary
     try:
         redis_client.hset(
             CONVERSATION_SUMMARY_KEY,
             source,
             json.dumps({
+                "version": RECENT_CONVERSATION_SUMMARY_VERSION,
                 "summary": summary,
                 "absorbed_until": next_absorbed_until,
             }, ensure_ascii=False),
@@ -371,31 +507,35 @@ def _refresh_conversation_summary(
     return summary
 
 
-def _conversation_summary(existing_summary: str, older_entries: list[ConversationEntry]) -> str:
-    fragments: list[str] = []
-    existing = str(existing_summary or "").strip()
-    if existing:
-        fragments.append(existing)
-    for entry in older_entries[-RECENT_CONVERSATION_SUMMARY_INPUT_LIMIT:]:
-        speaker = _conversation_summary_speaker(entry)
-        content = _clip_conversation_text(str(entry.get("content") or ""), 48)
-        if content:
-            fragments.append(f"{speaker}：{content}")
-    if not fragments:
-        return existing
-    merged = "；".join(_dedupe_preserve_order(fragments))
-    return _clip_conversation_text(merged, RECENT_CONVERSATION_SUMMARY_MAX_CHARS)
+def _prompt_conversation_summary(
+    source_name: str,
+    stored_summary: str,
+    all_entries: list[ConversationEntry],
+    display_entries: list[ConversationEntry],
+    summary_builder: Callable[[str, str, list[ConversationEntry]], str | None] | None,
+    raw_limit: int,
+) -> str:
+    prompt_older_entries = _older_conversation_entries(display_entries, raw_limit)
+    if not prompt_older_entries:
+        return ""
+    stored_older_entries = _older_conversation_entries(all_entries, raw_limit)
+    if _conversation_entry_ids(prompt_older_entries) == _conversation_entry_ids(stored_older_entries):
+        return str(stored_summary or "").strip()
+    if summary_builder is None:
+        return ""
+    prompt_summary = summary_builder(source_name, "", prompt_older_entries)
+    return str(prompt_summary or "").strip()
 
 
 def _recent_conversation_message(
     entry: ConversationEntry,
-    source_label: str,
+    source_name: str,
 ) -> RecentConversationMessage:
     role = str(entry.get("role") or "").strip()
-    speaker_label = "我" if role == "assistant" else source_label
+    speaker_name = "我" if role == "assistant" else source_name
     return {
         "role": role,
-        "speaker_label": speaker_label,
+        "speaker_name": speaker_name,
         "content": " ".join(str(entry.get("content") or "").split()),
         "timestamp": str(entry.get("timestamp") or ""),
     }
@@ -412,6 +552,21 @@ def _conversation_display_entries(
         if str(entry.get("stimulus_id") or "").strip() not in exclude_stimulus_ids
     ]
     return filtered
+
+
+def _older_conversation_entries(
+    entries: list[ConversationEntry],
+    raw_limit: int,
+) -> list[ConversationEntry]:
+    if raw_limit <= 0:
+        return list(entries)
+    if len(entries) <= raw_limit:
+        return []
+    return entries[:-raw_limit]
+
+
+def _conversation_entry_ids(entries: list[ConversationEntry]) -> list[str]:
+    return [str(entry.get("entry_id") or "").strip() for entry in entries]
 
 
 def _conversation_is_recent(
@@ -464,59 +619,36 @@ def _latest_named_metadata(entries: list[ConversationEntry]) -> JsonObject:
 
 
 def _conversation_source_label(source: str, metadata: JsonObject) -> str:
-    full_name = str(metadata.get("telegram_full_name") or "").strip()
-    username = str(metadata.get("telegram_username") or "").strip()
-    display_name = full_name or username or source
+    display_name = _conversation_source_name(source, metadata)
     if source.startswith("telegram:"):
         return f"[{display_name}]({source})"
     return display_name
 
 
-def _conversation_summary_speaker(entry: ConversationEntry) -> str:
-    role = str(entry.get("role") or "").strip()
-    if role == "assistant":
-        return "我"
-    source = str(entry.get("source") or "").strip()
-    metadata = entry.get("metadata")
-    metadata_dict = metadata if isinstance(metadata, dict) else {}
-    label = _conversation_source_label(source, metadata_dict)
-    if label.startswith("[") and "](" in label:
-        return label.split("](", 1)[0].lstrip("[")
-    return label
+def _conversation_source_name(source: str, metadata: JsonObject) -> str:
+    full_name = str(metadata.get("telegram_full_name") or "").strip()
+    username = str(metadata.get("telegram_username") or "").strip()
+    return full_name or username or source
 
 
-def _dedupe_preserve_order(items: list[str]) -> list[str]:
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for item in items:
-        normalized = item.strip()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        deduped.append(normalized)
-    return deduped
-
-
-def _clip_conversation_text(text: str, max_chars: int) -> str:
-    compact = " ".join(str(text).split())
-    if len(compact) <= max_chars:
-        return compact
-    return compact[: max_chars - 3].rstrip() + "..."
-
-
-def _conversation_summary_state(raw_value: object) -> tuple[str, str]:
+def _conversation_summary_state(raw_value: object) -> tuple[str, str, bool]:
     text = str(raw_value or "").strip()
     if not text:
-        return "", ""
+        return "", "", False
     try:
         payload = json.loads(text)
     except (TypeError, ValueError):
-        return text, ""
+        return text, "", False
     if not isinstance(payload, dict):
-        return text, ""
+        return text, "", False
     summary = str(payload.get("summary") or "").strip()
     absorbed_until = str(payload.get("absorbed_until") or "").strip()
-    return summary, absorbed_until
+    try:
+        version = int(payload.get("version") or 0)
+    except (TypeError, ValueError):
+        logger.warning("skipping malformed conversation summary version: %r", payload.get("version"))
+        version = 0
+    return summary, absorbed_until, version == RECENT_CONVERSATION_SUMMARY_VERSION
 
 
 def _select_ranked(items: list[Stimulus], limit: int) -> list[tuple[int, Stimulus]]:

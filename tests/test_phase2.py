@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import psycopg
@@ -9,6 +10,7 @@ import redis as redis_lib
 
 # noinspection PyProtectedMember
 from core.main import (
+    _run_engine_loop,
     _maybe_reconnect_pg,
     _maybe_reconnect_redis,
     _next_cycle_id,
@@ -507,6 +509,85 @@ class CycleCounterTests(unittest.TestCase):
         self.assertEqual(cycle_id, 4)
         self.assertFalse(stm.redis_available)
         redis_client.eval.assert_not_called()
+
+    def test_run_engine_loop_reuses_pending_cycle_id_across_retries(self) -> None:
+        runtime = SimpleNamespace(
+            retry_delay=1.0,
+            max_retry_delay=8.0,
+            reconnect_interval=30.0,
+            bootstrap_identity={},
+            stimulus_queue=MagicMock(),
+            stm=MagicMock(),
+        )
+        stimuli = [MagicMock()]
+        prepare_calls: list[int] = []
+        execute_calls: list[int] = []
+
+        def prepare_cycle(
+            log_file,
+            cycle_id,
+            runtime_obj,
+            identity,
+            bootstrap_identity,
+            reconnect_interval,
+            last_redis_reconnect,
+            last_pg_reconnect,
+        ) -> tuple[dict[str, str], float, float, list[MagicMock], list, list]:
+            _ = (
+                log_file,
+                runtime_obj,
+                bootstrap_identity,
+                reconnect_interval,
+                last_redis_reconnect,
+                last_pg_reconnect,
+            )
+            prepare_calls.append(cycle_id)
+            return identity, 0.0, 0.0, stimuli, [], []
+
+        execute_attempts = {"count": 0}
+
+        def execute_cycle(
+            runtime_obj,
+            cycle_id,
+            identity,
+            current_stimuli,
+            running_actions,
+            perception_cues,
+            prompt_log_file,
+        ) -> list[Thought]:
+            _ = (
+                runtime_obj,
+                identity,
+                current_stimuli,
+                running_actions,
+                perception_cues,
+                prompt_log_file,
+            )
+            execute_calls.append(cycle_id)
+            execute_attempts["count"] += 1
+            if execute_attempts["count"] == 1:
+                raise ConnectionRefusedError("refused")
+            return [_make_thought(cycle_id, 1, "ok")]
+
+        def finish_cycle(log_file, cycle_id, current_stimuli, thoughts) -> None:
+            _ = (log_file, cycle_id, current_stimuli, thoughts)
+            raise KeyboardInterrupt
+
+        with (
+            patch("core.main._next_cycle_id", return_value=294) as next_cycle_id,
+            patch("core.main._prepare_cycle", side_effect=prepare_cycle),
+            patch("core.main._execute_cycle", side_effect=execute_cycle),
+            patch("core.main._handle_cycle_failure", return_value=2.0) as handle_failure,
+            patch("core.main._finish_cycle", side_effect=finish_cycle) as finish_cycle_mock,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                _run_engine_loop(log_file=None, prompt_log_file=None, runtime=runtime, identity={})
+
+        next_cycle_id.assert_called_once_with(runtime.stm, 0)
+        handle_failure.assert_called_once()
+        finish_cycle_mock.assert_called_once()
+        self.assertEqual(prepare_calls, [294, 294])
+        self.assertEqual(execute_calls, [294, 294])
 
 
 if __name__ == "__main__":

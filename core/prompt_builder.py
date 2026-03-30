@@ -72,7 +72,6 @@ SYSTEM_PROMPT = """\
 """
 
 ACTION_MARKER_SUFFIX_PATTERN = re.compile(r"\s*\{action:[^}]+\}\s*$")
-CONVERSATION_MERGE_SEPARATOR = " / "
 ACTION_ECHO_ORIGIN = "action"
 PASSIVE_STIMULUS_LABELS = {
     "time": "[时间感]",
@@ -180,18 +179,17 @@ def _format_conversations(conversations: list[Stimulus]) -> str:
 def _format_recent_conversations(conversations: list[RecentConversationPrompt]) -> str:
     lines: list[str] = []
     for conversation in conversations:
-        lines.append(f'与 {conversation["source_label"]} 的近期对话：')
+        last_time = _recent_conversation_local_time(conversation["last_timestamp"])
+        lines.append(f'与 {conversation["source_label"]} 的近期对话（最后一条消息时间：{last_time}）：')
         lines.append("")
         summary = str(conversation.get("summary") or "").strip()
         if summary:
-            lines.append(f"- 对话历史摘要：{summary}")
-        lines.append(
-            f'- 最后一条消息时间：{_recent_conversation_local_time(conversation["last_timestamp"])}'
-        )
+            lines.append(f"更早的对话摘要：{summary}")
+            lines.append("")
         for message in conversation["messages"]:
             content = _compact_prompt_text(message["content"])
             if content:
-                lines.append(f'- {message["speaker_label"]}：{content}')
+                lines.append(f'{message["speaker_name"]}：{content}')
         lines.append("")
     while lines and not lines[-1]:
         lines.pop()

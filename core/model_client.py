@@ -111,7 +111,7 @@ class OllamaModelClient(ModelClient):
         if tools:
             payload["tools"] = tools
         if options:
-            payload["options"] = options
+            payload["options"] = _normalize_ollama_chat_options(options)
         response = self._client.chat(**payload)
         return {
             "message": {
@@ -269,6 +269,13 @@ def create_model_client(model_config: dict) -> ModelClient:
         )
 
     raise RuntimeError(f"不支持的模型 provider：{provider}")
+
+
+def _normalize_ollama_chat_options(options: dict) -> dict:
+    normalized = dict(options)
+    if "num_predict" not in normalized and "max_tokens" in normalized:
+        normalized["num_predict"] = normalized.pop("max_tokens")
+    return normalized
 
 
 def _openai_generate_messages(prompt: str) -> list[dict[str, str]]:

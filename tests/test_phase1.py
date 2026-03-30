@@ -264,6 +264,22 @@ class ModelClientTests(unittest.TestCase):
             requests[0].header_items(),
         )
 
+    def test_ollama_chat_maps_max_tokens_to_num_predict(self) -> None:
+        client = create_model_client({"name": "test-model"})
+        chat_mock = MagicMock(return_value={"message": {"content": "ok", "tool_calls": []}})
+        client._client.chat = chat_mock  # type: ignore[attr-defined]
+
+        client.chat(
+            model="test-model",
+            messages=[{"role": "user", "content": "hello"}],
+            options={"temperature": 0.2, "max_tokens": 180},
+        )
+
+        options = chat_mock.call_args.kwargs["options"]
+        self.assertEqual(options["temperature"], 0.2)
+        self.assertEqual(options["num_predict"], 180)
+        self.assertNotIn("max_tokens", options)
+
 
 if __name__ == "__main__":
     unittest.main()

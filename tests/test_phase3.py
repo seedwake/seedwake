@@ -1,4 +1,5 @@
 import json
+import io
 import unittest
 from email.message import Message
 from threading import Barrier
@@ -22,7 +23,14 @@ from core.action import (
     push_action_control,
 )
 # noinspection PyProtectedMember
-from core.main import _sanitize_cycle_trigger_refs, _select_cycle_stimuli
+from core.main import (
+    _print_stimuli,
+    RECENT_CONVERSATION_SUMMARY_BATCH_MAX_CHARS,
+    _recent_conversation_summary_batches,
+    _sanitize_cycle_trigger_refs,
+    _select_cycle_stimuli,
+    _summarize_recent_conversation,
+)
 from core.model_client import ModelClient
 from core.openclaw_gateway import OpenClawGatewayExecutor, OpenClawUnavailableError
 from core.perception import PerceptionManager
@@ -31,9 +39,11 @@ from core.rss import read_news_result, summarize_news_items
 from core.stimulus import (
     CONVERSATION_HISTORY_KEY,
     CONVERSATION_SUMMARY_KEY,
+    RECENT_CONVERSATION_SUMMARY_MAX_CHARS,
     Stimulus,
     StimulusQueue,
     append_conversation_history,
+    load_conversation_history,
     load_recent_conversations,
 )
 from core.thought_parser import Thought
@@ -144,6 +154,19 @@ class _JsonPlannerClient(ModelClient):
     def embed_texts(self, texts: list[str], model: str) -> list[list[float]]:
         _ = model
         return [[0.0] for _ in texts]
+
+
+def _conversation_summary_stub(
+    source_name: str,
+    existing_summary: str,
+    entries: list[dict],
+) -> str:
+    addition = "；".join(" ".join(str(entry.get("content") or "").split()) for entry in entries if entry.get("content"))
+    if existing_summary and addition:
+        return f"{existing_summary}｜{addition}"
+    if addition:
+        return f"{source_name} 摘要：{addition}"
+    return existing_summary
 
 
 def _news_result(
@@ -512,6 +535,64 @@ class StimulusQueueTests(unittest.TestCase):
         restored = queue.pop_many(limit=2)
         self.assertEqual([stimulus.stimulus_id for stimulus in restored], [first.stimulus_id, second.stimulus_id])
 
+    def test_attach_redis_does_not_duplicate_existing_conversation_history(self) -> None:
+        redis_stub = ListRedisStub()
+        queue = StimulusQueue(redis_client=None)
+        stimulus = queue.push(
+            "conversation",
+            1,
+            "telegram:1",
+            "你好",
+            metadata={"telegram_full_name": "Alice"},
+        )
+        append_conversation_history(
+            redis_stub,
+            role="user",
+            source=stimulus.source,
+            content=stimulus.content,
+            stimulus_id=stimulus.stimulus_id,
+            metadata=stimulus.metadata,
+            timestamp=stimulus.timestamp,
+        )
+
+        self.assertTrue(queue.attach_redis(redis_stub))
+
+        history = load_conversation_history(redis_stub, limit=10)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["stimulus_id"], stimulus.stimulus_id)
+        self.assertEqual(history[0]["content"], "你好")
+
+    def test_attach_redis_rehydrates_merged_conversation_history_per_message(self) -> None:
+        redis_stub = ListRedisStub()
+        queue = StimulusQueue(redis_client=None)
+        queue.push(
+            "conversation",
+            1,
+            "telegram:1",
+            "第一句",
+            metadata={"telegram_full_name": "Alice", "telegram_message_id": 101},
+        )
+        queue.push(
+            "conversation",
+            1,
+            "telegram:1",
+            "第二句",
+            metadata={"telegram_full_name": "Alice", "telegram_message_id": 102},
+        )
+
+        merged = _select_cycle_stimuli(queue)
+        queue.requeue_front(merged)
+
+        self.assertTrue(queue.attach_redis(redis_stub))
+
+        history = load_conversation_history(redis_stub, limit=10)
+        self.assertEqual([entry["content"] for entry in history], ["第一句", "第二句"])
+        self.assertEqual(
+            [entry["stimulus_id"] for entry in history],
+            merged[0].metadata["merged_stimulus_ids"],
+        )
+        self.assertNotIn("第一句\n第二句", [entry["content"] for entry in history])
+
     def test_select_cycle_stimuli_merges_same_source_conversation(self) -> None:
         queue = StimulusQueue(redis_client=None)
         first = queue.push(
@@ -541,11 +622,87 @@ class StimulusQueueTests(unittest.TestCase):
         self.assertEqual(len(selected), 1)
         self.assertEqual(selected[0].source, "telegram:1")
         self.assertEqual(selected[0].stimulus_id, first.stimulus_id)
-        self.assertEqual(selected[0].content, "你好 / 你在做什么？ / 你是谁？")
+        self.assertEqual(selected[0].content, "你好\n你在做什么？\n你是谁？")
         self.assertEqual(selected[0].metadata["merged_count"], 3)
         self.assertEqual(len(selected[0].metadata["merged_stimulus_ids"]), 3)
         self.assertEqual(selected[0].metadata["telegram_message_id"], 103)
         self.assertEqual(len(selected[0].metadata["merged_messages"]), 3)
+
+    def test_select_cycle_stimuli_preserves_merged_messages_across_retry(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        first = queue.push(
+            "conversation",
+            1,
+            "telegram:1",
+            "第一句",
+            metadata={"telegram_message_id": 101},
+        )
+        second = queue.push(
+            "conversation",
+            1,
+            "telegram:1",
+            "第二句",
+            metadata={"telegram_message_id": 102},
+        )
+
+        first_round = _select_cycle_stimuli(queue)
+        queue.requeue_front(first_round)
+        second_round = _select_cycle_stimuli(queue)
+
+        self.assertEqual(len(second_round), 1)
+        self.assertEqual(second_round[0].content, "第一句\n第二句")
+        self.assertEqual(second_round[0].metadata["merged_count"], 2)
+        self.assertEqual(
+            second_round[0].metadata["merged_stimulus_ids"],
+            [first.stimulus_id, second.stimulus_id],
+        )
+        self.assertEqual(
+            [message["content"] for message in second_round[0].metadata["merged_messages"]],
+            ["第一句", "第二句"],
+        )
+        self.assertEqual(second_round[0].metadata["telegram_message_id"], 102)
+
+    def test_select_cycle_stimuli_merges_retry_conversation_with_new_same_source_message(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        first = queue.push(
+            "conversation",
+            1,
+            "telegram:1",
+            "第一句",
+            metadata={"telegram_message_id": 101},
+        )
+        second = queue.push(
+            "conversation",
+            1,
+            "telegram:1",
+            "第二句",
+            metadata={"telegram_message_id": 102},
+        )
+
+        first_round = _select_cycle_stimuli(queue)
+        queue.requeue_front(first_round)
+        third = queue.push(
+            "conversation",
+            1,
+            "telegram:1",
+            "第三句",
+            metadata={"telegram_message_id": 103},
+        )
+
+        second_round = _select_cycle_stimuli(queue)
+
+        self.assertEqual(len(second_round), 1)
+        self.assertEqual(second_round[0].content, "第一句\n第二句\n第三句")
+        self.assertEqual(second_round[0].metadata["merged_count"], 3)
+        self.assertEqual(
+            second_round[0].metadata["merged_stimulus_ids"],
+            [first.stimulus_id, second.stimulus_id, third.stimulus_id],
+        )
+        self.assertEqual(
+            [message["content"] for message in second_round[0].metadata["merged_messages"]],
+            ["第一句", "第二句", "第三句"],
+        )
+        self.assertEqual(second_round[0].metadata["telegram_message_id"], 103)
 
     def test_prompt_keeps_reply_context_on_only_the_replied_message_after_merge(self) -> None:
         queue = StimulusQueue(redis_client=None)
@@ -601,7 +758,7 @@ class StimulusQueueTests(unittest.TestCase):
 
         self.assertEqual(len(first_round), 1)
         self.assertEqual(first_round[0].source, "telegram:1")
-        self.assertEqual(first_round[0].content, "Alice 1 / Alice 2")
+        self.assertEqual(first_round[0].content, "Alice 1\nAlice 2")
         self.assertEqual(len(second_round), 1)
         self.assertEqual(second_round[0].source, "telegram:2")
         self.assertEqual(second_round[0].content, "Bob 1")
@@ -617,10 +774,24 @@ class StimulusQueueTests(unittest.TestCase):
         second_round = _select_cycle_stimuli(queue)
 
         self.assertEqual([stimulus.type for stimulus in first_round], ["conversation", "weather"])
-        self.assertEqual(first_round[0].content, "你好 / 你在做什么？")
+        self.assertEqual(first_round[0].content, "你好\n你在做什么？")
         self.assertEqual(first_round[1].content, "塔林，多云，5C")
         self.assertEqual(len(second_round), 1)
         self.assertEqual(second_round[0].source, "telegram:2")
+
+    def test_print_stimuli_flattens_merged_conversation_for_logs(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        queue.push("conversation", 1, "telegram:1", "你好")
+        queue.push("conversation", 1, "telegram:1", "你在做什么？")
+        selected = _select_cycle_stimuli(queue)
+
+        log_buffer = io.StringIO()
+        with patch("sys.stdout", new=io.StringIO()):
+            _print_stimuli(log_buffer, selected)
+
+        output = log_buffer.getvalue()
+        self.assertIn("[conversation] 你好 | 你在做什么？", output)
+        self.assertNotIn("[conversation] 你好\n你在做什么？", output)
 
     def test_select_cycle_stimuli_drops_background_passive_stimuli_during_conversation(self) -> None:
         queue = StimulusQueue(redis_client=None)
@@ -745,8 +916,8 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertLess(prompt.index("## 最近的对话"), prompt.index("## 有人对我说话了"))
         self.assertLess(prompt.index("## 行动有了回音"), prompt.index("## 有人对我说话了"))
         self.assertIn('[Alice](telegram:1) [msg:305] 引用了我之前说的 [msg:298]：“好，我自己找一篇关于有氧锻炼的文章” 说：谢谢你', prompt)
-        self.assertIn("与 [Alice](telegram:1) 的近期对话：", prompt)
-        self.assertIn("- 我：好，那我就接着陪你聊。", prompt)
+        self.assertIn("与 [Alice](telegram:1) 的近期对话（最后一条消息时间：", prompt)
+        self.assertIn("我：好，那我就接着陪你聊。", prompt)
         self.assertIn("如果我决定回应，需要用 {action:send_message} 真正把话发出去", prompt)
         self.assertIn("[时间感] 现在是晚上", prompt)
         self.assertIn("[搜索结果] 搜索完成 1. 标题 (https://example.com) —— 摘要", prompt)
@@ -782,17 +953,59 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 timestamp=_make_thought(1, index + 1).timestamp,
             )
 
-        conversations = load_recent_conversations(redis_client, include_sources={"telegram:1"})
+        conversations = load_recent_conversations(
+            redis_client,
+            include_sources={"telegram:1"},
+            summary_builder=_conversation_summary_stub,
+        )
 
         self.assertEqual(len(conversations), 1)
         conversation = conversations[0]
+        self.assertEqual(conversation["source_name"], "Alice")
         self.assertEqual(conversation["source_label"], "[Alice](telegram:1)")
         self.assertEqual(len(conversation["messages"]), 10)
-        self.assertIn("第1句", conversation["summary"])
+        self.assertEqual(conversation["summary"], "Alice 摘要：第1句；第2句")
         self.assertEqual(conversation["messages"][0]["content"], "第3句")
+        self.assertEqual(conversation["messages"][0]["speaker_name"], "Alice")
         stored_summary = json.loads(redis_client.hashes[CONVERSATION_SUMMARY_KEY]["telegram:1"])
+        self.assertEqual(stored_summary["version"], 2)
         self.assertEqual(stored_summary["summary"], conversation["summary"])
         self.assertTrue(stored_summary["absorbed_until"])
+
+    def test_prompt_formats_recent_conversation_with_inline_timestamp_and_short_names(self) -> None:
+        prompt = build_prompt(
+            3,
+            {"self_description": "我是 Seedwake。"},
+            [],
+            30,
+            recent_conversations=[{
+                "source": "telegram:1",
+                "source_name": "Alice",
+                "source_label": "[Alice](telegram:1)",
+                "summary": "Alice说“更早那句”，我回应“收到。”",
+                "last_timestamp": "2026-03-30T01:43:00+00:00",
+                "messages": [
+                    {
+                        "role": "user",
+                        "speaker_name": "Alice",
+                        "content": "最近这句",
+                        "timestamp": "2026-03-30T01:42:00+00:00",
+                    },
+                    {
+                        "role": "assistant",
+                        "speaker_name": "我",
+                        "content": "我在。",
+                        "timestamp": "2026-03-30T01:43:00+00:00",
+                    },
+                ],
+            }],
+        )
+
+        self.assertIn("与 [Alice](telegram:1) 的近期对话（最后一条消息时间：", prompt)
+        self.assertIn("更早的对话摘要：Alice说“更早那句”，我回应“收到。”", prompt)
+        self.assertIn("Alice：最近这句", prompt)
+        self.assertIn("我：我在。", prompt)
+        self.assertNotIn("[Alice](telegram:1)：最近这句", prompt)
 
     def test_load_recent_conversations_does_not_reabsorb_same_old_messages(self) -> None:
         redis_client = ListRedisStub()
@@ -806,10 +1019,26 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 timestamp=_make_thought(1, index + 1).timestamp,
             )
 
-        first = load_recent_conversations(redis_client, include_sources={"telegram:1"})
-        second = load_recent_conversations(redis_client, include_sources={"telegram:1"})
+        summary_calls: list[list[str]] = []
+
+        def summary_builder(source_name: str, existing_summary: str, entries: list[dict]) -> str | None:
+            _ = source_name, existing_summary
+            summary_calls.append([str(entry.get("content") or "") for entry in entries])
+            return _conversation_summary_stub(source_name, existing_summary, entries)
+
+        first = load_recent_conversations(
+            redis_client,
+            include_sources={"telegram:1"},
+            summary_builder=summary_builder,
+        )
+        second = load_recent_conversations(
+            redis_client,
+            include_sources={"telegram:1"},
+            summary_builder=summary_builder,
+        )
 
         self.assertEqual(first[0]["summary"], second[0]["summary"])
+        self.assertEqual(summary_calls, [["第1句", "第2句"]])
 
     def test_load_recent_conversations_excludes_current_cycle_messages(self) -> None:
         redis_client = ListRedisStub()
@@ -839,6 +1068,241 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         )
 
         self.assertEqual([message["content"] for message in conversations[0]["messages"]], ["更早那句"])
+
+    def test_load_recent_conversations_rebuilds_prompt_summary_when_hidden_messages_shift_window(self) -> None:
+        redis_client = ListRedisStub()
+        for index in range(20):
+            append_conversation_history(
+                redis_client,
+                role="user",
+                source="telegram:1",
+                content=f"第{index + 1}句",
+                stimulus_id=f"stim_{index + 1}",
+                metadata={"telegram_full_name": "Alice"},
+                timestamp=_make_thought(1, index + 1).timestamp,
+            )
+
+        load_recent_conversations(
+            redis_client,
+            include_sources={"telegram:1"},
+            summary_builder=_conversation_summary_stub,
+        )
+
+        builder_calls: list[tuple[str, str, list[str]]] = []
+
+        def prompt_summary_builder(source_name: str, existing_summary: str, entries: list[dict]) -> str:
+            builder_calls.append((
+                source_name,
+                existing_summary,
+                [str(entry.get("content") or "") for entry in entries],
+            ))
+            return "缩减后的摘要"
+
+        conversations = load_recent_conversations(
+            redis_client,
+            include_sources={"telegram:1"},
+            exclude_stimulus_ids={"stim_19", "stim_20"},
+            summary_builder=prompt_summary_builder,
+        )
+
+        self.assertEqual(conversations[0]["summary"], "缩减后的摘要")
+        self.assertEqual([message["content"] for message in conversations[0]["messages"]], [f"第{i}句" for i in range(9, 19)])
+        self.assertEqual(builder_calls, [("Alice", "", [f"第{i}句" for i in range(1, 9)])])
+
+    def test_load_recent_conversations_skips_empty_recent_block_for_current_only_source(self) -> None:
+        redis_client = ListRedisStub()
+        append_conversation_history(
+            redis_client,
+            role="user",
+            source="telegram:1",
+            content="当前这句",
+            stimulus_id="stim_current",
+            metadata={"telegram_full_name": "Alice"},
+            timestamp=_make_thought(1, 1).timestamp,
+        )
+
+        conversations = load_recent_conversations(
+            redis_client,
+            include_sources={"telegram:1"},
+            exclude_stimulus_ids={"stim_current"},
+        )
+
+        self.assertEqual(conversations, [])
+
+    def test_load_recent_conversations_does_not_upgrade_summary_when_rebuild_fails(self) -> None:
+        redis_client = ListRedisStub()
+        redis_client.hset(
+            CONVERSATION_SUMMARY_KEY,
+            "telegram:1",
+            json.dumps({"summary": "旧摘要", "absorbed_until": "", "version": 1}, ensure_ascii=False),
+        )
+        for index in range(12):
+            append_conversation_history(
+                redis_client,
+                role="user",
+                source="telegram:1",
+                content=f"第{index + 1}句",
+                metadata={"telegram_full_name": "Alice"},
+                timestamp=_make_thought(1, index + 1).timestamp,
+            )
+
+        conversations = load_recent_conversations(
+            redis_client,
+            include_sources={"telegram:1"},
+            summary_builder=lambda source_name, existing_summary, entries: None,
+        )
+
+        self.assertEqual(conversations[0]["summary"], "旧摘要")
+        stored_summary = json.loads(redis_client.hashes[CONVERSATION_SUMMARY_KEY]["telegram:1"])
+        self.assertEqual(stored_summary["version"], 1)
+        self.assertEqual(stored_summary["absorbed_until"], "")
+
+    def test_load_recent_conversations_rebuild_ignores_legacy_summary_text(self) -> None:
+        redis_client = ListRedisStub()
+        redis_client.hset(
+            CONVERSATION_SUMMARY_KEY,
+            "telegram:1",
+            json.dumps({"summary": "旧的脏摘要", "absorbed_until": "", "version": 1}, ensure_ascii=False),
+        )
+        for index in range(12):
+            append_conversation_history(
+                redis_client,
+                role="user",
+                source="telegram:1",
+                content=f"第{index + 1}句",
+                metadata={"telegram_full_name": "Alice"},
+                timestamp=_make_thought(1, index + 1).timestamp,
+            )
+
+        builder_calls: list[tuple[str, str, list[str]]] = []
+
+        def summary_builder(source_name: str, existing_summary: str, entries: list[dict]) -> str:
+            builder_calls.append((
+                source_name,
+                existing_summary,
+                [str(entry.get("content") or "") for entry in entries],
+            ))
+            return "新的干净摘要"
+
+        conversations = load_recent_conversations(
+            redis_client,
+            include_sources={"telegram:1"},
+            summary_builder=summary_builder,
+        )
+
+        self.assertEqual(conversations[0]["summary"], "新的干净摘要")
+        self.assertEqual(len(builder_calls), 1)
+        self.assertEqual(builder_calls[0][0], "Alice")
+        self.assertEqual(builder_calls[0][1], "")
+        self.assertEqual(builder_calls[0][2], ["第1句", "第2句"])
+
+    def test_load_recent_conversations_tolerates_malformed_summary_version(self) -> None:
+        redis_client = ListRedisStub()
+        redis_client.hset(
+            CONVERSATION_SUMMARY_KEY,
+            "telegram:1",
+            json.dumps({"summary": "旧摘要", "absorbed_until": "", "version": "v2"}, ensure_ascii=False),
+        )
+        for index in range(12):
+            append_conversation_history(
+                redis_client,
+                role="user",
+                source="telegram:1",
+                content=f"第{index + 1}句",
+                metadata={"telegram_full_name": "Alice"},
+                timestamp=_make_thought(1, index + 1).timestamp,
+            )
+
+        conversations = load_recent_conversations(
+            redis_client,
+            include_sources={"telegram:1"},
+            summary_builder=lambda source_name, existing_summary, entries: "重建后的摘要",
+        )
+
+        self.assertEqual(conversations[0]["summary"], "重建后的摘要")
+        stored_summary = json.loads(redis_client.hashes[CONVERSATION_SUMMARY_KEY]["telegram:1"])
+        self.assertEqual(stored_summary["version"], 2)
+        self.assertEqual(stored_summary["summary"], "重建后的摘要")
+
+    def test_recent_conversation_summary_batches_clip_single_oversized_message(self) -> None:
+        long_content = "很长的内容" * 2000
+        batches = _recent_conversation_summary_batches(
+            [{
+                "role": "user",
+                "source": "telegram:1",
+                "content": long_content,
+                "timestamp": "",
+                "stimulus_id": None,
+                "metadata": {},
+            }],
+            "Jam",
+        )
+
+        self.assertEqual(len(batches), 1)
+        self.assertLessEqual(len(batches[0]), RECENT_CONVERSATION_SUMMARY_BATCH_MAX_CHARS)
+        self.assertIn("Jam：", batches[0])
+        self.assertIn("...", batches[0])
+        self.assertGreaterEqual(len(batches[0]), RECENT_CONVERSATION_SUMMARY_MAX_CHARS)
+        self.assertNotIn(long_content, batches[0])
+
+    def test_summarize_recent_conversation_uses_model_output(self) -> None:
+        client = MagicMock()
+        client.chat.return_value = {"message": {"content": "  摘要：Jam 先打了个招呼，我回应了。  "}}
+
+        summary = _summarize_recent_conversation(
+            client,
+            {"name": "openclaw/main"},
+            "Jam",
+            "",
+            [
+                {"role": "user", "source": "telegram:1", "content": "你好", "timestamp": "", "stimulus_id": None, "metadata": {}},
+                {"role": "assistant", "source": "telegram:1", "content": "你好，我在。", "timestamp": "", "stimulus_id": None, "metadata": {}},
+            ],
+        )
+
+        self.assertEqual(summary, "Jam 先打了个招呼，我回应了。")
+        client.chat.assert_called_once()
+        request_text = client.chat.call_args.kwargs["messages"][1]["content"]
+        self.assertIn("已有摘要：", request_text)
+        self.assertIn("Jam：你好", request_text)
+        self.assertIn("我：你好，我在。", request_text)
+
+    def test_summarize_recent_conversation_batches_cover_full_history(self) -> None:
+        client = MagicMock()
+        call_count = {"value": 0}
+
+        def chat_side_effect(**kwargs) -> dict:
+            _ = kwargs
+            call_count["value"] += 1
+            return {"message": {"content": f"摘要：第{call_count['value']}段总结。"}}
+
+        client.chat.side_effect = chat_side_effect
+        entries = [
+            {
+                "role": "user",
+                "source": "telegram:1",
+                "content": f"第{i}句 " + ("很长的内容 " * 30),
+                "timestamp": "",
+                "stimulus_id": None,
+                "metadata": {},
+            }
+            for i in range(1, 31)
+        ]
+
+        summary = _summarize_recent_conversation(
+            client,
+            {"name": "openclaw/main"},
+            "Jam",
+            "",
+            entries,
+        )
+
+        self.assertEqual(summary, f"第{client.chat.call_count}段总结。")
+        self.assertGreater(client.chat.call_count, 1)
+        first_request = client.chat.call_args_list[0].kwargs["messages"][1]["content"]
+        last_request = client.chat.call_args_list[-1].kwargs["messages"][1]["content"]
+        self.assertIn("Jam：第1句", first_request)
+        self.assertIn("Jam：第30句", last_request)
 
     def test_running_send_message_summary_uses_request_not_source_content(self) -> None:
         action = MagicMock()
@@ -892,6 +1356,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             ],
             recent_conversations=[{
                 "source": "telegram:1",
+                "source_name": "Alice",
                 "source_label": "[Alice](telegram:1)",
                 "summary": "",
                 "last_timestamp": "2026-03-30T01:43:00+00:00",

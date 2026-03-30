@@ -29,9 +29,20 @@ from core.memory.short_term import LATEST_CYCLE_KEY, ShortTermMemory
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient, create_model_client
 from core.perception import PerceptionManager
 from core.runtime import connect_redis_from_env, load_yaml_config
-from core.stimulus import Stimulus, StimulusQueue, load_recent_conversations
+from core.stimulus import (
+    RECENT_CONVERSATION_SUMMARY_MAX_CHARS,
+    Stimulus,
+    StimulusQueue,
+    load_recent_conversations,
+)
 from core.thought_parser import Thought
-from core.types import EventPayload, PerceptionStimulusPayload, StatusEventPayload
+from core.types import (
+    ConversationEntry,
+    EventPayload,
+    PerceptionStimulusPayload,
+    RecentConversationPrompt,
+    StatusEventPayload,
+)
 
 # Terminal colors
 C_RESET = "\033[0m"
@@ -60,6 +71,15 @@ EMBEDDING_EXCEPTIONS = (
     ValueError,
     TypeError,
 )
+RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT = (
+    "你在为 Seedwake 压缩更早的对话历史。"
+    "根据已有摘要和补充消息，写一段新的中文自然语言摘要，替换旧摘要。"
+    "只概括不会直接展示的更早消息，不要把最近会直接展示的消息再写进去。"
+    "不要逐条复读，不要项目符号，不要时间戳，不要消息编号。"
+    "对方用名字称呼，assistant 用“我”。"
+    f"控制在 {RECENT_CONVERSATION_SUMMARY_MAX_CHARS} 字以内，只输出摘要正文。"
+)
+RECENT_CONVERSATION_SUMMARY_BATCH_MAX_CHARS = 2400
 LTM_EXCEPTIONS = (
     psycopg.Error,
     RuntimeError,
@@ -84,7 +104,7 @@ CYCLE_COUNTER_EXCEPTIONS = (
     OSError,
 )
 CYCLE_COUNTER_KEY = "seedwake:cycle_counter"
-CONVERSATION_MERGE_SEPARATOR = " / "
+CONVERSATION_MERGE_SEPARATOR = "\n"
 LTM_ACTION_MARKER_PATTERN = re.compile(r"\s*\{action:[^}]+\}\s*$")
 LTM_RETRIEVAL_OVERSAMPLE_FACTOR = 3
 MERGED_TELEGRAM_METADATA_KEYS = (
@@ -247,13 +267,16 @@ def _run_engine_loop(
     runtime: EngineRuntime,
     identity: dict[str, str],
 ) -> None:
-    cycle_id = 0
+    last_completed_cycle_id = 0
+    pending_cycle_id: int | None = None
     current_retry_delay = runtime.retry_delay
     last_redis_reconnect = 0.0
     last_pg_reconnect = 0.0
 
     while True:
-        cycle_id = _next_cycle_id(runtime.stm, cycle_id)
+        if pending_cycle_id is None:
+            pending_cycle_id = _next_cycle_id(runtime.stm, last_completed_cycle_id)
+        cycle_id = pending_cycle_id
         (
             identity,
             last_redis_reconnect,
@@ -309,6 +332,8 @@ def _run_engine_loop(
             continue
 
         _finish_cycle(log_file, cycle_id, stimuli, new_thoughts)
+        last_completed_cycle_id = cycle_id
+        pending_cycle_id = None
         current_retry_delay = runtime.retry_delay
 
 
@@ -412,28 +437,36 @@ def _is_background_stimulus_during_conversation(stimulus: Stimulus) -> bool:
 
 def _merge_conversation_stimuli(conversation_group: list[Stimulus]) -> Stimulus:
     first = conversation_group[0]
-    last = conversation_group[-1]
-    merged_metadata = dict(first.metadata)
-    merged_metadata["merged_count"] = len(conversation_group)
-    merged_metadata["merged_stimulus_ids"] = [
-        stimulus.stimulus_id for stimulus in conversation_group
+    flattened_pairs = [
+        pair
+        for stimulus in conversation_group
+        for pair in _conversation_message_pairs(stimulus)
     ]
-    merged_metadata["merged_messages"] = [
-        _merged_conversation_message(stimulus) for stimulus in conversation_group
-    ]
-    latest_message_id = last.metadata.get("telegram_message_id")
+    merged_stimulus_ids = [stimulus_id for stimulus_id, _ in flattened_pairs if stimulus_id]
+    merged_messages = [message for _, message in flattened_pairs]
+    last_message = merged_messages[-1]
+    merged_metadata = {
+        key: value
+        for key, value in first.metadata.items()
+        if key not in {"merged_count", "merged_stimulus_ids", "merged_messages", *MERGED_TELEGRAM_METADATA_KEYS}
+    }
+    merged_metadata["merged_count"] = len(merged_messages)
+    merged_metadata["merged_stimulus_ids"] = merged_stimulus_ids
+    merged_metadata["merged_messages"] = merged_messages
+    latest_message_id = last_message.get("telegram_message_id")
     if latest_message_id is not None:
         merged_metadata["telegram_message_id"] = latest_message_id
     for key in MERGED_TELEGRAM_METADATA_KEYS:
-        if key in last.metadata:
-            merged_metadata[key] = last.metadata[key]
+        if key in last_message:
+            merged_metadata[key] = last_message[key]
     return Stimulus(
         stimulus_id=first.stimulus_id,
         type=first.type,
         priority=first.priority,
         source=first.source,
         content=CONVERSATION_MERGE_SEPARATOR.join(
-            _compact_conversation_text(stimulus.content) for stimulus in conversation_group
+            str(message.get("content") or "")
+            for message in merged_messages
         ),
         timestamp=first.timestamp,
         action_id=first.action_id,
@@ -449,11 +482,34 @@ def _merged_conversation_message(stimulus: Stimulus) -> dict:
     payload = {
         "source": stimulus.source,
         "content": _compact_conversation_text(stimulus.content),
+        "timestamp": stimulus.timestamp.isoformat(),
     }
     for key in MERGED_TELEGRAM_METADATA_KEYS:
         if key in stimulus.metadata:
             payload[key] = stimulus.metadata[key]
     return payload
+
+
+def _conversation_message_pairs(stimulus: Stimulus) -> list[tuple[str, dict]]:
+    merged_messages = stimulus.metadata.get("merged_messages")
+    merged_ids = stimulus.metadata.get("merged_stimulus_ids")
+    if isinstance(merged_messages, list) and isinstance(merged_ids, list) and len(merged_messages) == len(merged_ids):
+        pairs: list[tuple[str, dict]] = []
+        for index, raw_message in enumerate(merged_messages):
+            message = _normalize_merged_conversation_message(raw_message, stimulus)
+            pairs.append((str(merged_ids[index] or "").strip(), message))
+        return pairs
+    return [(stimulus.stimulus_id, _merged_conversation_message(stimulus))]
+
+
+def _normalize_merged_conversation_message(message: object, stimulus: Stimulus) -> dict:
+    if not isinstance(message, dict):
+        return _merged_conversation_message(stimulus)
+    normalized = dict(message)
+    normalized["source"] = str(message.get("source") or stimulus.source)
+    normalized["content"] = _compact_conversation_text(str(message.get("content") or ""))
+    normalized["timestamp"] = str(message.get("timestamp") or stimulus.timestamp.isoformat())
+    return normalized
 
 
 def _recover_runtime_services(
@@ -549,11 +605,7 @@ def _execute_cycle(
         runtime.stm,
         runtime.embedding_model,
     )
-    recent_conversations = load_recent_conversations(
-        runtime.stm.redis_client,
-        include_sources={stimulus.source for stimulus in stimuli if stimulus.type == "conversation"},
-        exclude_stimulus_ids=_conversation_stimulus_ids(stimuli),
-    )
+    recent_conversations = _load_recent_conversations(runtime, stimuli)
     thoughts = run_cycle(
         runtime.primary_client,
         cycle_id,
@@ -573,6 +625,64 @@ def _execute_cycle(
     _store_to_ltm(runtime.ltm, runtime.embedding_client, thoughts, runtime.embedding_model, cycle_id)
     runtime.action_manager.submit_from_thoughts(thoughts, stimuli=stimuli)
     return thoughts
+
+
+def _load_recent_conversations(
+    runtime: EngineRuntime,
+    stimuli: list[Stimulus],
+) -> list[RecentConversationPrompt]:
+    return load_recent_conversations(
+        runtime.stm.redis_client,
+        include_sources={stimulus.source for stimulus in stimuli if stimulus.type == "conversation"},
+        exclude_stimulus_ids=_conversation_stimulus_ids(stimuli),
+        summary_builder=lambda source_name, existing_summary, entries: _summarize_recent_conversation(
+            runtime.primary_client,
+            runtime.model_config,
+            source_name,
+            existing_summary,
+            entries,
+        ),
+    )
+
+
+def _summarize_recent_conversation(
+    client: ModelClient,
+    model_config: dict,
+    source_name: str,
+    existing_summary: str,
+    entries: list[ConversationEntry],
+) -> str | None:
+    existing = str(existing_summary or "").strip()
+    transcripts = _recent_conversation_summary_batches(entries, source_name)
+    if not transcripts:
+        return existing
+    current_summary = existing
+    for transcript in transcripts:
+        try:
+            response = client.chat(
+                model=str(model_config["name"]),
+                messages=[
+                    {"role": "system", "content": RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": _recent_conversation_summary_request(
+                            source_name,
+                            current_summary,
+                            transcript,
+                        ),
+                    },
+                ],
+                options={"temperature": 0.2, "max_tokens": 180},
+            )
+        except MODEL_CLIENT_EXCEPTIONS as exc:
+            logger.warning("recent conversation summary failed for %s: %s", source_name, exc)
+            return None
+        summary = _clean_recent_conversation_summary(response["message"].get("content"))
+        if not summary:
+            logger.warning("recent conversation summary returned empty text for %s", source_name)
+            return None
+        current_summary = summary
+    return current_summary
 
 
 def _handle_cycle_failure(
@@ -739,6 +849,76 @@ def _conversation_stimulus_ids(stimuli: list[Stimulus]) -> set[str]:
     return stimulus_ids
 
 
+def _recent_conversation_summary_request(
+    source_name: str,
+    existing_summary: str,
+    transcript: str,
+) -> str:
+    existing = existing_summary or "（无）"
+    return (
+        f"对方名字：{source_name}\n\n"
+        f"已有摘要：\n{existing}\n\n"
+        f"需要并入的新旧消息（按时间顺序）：\n{transcript}\n\n"
+        "请输出一段新的摘要，用来完整替换上面的旧摘要。"
+    )
+
+
+def _recent_conversation_summary_batches(
+    entries: list[ConversationEntry],
+    source_name: str,
+) -> list[str]:
+    batches: list[str] = []
+    current_lines: list[str] = []
+    current_chars = 0
+    for entry in entries:
+        line = _recent_conversation_summary_line(entry, source_name)
+        if not line:
+            continue
+        line_length = len(line) + 1
+        if current_lines and current_chars + line_length > RECENT_CONVERSATION_SUMMARY_BATCH_MAX_CHARS:
+            batches.append("\n".join(current_lines))
+            current_lines = [line]
+            current_chars = len(line)
+            continue
+        current_lines.append(line)
+        current_chars += line_length
+    if current_lines:
+        batches.append("\n".join(current_lines))
+    return batches
+
+
+def _recent_conversation_summary_line(
+    entry: ConversationEntry,
+    source_name: str,
+) -> str:
+    role = str(entry.get("role") or "").strip()
+    speaker = "我" if role == "assistant" else source_name
+    content = " ".join(str(entry.get("content") or "").split())
+    if not content:
+        return ""
+    max_content_chars = max(1, RECENT_CONVERSATION_SUMMARY_BATCH_MAX_CHARS - len(speaker) - 1)
+    content = _clip_recent_conversation_summary_content(content, max_content_chars)
+    return f"{speaker}：{content}"
+
+
+def _clip_recent_conversation_summary_content(content: str, max_chars: int) -> str:
+    if len(content) <= max_chars:
+        return content
+    if max_chars <= 3:
+        return content[:max_chars]
+    return content[: max_chars - 3].rstrip() + "..."
+
+
+def _clean_recent_conversation_summary(raw_summary: object) -> str:
+    summary = " ".join(str(raw_summary or "").split()).strip()
+    for prefix in ("摘要：", "对话摘要：", "新的摘要："):
+        if summary.startswith(prefix):
+            summary = summary[len(prefix):].strip()
+    if len(summary) <= RECENT_CONVERSATION_SUMMARY_MAX_CHARS:
+        return summary
+    return summary[: RECENT_CONVERSATION_SUMMARY_MAX_CHARS - 3].rstrip() + "..."
+
+
 def _sanitize_ltm_content(content: str) -> str:
     stripped = LTM_ACTION_MARKER_PATTERN.sub("", str(content).strip())
     return " ".join(stripped.split())
@@ -824,8 +1004,9 @@ def _print_stimuli(log_file: TextIO | None, stimuli: list[Stimulus]) -> None:
     print(f"{C_DIM}刺激{C_RESET}")
     lines = ["刺激"]
     for stimulus in stimuli:
-        print(f"  {C_DIM}[{stimulus.type}]{C_RESET} {stimulus.content}")
-        lines.append(f"  [{stimulus.type}] {stimulus.content}")
+        display_content = _stimulus_display_content(stimulus)
+        print(f"  {C_DIM}[{stimulus.type}]{C_RESET} {display_content}")
+        lines.append(f"  [{stimulus.type}] {display_content}")
     _write_log_message(log_file, "\n".join(lines))
 
 
@@ -843,6 +1024,19 @@ def _push_passive_stimuli(stimulus_queue: StimulusQueue, stimuli: list[Perceptio
 def _output(log_file: TextIO | None, text: str) -> None:
     print(text)
     _write_log_message(log_file, text)
+
+
+def _stimulus_display_content(stimulus: Stimulus) -> str:
+    merged_messages = stimulus.metadata.get("merged_messages")
+    if stimulus.type != "conversation" or not isinstance(merged_messages, list) or len(merged_messages) <= 1:
+        return stimulus.content
+    return " | ".join(_merged_message_log_text(message) for message in merged_messages)
+
+
+def _merged_message_log_text(message: object) -> str:
+    if isinstance(message, dict):
+        return _compact_conversation_text(str(message.get("content") or ""))
+    return _compact_conversation_text(str(message or ""))
 
 
 def _print_error(
