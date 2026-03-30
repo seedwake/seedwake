@@ -281,7 +281,7 @@ class LongTermMemoryPromptNormalizationTests(unittest.TestCase):
             memories = _retrieve_associations(ltm, MagicMock(), stm, "embed-model")
 
         self.assertEqual(memories, ["读过一段材料", "另一段记忆"])
-        ltm.search.assert_called_once_with([0.1, 0.2], top_k=15)
+        ltm.search.assert_called_once_with([0.1, 0.2], top_k=15, exclude_cycle_ids=[1])
         ltm.mark_accessed.assert_called_once_with([1, 3])
 
     def test_retrieve_associations_overfetches_to_preserve_distinct_memories(self) -> None:
@@ -301,7 +301,7 @@ class LongTermMemoryPromptNormalizationTests(unittest.TestCase):
             memories = _retrieve_associations(ltm, MagicMock(), stm, "embed-model")
 
         self.assertEqual(memories, ["重复记忆", "另一段记忆"])
-        ltm.search.assert_called_once_with([0.1, 0.2], top_k=6)
+        ltm.search.assert_called_once_with([0.1, 0.2], top_k=6, exclude_cycle_ids=[1])
         ltm.mark_accessed.assert_called_once_with([1, 3])
 
     def test_retrieve_associations_truncates_deduped_results_back_to_top_k(self) -> None:
@@ -322,8 +322,27 @@ class LongTermMemoryPromptNormalizationTests(unittest.TestCase):
             memories = _retrieve_associations(ltm, MagicMock(), stm, "embed-model")
 
         self.assertEqual(memories, ["重复记忆", "另一段记忆"])
-        ltm.search.assert_called_once_with([0.1, 0.2], top_k=6)
+        ltm.search.assert_called_once_with([0.1, 0.2], top_k=6, exclude_cycle_ids=[1])
         ltm.mark_accessed.assert_called_once_with([1, 3])
+
+    def test_retrieve_associations_excludes_all_cycles_in_stm_window(self) -> None:
+        entry_time = _make_thought(1, 1).timestamp
+        ltm = MagicMock()
+        ltm.available = True
+        ltm.retrieval_top_k = 2
+        ltm.search.return_value = [
+            LongTermEntry(3, "更久以前的记忆", "episodic", 1, 0.5, entry_time, 0.97),
+        ]
+        stm = ShortTermMemory(redis_client=None, context_window=2)
+        stm.append([
+            _make_thought(4, 1, "较近的念头"),
+            _make_thought(5, 1, "最新的念头"),
+        ])
+
+        with patch("core.main.embed_text", return_value=[0.1, 0.2]):
+            _retrieve_associations(ltm, MagicMock(), stm, "embed-model")
+
+        ltm.search.assert_called_once_with([0.1, 0.2], top_k=6, exclude_cycle_ids=[4, 5])
 
     def test_store_to_ltm_strips_action_markers_and_skips_batch_duplicates(self) -> None:
         ltm = MagicMock()

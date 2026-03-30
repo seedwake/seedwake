@@ -7,6 +7,7 @@ from core.model_client import ModelClient
 from core.prompt_builder import build_prompt
 from core.stimulus import Stimulus
 from core.thought_parser import Thought, fallback_thought, parse_thoughts
+from core.types import RecentConversationPrompt
 
 
 def run_cycle(
@@ -20,6 +21,7 @@ def run_cycle(
     stimuli: list[Stimulus] | None = None,
     running_actions: list[ActionRecord] | None = None,
     perception_cues: list[str] | None = None,
+    recent_conversations: list[RecentConversationPrompt] | None = None,
     prompt_log_file: TextIO | None = None,
 ) -> list[Thought]:
     """Execute one cycle and return parsed thoughts."""
@@ -29,6 +31,7 @@ def run_cycle(
         stimuli=stimuli,
         running_actions=running_actions,
         perception_cues=perception_cues,
+        recent_conversations=recent_conversations,
     )
     _write_prompt_log(prompt_log_file, cycle_id, prompt)
     raw_output = _call_ollama(client, prompt, model_config)

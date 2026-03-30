@@ -90,6 +90,21 @@ class ConversationEntry(TypedDict):
     metadata: JsonObject
 
 
+class RecentConversationMessage(TypedDict):
+    role: str
+    speaker_label: str
+    content: str
+    timestamp: str
+
+
+class RecentConversationPrompt(TypedDict):
+    source: str
+    source_label: str
+    summary: str
+    last_timestamp: str
+    messages: list[RecentConversationMessage]
+
+
 class PerceptionStimulusPayload(TypedDict):
     type: str
     priority: int

@@ -28,7 +28,14 @@ from core.openclaw_gateway import OpenClawGatewayExecutor, OpenClawUnavailableEr
 from core.perception import PerceptionManager
 from core.prompt_builder import build_prompt
 from core.rss import read_news_result, summarize_news_items
-from core.stimulus import CONVERSATION_HISTORY_KEY, Stimulus, StimulusQueue
+from core.stimulus import (
+    CONVERSATION_HISTORY_KEY,
+    CONVERSATION_SUMMARY_KEY,
+    Stimulus,
+    StimulusQueue,
+    append_conversation_history,
+    load_recent_conversations,
+)
 from core.thought_parser import Thought
 from core.types import ActionControl, ActionResultEnvelope, NewsItem
 from test_support import ListRedisStub
@@ -575,11 +582,11 @@ class StimulusQueueTests(unittest.TestCase):
         )
 
         self.assertIn(
-            'telegram:1 (Alice) [msg:101] 说：\n第一句\n\ntelegram:1 (Alice) [msg:102] 引用了我之前说的 [msg:98]：“之前那句” 说：\n第二句',
+            '[Alice](telegram:1) [msg:101] 说：\n第一句\n\n[Alice](telegram:1) [msg:102] 引用了我之前说的 [msg:98]：“之前那句” 说：\n第二句',
             prompt,
         )
         self.assertNotIn(
-            'telegram:1 (Alice) [msg:101] 引用了我之前说的 [msg:98]：“之前那句” 说：\n第一句',
+            '[Alice](telegram:1) [msg:101] 引用了我之前说的 [msg:98]：“之前那句” 说：\n第一句',
             prompt,
         )
 
@@ -631,6 +638,22 @@ class StimulusQueueTests(unittest.TestCase):
 
 class PromptBuilderPhase3Tests(unittest.TestCase):
     def test_prompt_includes_reordered_sections_and_sanitized_action_summaries(self) -> None:
+        redis_client = ListRedisStub()
+        append_conversation_history(
+            redis_client,
+            role="user",
+            source="telegram:1",
+            content="刚刚那个建议我记住了。",
+            metadata={"telegram_full_name": "Alice"},
+            timestamp=_make_thought(1, 1).timestamp,
+        )
+        append_conversation_history(
+            redis_client,
+            role="assistant",
+            source="telegram:1",
+            content="好，那我就接着陪你聊。",
+            timestamp=_make_thought(1, 2).timestamp,
+        )
         queue = StimulusQueue(redis_client=None)
         stimulus = queue.push(
             "conversation",
@@ -698,6 +721,10 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             stimuli=[stimulus, passive, action_echo],
             running_actions=[action, completed],
             perception_cues=["了解外界动态——最近发生了什么？"],
+            recent_conversations=load_recent_conversations(
+                redis_client,
+                include_sources={"telegram:1"},
+            ),
         )
 
         self.assertIn("## 最近的念头", prompt)
@@ -706,6 +733,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("## 我已经发起、正在等回音的事", prompt)
         self.assertIn("## 此刻我注意到", prompt)
         self.assertIn("## 行动有了回音", prompt)
+        self.assertIn("## 最近的对话", prompt)
         self.assertIn("## 有人对我说话了", prompt)
         self.assertIn("## 接下来的念头", prompt)
         self.assertLess(prompt.index("## 最近的念头"), prompt.index("## 浮上来的记忆"))
@@ -713,8 +741,12 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertLess(prompt.index("## 好像有一阵子没有……"), prompt.index("## 行动有了回音"))
         self.assertLess(prompt.index("## 行动有了回音"), prompt.index("## 我已经发起、正在等回音的事"))
         self.assertLess(prompt.index("## 我已经发起、正在等回音的事"), prompt.index("## 此刻我注意到"))
+        self.assertLess(prompt.index("## 此刻我注意到"), prompt.index("## 最近的对话"))
+        self.assertLess(prompt.index("## 最近的对话"), prompt.index("## 有人对我说话了"))
         self.assertLess(prompt.index("## 行动有了回音"), prompt.index("## 有人对我说话了"))
-        self.assertIn('telegram:1 (Alice) [msg:305] 引用了我之前说的 [msg:298]：“好，我自己找一篇关于有氧锻炼的文章” 说：谢谢你', prompt)
+        self.assertIn('[Alice](telegram:1) [msg:305] 引用了我之前说的 [msg:298]：“好，我自己找一篇关于有氧锻炼的文章” 说：谢谢你', prompt)
+        self.assertIn("与 [Alice](telegram:1) 的近期对话：", prompt)
+        self.assertIn("- 我：好，那我就接着陪你聊。", prompt)
         self.assertIn("如果我决定回应，需要用 {action:send_message} 真正把话发出去", prompt)
         self.assertIn("[时间感] 现在是晚上", prompt)
         self.assertIn("[搜索结果] 搜索完成 1. 标题 (https://example.com) —— 摘要", prompt)
@@ -737,6 +769,76 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("这种回应必须外化成 {action:send_message, ...}", prompt)
         self.assertIn("对话是前景，时间感和身体感觉只是背景", prompt)
         self.assertNotIn("你想发出的内容", prompt)
+
+    def test_load_recent_conversations_builds_summary_and_keeps_recent_raw_lines(self) -> None:
+        redis_client = ListRedisStub()
+        for index in range(12):
+            append_conversation_history(
+                redis_client,
+                role="user" if index % 2 == 0 else "assistant",
+                source="telegram:1",
+                content=f"第{index + 1}句",
+                metadata={"telegram_full_name": "Alice"},
+                timestamp=_make_thought(1, index + 1).timestamp,
+            )
+
+        conversations = load_recent_conversations(redis_client, include_sources={"telegram:1"})
+
+        self.assertEqual(len(conversations), 1)
+        conversation = conversations[0]
+        self.assertEqual(conversation["source_label"], "[Alice](telegram:1)")
+        self.assertEqual(len(conversation["messages"]), 10)
+        self.assertIn("第1句", conversation["summary"])
+        self.assertEqual(conversation["messages"][0]["content"], "第3句")
+        stored_summary = json.loads(redis_client.hashes[CONVERSATION_SUMMARY_KEY]["telegram:1"])
+        self.assertEqual(stored_summary["summary"], conversation["summary"])
+        self.assertTrue(stored_summary["absorbed_until"])
+
+    def test_load_recent_conversations_does_not_reabsorb_same_old_messages(self) -> None:
+        redis_client = ListRedisStub()
+        for index in range(12):
+            append_conversation_history(
+                redis_client,
+                role="user",
+                source="telegram:1",
+                content=f"第{index + 1}句",
+                metadata={"telegram_full_name": "Alice"},
+                timestamp=_make_thought(1, index + 1).timestamp,
+            )
+
+        first = load_recent_conversations(redis_client, include_sources={"telegram:1"})
+        second = load_recent_conversations(redis_client, include_sources={"telegram:1"})
+
+        self.assertEqual(first[0]["summary"], second[0]["summary"])
+
+    def test_load_recent_conversations_excludes_current_cycle_messages(self) -> None:
+        redis_client = ListRedisStub()
+        append_conversation_history(
+            redis_client,
+            role="user",
+            source="telegram:1",
+            content="更早那句",
+            stimulus_id="stim_old",
+            metadata={"telegram_full_name": "Alice"},
+            timestamp=_make_thought(1, 1).timestamp,
+        )
+        append_conversation_history(
+            redis_client,
+            role="user",
+            source="telegram:1",
+            content="当前这句",
+            stimulus_id="stim_current",
+            metadata={"telegram_full_name": "Alice"},
+            timestamp=_make_thought(1, 2).timestamp,
+        )
+
+        conversations = load_recent_conversations(
+            redis_client,
+            include_sources={"telegram:1"},
+            exclude_stimulus_ids={"stim_current"},
+        )
+
+        self.assertEqual([message["content"] for message in conversations[0]["messages"]], ["更早那句"])
 
     def test_running_send_message_summary_uses_request_not_source_content(self) -> None:
         action = MagicMock()
@@ -765,6 +867,39 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         self.assertIn('[send_message/running] 给 telegram:1 发送消息：“我在。”', prompt)
         self.assertNotIn("你怎么不说话", prompt)
+
+    def test_send_message_action_echo_uses_known_person_label(self) -> None:
+        prompt = build_prompt(
+            3,
+            {"self_description": "我是 Seedwake。"},
+            [],
+            30,
+            stimuli=[
+                Stimulus(
+                    stimulus_id="stim_send_echo",
+                    type="action_result",
+                    priority=2,
+                    source="action:act_send",
+                    content='已成功发送给 telegram:1：“我在。”',
+                    metadata={
+                        "origin": "action",
+                        "action_type": "send_message",
+                        "result": {
+                            "data": {"source": "telegram:1", "message": "我在。"},
+                        },
+                    },
+                ),
+            ],
+            recent_conversations=[{
+                "source": "telegram:1",
+                "source_label": "[Alice](telegram:1)",
+                "summary": "",
+                "last_timestamp": "2026-03-30T01:43:00+00:00",
+                "messages": [],
+            }],
+        )
+
+        self.assertIn('[发信结果] 已成功发送给 [Alice](telegram:1)：“我在。”', prompt)
 
 
 class TriggerValidationTests(unittest.TestCase):
@@ -916,6 +1051,13 @@ class PerceptionManagerTests(unittest.TestCase):
         stimuli = manager.collect_passive_stimuli(1)
 
         self.assertEqual({item["type"] for item in stimuli}, {"time", "system_status"})
+        time_payload = next(item for item in stimuli if item["type"] == "time")
+        self.assertIn("现在是 ", time_payload["content"])
+        self.assertNotIn("UTC 时间", time_payload["content"])
+        system_payload = next(item for item in stimuli if item["type"] == "system_status")
+        self.assertIn("1 分钟负载", system_payload["content"])
+        self.assertIn("核", system_payload["content"])
+        self.assertNotIn("/ CPU", system_payload["content"])
 
     def test_build_prompt_cues_offers_proactive_perception(self) -> None:
         manager = PerceptionManager.from_config({

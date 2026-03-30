@@ -29,7 +29,7 @@ from core.memory.short_term import LATEST_CYCLE_KEY, ShortTermMemory
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient, create_model_client
 from core.perception import PerceptionManager
 from core.runtime import connect_redis_from_env, load_yaml_config
-from core.stimulus import Stimulus, StimulusQueue
+from core.stimulus import Stimulus, StimulusQueue, load_recent_conversations
 from core.thought_parser import Thought
 from core.types import EventPayload, PerceptionStimulusPayload, StatusEventPayload
 
@@ -549,6 +549,11 @@ def _execute_cycle(
         runtime.stm,
         runtime.embedding_model,
     )
+    recent_conversations = load_recent_conversations(
+        runtime.stm.redis_client,
+        include_sources={stimulus.source for stimulus in stimuli if stimulus.type == "conversation"},
+        exclude_stimulus_ids=_conversation_stimulus_ids(stimuli),
+    )
     thoughts = run_cycle(
         runtime.primary_client,
         cycle_id,
@@ -560,6 +565,7 @@ def _execute_cycle(
         stimuli=stimuli,
         running_actions=running_actions,
         perception_cues=perception_cues,
+        recent_conversations=recent_conversations,
         prompt_log_file=prompt_log_file,
     )
     _sanitize_cycle_trigger_refs(thoughts, recent_thoughts)
@@ -629,12 +635,17 @@ def _retrieve_associations(
         return None
     anchor = context[-1]
     result_limit = _ltm_result_limit(ltm)
+    exclude_cycle_ids = _stm_cycle_ids(context)
     try:
         vec = embed_text(embedding_client, anchor.content, embedding_model)
     except EMBEDDING_EXCEPTIONS:
         return None
     try:
-        entries = ltm.search(vec, top_k=_ltm_search_limit(ltm))
+        entries = ltm.search(
+            vec,
+            top_k=_ltm_search_limit(ltm),
+            exclude_cycle_ids=exclude_cycle_ids,
+        )
         if not entries:
             return None
         memory_ids, contents = _dedupe_ltm_contents(entries, limit=result_limit)
@@ -708,6 +719,24 @@ def _ltm_result_limit(ltm: LongTermMemory) -> int:
 
 def _ltm_search_limit(ltm: LongTermMemory) -> int:
     return _ltm_result_limit(ltm) * LTM_RETRIEVAL_OVERSAMPLE_FACTOR
+
+
+def _stm_cycle_ids(context: list[Thought]) -> list[int]:
+    cycle_ids = sorted({thought.cycle_id for thought in context if isinstance(thought.cycle_id, int)})
+    return cycle_ids
+
+
+def _conversation_stimulus_ids(stimuli: list[Stimulus]) -> set[str]:
+    stimulus_ids: set[str] = set()
+    for stimulus in stimuli:
+        if stimulus.type != "conversation":
+            continue
+        if stimulus.stimulus_id:
+            stimulus_ids.add(stimulus.stimulus_id)
+        merged_ids = stimulus.metadata.get("merged_stimulus_ids")
+        if isinstance(merged_ids, list):
+            stimulus_ids.update(str(item).strip() for item in merged_ids if str(item).strip())
+    return stimulus_ids
 
 
 def _sanitize_ltm_content(content: str) -> str:

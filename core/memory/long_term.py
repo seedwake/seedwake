@@ -97,35 +97,31 @@ class LongTermMemory:
         query_embedding: list[float],
         top_k: int | None = None,
         entity_filter: str | None = None,
+        exclude_cycle_ids: list[int] | None = None,
     ) -> list[LongTermEntry]:
         """Retrieve semantically similar memories."""
         if not self.available:
             return []
         k = top_k or self._top_k
         vec_literal = _format_vector(query_embedding)
-
+        filters = ["is_active = TRUE"]
+        params: list[object] = [vec_literal]
         if entity_filter:
-            query = """
-                SELECT id, content, memory_type, source_cycle_id,
-                       importance, created_at,
-                       1 - (embedding <=> %s::vector) AS similarity
-                FROM long_term_memory
-                WHERE is_active = TRUE AND %s = ANY(entity_tags)
-                ORDER BY embedding <=> %s::vector
-                LIMIT %s
-            """
-            params = (vec_literal, entity_filter, vec_literal, k)
-        else:
-            query = """
-                SELECT id, content, memory_type, source_cycle_id,
-                       importance, created_at,
-                       1 - (embedding <=> %s::vector) AS similarity
-                FROM long_term_memory
-                WHERE is_active = TRUE
-                ORDER BY embedding <=> %s::vector
-                LIMIT %s
-            """
-            params = (vec_literal, vec_literal, k)
+            filters.append("%s = ANY(entity_tags)")
+            params.append(entity_filter)
+        if exclude_cycle_ids:
+            filters.append("(source_cycle_id IS NULL OR source_cycle_id <> ALL(%s))")
+            params.append(exclude_cycle_ids)
+        params.extend([vec_literal, k])
+        query = f"""
+            SELECT id, content, memory_type, source_cycle_id,
+                   importance, created_at,
+                   1 - (embedding <=> %s::vector) AS similarity
+            FROM long_term_memory
+            WHERE {' AND '.join(filters)}
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+        """
 
         try:
             with self._conn.cursor() as cur:

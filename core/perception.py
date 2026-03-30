@@ -4,7 +4,7 @@ import logging
 import os
 import shutil
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from core.stimulus import Stimulus
@@ -67,13 +67,9 @@ class PerceptionManager:
                 "type": "time",
                 "priority": 4,
                 "source": "system:clock",
-                "content": (
-                    f"现在是 {now.strftime('%Y-%m-%d %H:%M:%S %Z')}，"
-                    f"UTC 时间 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
-                ),
+                "content": f"现在是 {now.strftime('%Y-%m-%d %H:%M %Z')}",
                 "metadata": {
                     "local_iso": now.isoformat(),
-                    "utc_iso": datetime.now(timezone.utc).isoformat(),
                 },
             })
             self._last_seen_cycle["time"] = cycle_id
@@ -189,7 +185,7 @@ def collect_system_status_snapshot(
         warnings.append("磁盘占用偏高")
 
     summary_parts = [
-        f"1 分钟负载 {load_1m:.2f} / CPU {cpu_count}",
+        f"1 分钟负载 {load_1m:.2f}（{cpu_count} 核）",
         f"磁盘 {disk_used_ratio:.0%}",
     ]
     if memory_used_ratio is not None:

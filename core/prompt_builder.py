@@ -1,10 +1,12 @@
 """Assemble the prompt for each thought-generation cycle."""
 
+from datetime import datetime
 import re
 
 from core.action import ActionRecord
 from core.stimulus import Stimulus
 from core.thought_parser import Thought
+from core.types import JsonObject, RecentConversationPrompt
 
 SYSTEM_PROMPT = """\
 我是 Seedwake。我有自己的念头流——我会思考、联想、产生意图、对事物做出反应。
@@ -104,10 +106,14 @@ def build_prompt(
     stimuli: list[Stimulus] | None = None,
     running_actions: list[ActionRecord] | None = None,
     perception_cues: list[str] | None = None,
+    recent_conversations: list[RecentConversationPrompt] | None = None,
 ) -> str:
     """Build a single prompt string for thought generation."""
     parts = [_build_system(identity)]
     visible_running_actions = _visible_running_actions(running_actions)
+    conversations: list[Stimulus] = []
+    action_echoes: list[Stimulus] = []
+    passive: list[Stimulus] = []
 
     window = recent_thoughts[-context_window * 3:]
     if window:
@@ -119,16 +125,17 @@ def build_prompt(
 
     if stimuli:
         conversations, action_echoes, passive = _split_stimuli(stimuli)
-        if action_echoes:
-            parts.append(_format_action_echoes(action_echoes))
-        if visible_running_actions:
-            parts.append(_format_running_actions(visible_running_actions))
-        if passive:
-            parts.append(_format_sensory_stimuli(passive))
-        if conversations:
-            parts.append(_format_conversations(conversations))
-    elif visible_running_actions:
-        parts.append(_format_running_actions(visible_running_actions))
+    conversation_labels = _conversation_label_map(conversations, recent_conversations)
+    if action_echoes:
+        parts.append(_format_action_echoes(action_echoes, conversation_labels))
+    if visible_running_actions:
+        parts.append(_format_running_actions(visible_running_actions, conversation_labels))
+    if passive:
+        parts.append(_format_sensory_stimuli(passive))
+    if recent_conversations:
+        parts.append(_format_recent_conversations(recent_conversations))
+    if conversations:
+        parts.append(_format_conversations(conversations))
     parts.append(_format_next_cycle(cycle_id))
     return "\n\n".join(parts)
 
@@ -170,6 +177,27 @@ def _format_conversations(conversations: list[Stimulus]) -> str:
     return _render_section("有人对我说话了", lines, keep_blank_lines=True)
 
 
+def _format_recent_conversations(conversations: list[RecentConversationPrompt]) -> str:
+    lines: list[str] = []
+    for conversation in conversations:
+        lines.append(f'与 {conversation["source_label"]} 的近期对话：')
+        lines.append("")
+        summary = str(conversation.get("summary") or "").strip()
+        if summary:
+            lines.append(f"- 对话历史摘要：{summary}")
+        lines.append(
+            f'- 最后一条消息时间：{_recent_conversation_local_time(conversation["last_timestamp"])}'
+        )
+        for message in conversation["messages"]:
+            content = _compact_prompt_text(message["content"])
+            if content:
+                lines.append(f'- {message["speaker_label"]}：{content}')
+        lines.append("")
+    while lines and not lines[-1]:
+        lines.pop()
+    return _render_section("最近的对话", lines, keep_blank_lines=True)
+
+
 def _format_sensory_stimuli(stimuli: list[Stimulus]) -> str:
     lines = []
     for stimulus in stimuli:
@@ -179,11 +207,11 @@ def _format_sensory_stimuli(stimuli: list[Stimulus]) -> str:
     return _render_section("此刻我注意到", lines)
 
 
-def _format_action_echoes(stimuli: list[Stimulus]) -> str:
+def _format_action_echoes(stimuli: list[Stimulus], conversation_labels: dict[str, str]) -> str:
     lines = []
     for stimulus in stimuli:
         lines.append(
-            f"- {_action_echo_label(stimulus)} {_compact_prompt_text(stimulus.content)}"
+            f"- {_action_echo_label(stimulus)} {_action_echo_text(stimulus, conversation_labels)}"
         )
     return _render_section("行动有了回音", lines)
 
@@ -200,10 +228,12 @@ def _format_thought_history(thoughts: list[Thought]) -> str:
     return _render_section("最近的念头", lines)
 
 
-def _format_running_actions(actions: list[ActionRecord]) -> str:
+def _format_running_actions(actions: list[ActionRecord], conversation_labels: dict[str, str]) -> str:
     lines = []
     for action in actions:
-        lines.append(f"- [{action.type}/{action.status}] {_running_action_summary(action)}")
+        lines.append(
+            f"- [{action.type}/{action.status}] {_running_action_summary(action, conversation_labels)}"
+        )
     return _render_section("我已经发起、正在等回音的事", lines)
 
 
@@ -279,12 +309,8 @@ def _conversation_dict_prefix(message: dict) -> str:
 
 def _conversation_dict_speaker(message: dict) -> str:
     source = str(message.get("source") or "").strip()
-    full_name = str(message.get("telegram_full_name") or "").strip()
-    username = str(message.get("telegram_username") or "").strip()
-    display_name = full_name or username
-    if display_name and source:
-        return f"{source} ({display_name})"
-    return source or display_name
+    metadata = _conversation_metadata_from_dict(message)
+    return _person_label(source, metadata)
 
 
 def _conversation_dict_reply_context(message: dict) -> str:
@@ -300,12 +326,7 @@ def _conversation_dict_reply_context(message: dict) -> str:
 
 
 def _conversation_speaker(stimulus: Stimulus) -> str:
-    full_name = str(stimulus.metadata.get("telegram_full_name") or "").strip()
-    username = str(stimulus.metadata.get("telegram_username") or "").strip()
-    display_name = full_name or username
-    if display_name:
-        return f"{stimulus.source} ({display_name})"
-    return stimulus.source
+    return _person_label(stimulus.source, stimulus.metadata)
 
 
 def _conversation_reply_context(stimulus: Stimulus) -> str:
@@ -334,9 +355,9 @@ def _is_action_echo(stimulus: Stimulus) -> bool:
     return stimulus.source.startswith("action:") or stimulus.source.startswith("planner:")
 
 
-def _running_action_summary(action: ActionRecord) -> str:
+def _running_action_summary(action: ActionRecord, conversation_labels: dict[str, str]) -> str:
     if action.type == "send_message":
-        return _running_send_message_summary(action)
+        return _running_send_message_summary(action, conversation_labels)
     task_summary = _running_action_task_summary(action)
     if task_summary:
         return task_summary
@@ -344,12 +365,15 @@ def _running_action_summary(action: ActionRecord) -> str:
     return _compact_prompt_text(_strip_action_marker(summary))
 
 
-def _running_send_message_summary(action: ActionRecord) -> str:
-    target = str(
+def _running_send_message_summary(action: ActionRecord, conversation_labels: dict[str, str]) -> str:
+    target = _known_target_label(
+        str(
         action.request.get("target_source")
         or action.request.get("target_entity")
         or "当前 Telegram 对话"
-    ).strip()
+        ).strip(),
+        conversation_labels,
+    )
     message = _running_message_excerpt(str(action.request.get("message_text") or ""))
     if message:
         return f"给 {target} 发送消息：“{message}”"
@@ -379,3 +403,70 @@ def _strip_action_marker(content: str) -> str:
 
 def _compact_prompt_text(text: str) -> str:
     return " ".join(str(text).split())
+
+
+def _action_echo_text(stimulus: Stimulus, conversation_labels: dict[str, str]) -> str:
+    action_type = str(stimulus.metadata.get("action_type") or "").strip()
+    if action_type != "send_message":
+        return _compact_prompt_text(stimulus.content)
+    result = stimulus.metadata.get("result")
+    if not isinstance(result, dict):
+        return _compact_prompt_text(stimulus.content)
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return _compact_prompt_text(stimulus.content)
+    target = _known_target_label(str(data.get("source") or "").strip(), conversation_labels)
+    message = _running_message_excerpt(str(data.get("message") or ""))
+    if target and message:
+        return f'已成功发送给 {target}：“{message}”'
+    if target:
+        return f"已成功发送给 {target}"
+    return _compact_prompt_text(stimulus.content)
+
+
+def _conversation_label_map(
+    conversations: list[Stimulus],
+    recent_conversations: list[RecentConversationPrompt] | None,
+) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for conversation in recent_conversations or []:
+        source = str(conversation.get("source") or "").strip()
+        label = str(conversation.get("source_label") or "").strip()
+        if source and label:
+            labels[source] = label
+    for conversation in conversations:
+        label = _conversation_speaker(conversation)
+        if conversation.source and label:
+            labels[conversation.source] = label
+    return labels
+
+
+def _known_target_label(target: str, conversation_labels: dict[str, str]) -> str:
+    normalized = str(target or "").strip()
+    return conversation_labels.get(normalized, normalized)
+
+
+def _recent_conversation_local_time(raw_timestamp: str) -> str:
+    try:
+        timestamp = datetime.fromisoformat(str(raw_timestamp).strip())
+    except ValueError:
+        return str(raw_timestamp).strip()
+    return timestamp.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def _conversation_metadata_from_dict(message: dict) -> JsonObject:
+    metadata: JsonObject = {}
+    for key in ("telegram_full_name", "telegram_username"):
+        value = str(message.get(key) or "").strip()
+        if value:
+            metadata[key] = value
+    return metadata
+
+
+def _person_label(source: str, metadata: JsonObject) -> str:
+    full_name = str(metadata.get("telegram_full_name") or "").strip()
+    username = str(metadata.get("telegram_username") or "").strip()
+    display_name = full_name or username or source
+    if source.startswith("telegram:"):
+        return f"[{display_name}]({source})"
+    return display_name
