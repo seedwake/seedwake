@@ -37,6 +37,7 @@ from core.types import (
 ACTION_REDIS_KEY = "seedwake:actions"
 ACTION_CONTROL_KEY = "seedwake:action_control"
 NEWS_SEEN_REDIS_KEY = "seedwake:news_seen"
+TELEGRAM_SEND_FINISHED_LOG = "telegram send finished in %.1f ms (target=%s, status=%s)"
 TELEGRAM_SOURCE_PREFIX = "telegram:"
 OPENCLAW_ACTION_TYPES = {"search", "web_fetch", "system_change", "custom", "weather", "reading", "file_modify"}
 DELEGATED_TOOL_COMPAT_ACTION_TYPES = {"news", "send_message"}
@@ -2247,21 +2248,11 @@ def _send_telegram_message(
     )
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
-        logger.info(
-            "telegram send finished in %.1f ms (target=%s, status=%s)",
-            elapsed_ms(started_at),
-            target_source,
-            "telegram_token_missing",
-        )
+        _log_telegram_send_finished(started_at, target_source, "telegram_token_missing")
         return "telegram_token_missing"
     chat_id = _telegram_chat_id_from_source(target_source)
     if chat_id is None:
-        logger.info(
-            "telegram send finished in %.1f ms (target=%s, status=%s)",
-            elapsed_ms(started_at),
-            target_source,
-            "invalid_telegram_target",
-        )
+        _log_telegram_send_finished(started_at, target_source, "invalid_telegram_target")
         return "invalid_telegram_target"
     body_dict: JsonObject = {
         "chat_id": chat_id,
@@ -2280,37 +2271,22 @@ def _send_telegram_message(
         with request.urlopen(req, timeout=max(1, timeout_seconds)) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except error.HTTPError as exc:
-        logger.info(
-            "telegram send finished in %.1f ms (target=%s, status=http_%s)",
-            elapsed_ms(started_at),
-            target_source,
-            exc.code,
-        )
+        _log_telegram_send_finished(started_at, target_source, f"http_{exc.code}")
         return f"http_{exc.code}"
     except TELEGRAM_SEND_EXCEPTIONS as exc:
-        logger.info(
-            "telegram send finished in %.1f ms (target=%s, status=%s)",
-            elapsed_ms(started_at),
-            target_source,
-            str(exc),
-        )
+        _log_telegram_send_finished(started_at, target_source, str(exc))
         return str(exc)
     if not isinstance(payload, dict) or not bool(payload.get("ok")):
         description = ""
         if isinstance(payload, dict):
             description = str(payload.get("description") or "").strip()
-        logger.info(
-            "telegram send finished in %.1f ms (target=%s, status=%s)",
-            elapsed_ms(started_at),
+        _log_telegram_send_finished(
+            started_at,
             target_source,
             description or "telegram_send_failed",
         )
         return description or "telegram_send_failed"
-    logger.info(
-        "telegram send finished in %.1f ms (target=%s, status=ok)",
-        elapsed_ms(started_at),
-        target_source,
-    )
+    _log_telegram_send_finished(started_at, target_source, "ok")
     return None
 
 
@@ -2321,6 +2297,19 @@ def _telegram_chat_id_from_source(source: str) -> str | None:
     if chat_id.isdigit() or (chat_id.startswith("-") and chat_id[1:].isdigit()):
         return chat_id
     return None
+
+
+def _log_telegram_send_finished(
+    started_at: float,
+    target_source: str,
+    status: str,
+) -> None:
+    logger.info(
+        TELEGRAM_SEND_FINISHED_LOG,
+        elapsed_ms(started_at),
+        target_source,
+        status,
+    )
 
 
 def _prepare_send_message(
@@ -2674,28 +2663,31 @@ def pop_action_controls(redis_client: ActionRedisLike | None, limit: int = 20) -
     controls = []
     for _ in range(limit):
         try:
-            raw_items = redis_client.lrange(ACTION_CONTROL_KEY, 0, 0)
+            raw = _pop_next_action_control_payload(redis_client)
         except ACTION_REDIS_EXCEPTIONS:
             return controls
-        if not raw_items:
+        if raw is None:
             break
-        raw = raw_items[0]
-        try:
-            control = json.loads(raw)
-        except (TypeError, ValueError):
-            try:
-                redis_client.ltrim(ACTION_CONTROL_KEY, 1, -1)
-            except ACTION_REDIS_EXCEPTIONS:
-                return controls
-            continue
-        parsed_control = _coerce_action_control(control)
+        parsed_control = _parse_action_control_payload(raw)
         if parsed_control is not None:
             controls.append(parsed_control)
-        try:
-            redis_client.ltrim(ACTION_CONTROL_KEY, 1, -1)
-        except ACTION_REDIS_EXCEPTIONS:
-            return controls
     return controls
+
+
+def _pop_next_action_control_payload(redis_client: ActionRedisLike) -> str | None:
+    raw_items = redis_client.lrange(ACTION_CONTROL_KEY, 0, 0)
+    if not raw_items:
+        return None
+    redis_client.ltrim(ACTION_CONTROL_KEY, 1, -1)
+    return raw_items[0]
+
+
+def _parse_action_control_payload(raw: str) -> ActionControl | None:
+    try:
+        control = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return _coerce_action_control(control)
 
 
 def _action_from_json_object(item: JsonObject, *, now: datetime) -> ActionRecord | None:

@@ -47,6 +47,7 @@ def _websocket_exception_types(exceptions_module: ModuleType) -> tuple[type[Base
 
 ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 CONNECT_TIMEOUT_SECONDS = 10
+OPENCLAW_DEVICE_AUTH_DEPENDENCY_ERROR = "缺少 cryptography 依赖，无法完成 OpenClaw device auth。"
 OPENCLAW_TRANSPORT_EXCEPTIONS = (
     OllamaRequestError,
     OllamaResponseError,
@@ -565,9 +566,7 @@ def _load_or_create_device_identity(path_str: str) -> dict[str, str]:
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric import ed25519
     except ImportError as exc:
-        raise RuntimeError(
-            "缺少 cryptography 依赖，无法完成 OpenClaw device auth。"
-        ) from exc
+        raise RuntimeError(OPENCLAW_DEVICE_AUTH_DEPENDENCY_ERROR) from exc
     private_key = ed25519.Ed25519PrivateKey.generate()
     public_key = private_key.public_key()
     public_key_pem = public_key.public_bytes(
@@ -609,9 +608,7 @@ def _public_key_raw_from_pem(public_key_pem: str) -> bytes:
     try:
         from cryptography.hazmat.primitives import serialization
     except ImportError as exc:
-        raise RuntimeError(
-            "缺少 cryptography 依赖，无法完成 OpenClaw device auth。"
-        ) from exc
+        raise RuntimeError(OPENCLAW_DEVICE_AUTH_DEPENDENCY_ERROR) from exc
     key = serialization.load_pem_public_key(public_key_pem.encode("utf-8"))
     spki = key.public_bytes(
         encoding=serialization.Encoding.DER,
@@ -626,9 +623,7 @@ def _sign_device_payload(private_key_pem: str, payload: str) -> str:
     try:
         from cryptography.hazmat.primitives import serialization
     except ImportError as exc:
-        raise RuntimeError(
-            "缺少 cryptography 依赖，无法完成 OpenClaw device auth。"
-        ) from exc
+        raise RuntimeError(OPENCLAW_DEVICE_AUTH_DEPENDENCY_ERROR) from exc
     private_key = serialization.load_pem_private_key(
         private_key_pem.encode("utf-8"),
         password=None,

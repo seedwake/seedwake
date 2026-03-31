@@ -257,11 +257,20 @@ def _sanitize_trigger_refs(thoughts: list[Thought]) -> bool:
     valid_ids: set[str] = set()
     for thought in thoughts:
         trigger_ref = str(thought.trigger_ref or "").strip()
-        if trigger_ref and trigger_ref not in valid_ids:
-            thought.trigger_ref = None
-            changed = True
-        elif not trigger_ref and thought.trigger_ref is not None:
+        if _should_clear_trigger_ref(trigger_ref, thought, valid_ids):
             thought.trigger_ref = None
             changed = True
         valid_ids.add(thought.thought_id)
     return changed
+
+
+def _should_clear_trigger_ref(
+    trigger_ref: str,
+    thought: Thought,
+    valid_ids: set[str],
+) -> bool:
+    return (
+        bool(trigger_ref) and trigger_ref not in valid_ids
+    ) or (
+        not trigger_ref and thought.trigger_ref is not None
+    )

@@ -417,13 +417,16 @@ def _partition_cycle_stimuli(
     deferred: list[Stimulus] = []
 
     for index, stimulus in enumerate(ranked_stimuli):
+        if _collect_matching_conversation_stimulus(
+            stimulus,
+            conversation_source,
+            conversation_group,
+        ):
+            if first_conversation_index is None:
+                first_conversation_index = index
+            continue
         if stimulus.type == "conversation":
-            if stimulus.source == conversation_source:
-                if first_conversation_index is None:
-                    first_conversation_index = index
-                conversation_group.append(stimulus)
-            else:
-                deferred.append(stimulus)
+            deferred.append(stimulus)
             continue
         if _is_background_stimulus_during_conversation(stimulus):
             continue
@@ -445,6 +448,17 @@ def _partition_cycle_stimuli(
 
 def _is_background_stimulus_during_conversation(stimulus: Stimulus) -> bool:
     return stimulus.type in {"time", "system_status"}
+
+
+def _collect_matching_conversation_stimulus(
+    stimulus: Stimulus,
+    conversation_source: str,
+    conversation_group: list[Stimulus],
+) -> bool:
+    if stimulus.type != "conversation" or stimulus.source != conversation_source:
+        return False
+    conversation_group.append(stimulus)
+    return True
 
 
 def _merge_conversation_stimuli(conversation_group: list[Stimulus]) -> Stimulus:
@@ -829,9 +843,7 @@ def _sanitize_cycle_trigger_refs(thoughts: list[Thought], recent_thoughts: list[
         trigger_ref = str(thought.trigger_ref or "").strip()
         if not trigger_ref:
             thought.trigger_ref = None
-        elif trigger_ref in valid_ids:
-            pass
-        else:
+        elif trigger_ref not in valid_ids:
             logger.warning("dropping invalid trigger_ref for %s: %s", thought.thought_id, trigger_ref)
             thought.trigger_ref = None
         valid_ids.add(thought.thought_id)

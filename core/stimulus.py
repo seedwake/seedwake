@@ -7,7 +7,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from threading import RLock
-from typing import Protocol
+from typing import Protocol, TypeGuard
 from redis import exceptions as redis_exceptions
 from uuid import uuid4
 
@@ -282,20 +282,56 @@ def _sync_conversation_history(
 ) -> None:
     merged_messages = stimulus.metadata.get("merged_messages")
     merged_ids = stimulus.metadata.get("merged_stimulus_ids")
-    if isinstance(merged_messages, list) and isinstance(merged_ids, list) and len(merged_messages) == len(merged_ids):
-        for index, message in enumerate(merged_messages):
-            history_stimulus_id = str(merged_ids[index] or "").strip()
-            if history_stimulus_id and history_stimulus_id in existing_history_ids:
-                continue
-            _append_merged_conversation_history_entry(
-                redis_client,
-                stimulus,
-                message,
-                history_stimulus_id or None,
-            )
-            if history_stimulus_id:
-                existing_history_ids.add(history_stimulus_id)
+    if _has_complete_merged_history_payload(merged_messages, merged_ids):
+        assert isinstance(merged_ids, list)
+        _sync_merged_conversation_history(
+            redis_client,
+            stimulus,
+            existing_history_ids,
+            merged_messages,
+            merged_ids,
+        )
         return
+    _sync_single_conversation_history(redis_client, stimulus, existing_history_ids)
+
+
+def _has_complete_merged_history_payload(
+    merged_messages: JsonValue,
+    merged_ids: JsonValue,
+) -> TypeGuard[list[JsonValue]]:
+    return (
+        isinstance(merged_messages, list)
+        and isinstance(merged_ids, list)
+        and len(merged_messages) == len(merged_ids)
+    )
+
+
+def _sync_merged_conversation_history(
+    redis_client: ConversationRedisLike,
+    stimulus: Stimulus,
+    existing_history_ids: set[str],
+    merged_messages: list[JsonValue],
+    merged_ids: list[JsonValue],
+) -> None:
+    for index, message in enumerate(merged_messages):
+        history_stimulus_id = str(merged_ids[index] or "").strip()
+        if history_stimulus_id and history_stimulus_id in existing_history_ids:
+            continue
+        _append_merged_conversation_history_entry(
+            redis_client,
+            stimulus,
+            message,
+            history_stimulus_id or None,
+        )
+        if history_stimulus_id:
+            existing_history_ids.add(history_stimulus_id)
+
+
+def _sync_single_conversation_history(
+    redis_client: ConversationRedisLike,
+    stimulus: Stimulus,
+    existing_history_ids: set[str],
+) -> None:
     history_stimulus_id = str(stimulus.stimulus_id or "").strip()
     if history_stimulus_id and history_stimulus_id in existing_history_ids:
         return
@@ -419,46 +455,70 @@ def load_recent_conversations(
     forced_sources = include_sources or set()
     hidden_stimulus_ids = exclude_stimulus_ids or set()
     for source, entries in grouped.items():
-        last_timestamp = _conversation_timestamp(entries[-1])
-        if last_timestamp is None:
-            continue
-        if not _conversation_is_recent(source, last_timestamp, forced_sources, within_hours):
-            continue
-        display_entries = _conversation_display_entries(entries, hidden_stimulus_ids)
-        metadata = _latest_named_metadata(entries)
-        source_name = _conversation_source_name(source, metadata)
-        source_label = _conversation_source_label(source, metadata)
-        existing_summary, absorbed_until, summary_current = stored_summaries.get(source, ("", "", False))
-        summary = _refresh_conversation_summary(
+        prompt_item = _build_recent_conversation_prompt(
             redis_client,
+            stored_summaries,
             source,
-            source_name,
-            existing_summary,
-            absorbed_until,
-            summary_current,
             entries,
+            forced_sources,
+            hidden_stimulus_ids,
             summary_builder,
             raw_limit,
+            within_hours,
         )
-        recent_entries = display_entries[-raw_limit:] if raw_limit > 0 else []
-        if not recent_entries and not summary:
+        if prompt_item is None:
             continue
-        prompt: RecentConversationPrompt = {
-            "source": source,
-            "source_name": source_name,
-            "source_label": source_label,
-            "summary": summary,
-            "last_timestamp": last_timestamp.isoformat(),
-            "messages": [
-                _recent_conversation_message(entry, source_name) for entry in recent_entries
-            ],
-        }
-        recent_conversations.append((
-            last_timestamp,
-            prompt,
-        ))
+        recent_conversations.append(prompt_item)
     recent_conversations.sort(key=lambda item: item[0])
     return [item for _, item in recent_conversations]
+
+
+def _build_recent_conversation_prompt(
+    redis_client: ConversationRedisLike,
+    stored_summaries: dict[str, tuple[str, str, bool]],
+    source: str,
+    entries: list[ConversationEntry],
+    forced_sources: set[str],
+    hidden_stimulus_ids: set[str],
+    summary_builder: Callable[[str, str, list[ConversationEntry]], str | None] | None,
+    raw_limit: int,
+    within_hours: int,
+) -> tuple[datetime, RecentConversationPrompt] | None:
+    last_timestamp = _conversation_timestamp(entries[-1])
+    if last_timestamp is None:
+        return None
+    if not _conversation_is_recent(source, last_timestamp, forced_sources, within_hours):
+        return None
+    display_entries = _conversation_display_entries(entries, hidden_stimulus_ids)
+    metadata = _latest_named_metadata(entries)
+    source_name = _conversation_source_name(source, metadata)
+    source_label = _conversation_source_label(source, metadata)
+    existing_summary, absorbed_until, summary_current = stored_summaries.get(source, ("", "", False))
+    summary = _refresh_conversation_summary(
+        redis_client,
+        source,
+        source_name,
+        existing_summary,
+        absorbed_until,
+        summary_current,
+        entries,
+        summary_builder,
+        raw_limit,
+    )
+    recent_entries = display_entries[-raw_limit:] if raw_limit > 0 else []
+    if not recent_entries and not summary:
+        return None
+    prompt: RecentConversationPrompt = {
+        "source": source,
+        "source_name": source_name,
+        "source_label": source_label,
+        "summary": summary,
+        "last_timestamp": last_timestamp.isoformat(),
+        "messages": [
+            _recent_conversation_message(entry, source_name) for entry in recent_entries
+        ],
+    }
+    return last_timestamp, prompt
 
 
 def _load_conversation_summaries(redis_client: ConversationRedisLike) -> dict[str, tuple[str, str, bool]]:
@@ -486,37 +546,102 @@ def _refresh_conversation_summary(
     raw_limit: int,
 ) -> str:
     older_entries = entries[:-raw_limit] if len(entries) > raw_limit else []
-    incremental_entries = [
-        entry for entry in older_entries
-        if _conversation_entry_is_newer(entry, absorbed_until)
-    ]
+    incremental_entries = _incremental_conversation_entries(older_entries, absorbed_until)
     original_summary = str(existing_summary or "").strip()
-    summary = original_summary
-    entries_to_summarize = older_entries if older_entries and not summary_current else incremental_entries
-    if entries_to_summarize:
-        if summary_builder is None:
-            return summary
-        summary_seed = summary if summary_current else ""
-        next_summary = summary_builder(source_name, summary_seed, entries_to_summarize)
-        if next_summary is None:
-            return summary
-        summary = str(next_summary).strip()
-    next_absorbed_until = str(older_entries[-1].get("timestamp") or "").strip() if older_entries else absorbed_until
-    if not entries_to_summarize and next_absorbed_until == absorbed_until:
+    entries_to_summarize = _conversation_entries_to_summarize(
+        older_entries,
+        incremental_entries,
+        summary_current,
+    )
+    summary = _next_conversation_summary(
+        source_name,
+        original_summary,
+        summary_current,
+        entries_to_summarize,
+        summary_builder,
+    )
+    if summary is None:
+        return original_summary
+    next_absorbed_until = _next_conversation_absorbed_until(older_entries, absorbed_until)
+    if _conversation_summary_unchanged(entries_to_summarize, next_absorbed_until, absorbed_until):
         return summary
     try:
-        redis_client.hset(
-            CONVERSATION_SUMMARY_KEY,
-            source,
-            json.dumps({
-                "version": RECENT_CONVERSATION_SUMMARY_VERSION,
-                "summary": summary,
-                "absorbed_until": next_absorbed_until,
-            }, ensure_ascii=False),
-        )
+        _store_conversation_summary(redis_client, source, summary, next_absorbed_until)
     except STIMULUS_REDIS_EXCEPTIONS:
         return summary
     return summary
+
+
+def _incremental_conversation_entries(
+    older_entries: list[ConversationEntry],
+    absorbed_until: str,
+) -> list[ConversationEntry]:
+    return [
+        entry for entry in older_entries
+        if _conversation_entry_is_newer(entry, absorbed_until)
+    ]
+
+
+def _conversation_entries_to_summarize(
+    older_entries: list[ConversationEntry],
+    incremental_entries: list[ConversationEntry],
+    summary_current: bool,
+) -> list[ConversationEntry]:
+    if older_entries and not summary_current:
+        return older_entries
+    return incremental_entries
+
+
+def _next_conversation_summary(
+    source_name: str,
+    existing_summary: str,
+    summary_current: bool,
+    entries_to_summarize: list[ConversationEntry],
+    summary_builder: Callable[[str, str, list[ConversationEntry]], str | None] | None,
+) -> str | None:
+    if not entries_to_summarize:
+        return existing_summary
+    if summary_builder is None:
+        return existing_summary
+    summary_seed = existing_summary if summary_current else ""
+    next_summary = summary_builder(source_name, summary_seed, entries_to_summarize)
+    if next_summary is None:
+        return None
+    return str(next_summary).strip()
+
+
+def _next_conversation_absorbed_until(
+    older_entries: list[ConversationEntry],
+    absorbed_until: str,
+) -> str:
+    if not older_entries:
+        return absorbed_until
+    return str(older_entries[-1].get("timestamp") or "").strip()
+
+
+def _conversation_summary_unchanged(
+    entries_to_summarize: list[ConversationEntry],
+    next_absorbed_until: str,
+    absorbed_until: str,
+) -> bool:
+    return not entries_to_summarize and next_absorbed_until == absorbed_until
+
+
+def _store_conversation_summary(
+    redis_client: ConversationRedisLike,
+    source: str,
+    summary: str,
+    absorbed_until: str,
+) -> None:
+    redis_client.hset(
+        CONVERSATION_SUMMARY_KEY,
+        source,
+        json.dumps({
+            "version": RECENT_CONVERSATION_SUMMARY_VERSION,
+            "summary": summary,
+            "absorbed_until": absorbed_until,
+        }, ensure_ascii=False),
+    )
 
 
 def _recent_conversation_message(
