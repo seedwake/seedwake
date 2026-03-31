@@ -10,12 +10,13 @@ import time
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING, AsyncContextManager, Protocol, cast
 from urllib import error, request
 from uuid import uuid4
 
 from ollama import RequestError as OllamaRequestError, ResponseError as OllamaResponseError
-from core.types import ActionResultEnvelope, JsonObject, JsonValue
+from core.types import ActionResultEnvelope, JsonObject, JsonValue, coerce_json_value, elapsed_ms
 
 if TYPE_CHECKING:
     from core.action import ActionRecord
@@ -24,6 +25,25 @@ try:
     from websockets import exceptions as ws_exceptions
 except ImportError:
     ws_exceptions = None
+
+
+def _websocket_exception_types(exceptions_module: ModuleType) -> tuple[type[BaseException], ...]:
+    exception_names = (
+        "ConnectionClosed",
+        "ConcurrencyError",
+        "NegotiationError",
+        "ProtocolError",
+        "ProxyError",
+        "SecurityError",
+        "WebSocketProtocolError",
+    )
+    exception_types: list[type[BaseException]] = []
+    for name in exception_names:
+        exception_type = getattr(exceptions_module, name, None)
+        if isinstance(exception_type, type) and issubclass(exception_type, BaseException):
+            exception_types.append(exception_type)
+    return tuple(exception_types)
+
 
 ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 CONNECT_TIMEOUT_SECONDS = 10
@@ -39,13 +59,7 @@ OPENCLAW_TRANSPORT_EXCEPTIONS = (
 if ws_exceptions is not None:
     OPENCLAW_TRANSPORT_EXCEPTIONS = (
         *OPENCLAW_TRANSPORT_EXCEPTIONS,
-        ws_exceptions.ConnectionClosed,
-        ws_exceptions.ConcurrencyError,
-        ws_exceptions.NegotiationError,
-        ws_exceptions.ProtocolError,
-        ws_exceptions.ProxyError,
-        ws_exceptions.SecurityError,
-        ws_exceptions.WebSocketProtocolError,
+        *_websocket_exception_types(ws_exceptions),
     )
 RESULT_SYSTEM_PROMPT = """\
 You are a worker for Seedwake.
@@ -125,7 +139,7 @@ class OpenClawGatewayExecutor:
                 "openclaw action %s [%s] finished in %.1f ms (status=%s, transport=%s)",
                 action.action_id,
                 action.type,
-                _elapsed_ms(started_at),
+                elapsed_ms(started_at),
                 status,
                 transport,
             )
@@ -412,7 +426,7 @@ def _normalize_agent_final(frame: JsonObject, *, run_id: str | None, session_key
     result_payload = _json_object_or_empty(payload.get("result"))
     text = _extract_payload_text(result_payload)
     normalized = _normalize_worker_text(text)
-    normalized["run_id"] = payload.get("runId") or run_id
+    normalized["run_id"] = _optional_text(payload.get("runId")) or run_id
     normalized["session_key"] = session_key
     normalized["transport"] = "ws"
     return normalized
@@ -426,6 +440,13 @@ def _extract_payload_text(result_payload: dict) -> str:
         if isinstance(payload, dict) and payload.get("text")
     ]
     return "\n\n".join(texts).strip()
+
+
+def _optional_text(value: JsonValue) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
 
 
 def _extract_responses_api_text(response_body: dict) -> str:
@@ -496,7 +517,7 @@ def _build_gateway_result(
         "ok": ok,
         "summary": summary,
         "data": data,
-        "error": _coerce_json_value(error_detail),
+        "error": coerce_json_value(error_detail),
         "run_id": run_id,
         "session_key": session_key,
         "transport": transport,
@@ -521,7 +542,7 @@ def _import_websockets() -> _WebsocketsModule:
         raise RuntimeError(
             "缺少 websockets 依赖，无法使用 OpenClaw WS。可安装依赖或启用 HTTP fallback。"
         ) from exc
-    return cast(_WebsocketsModule, websockets)
+    return cast(_WebsocketsModule, cast(object, websockets))
 
 
 def _load_or_create_device_identity(path_str: str) -> dict[str, str]:
@@ -612,7 +633,13 @@ def _sign_device_payload(private_key_pem: str, payload: str) -> str:
         private_key_pem.encode("utf-8"),
         password=None,
     )
-    return _base64url_encode(private_key.sign(payload.encode("utf-8")))
+    sign = getattr(private_key, "sign", None)
+    if not callable(sign):
+        raise RuntimeError("cryptography private key does not support signing")
+    signature = sign(payload.encode("utf-8"))
+    if not isinstance(signature, bytes):
+        raise RuntimeError("cryptography private key returned a non-bytes signature")
+    return _base64url_encode(signature)
 
 
 def _build_device_auth_payload(
@@ -647,10 +674,6 @@ def _base64url_encode(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def _elapsed_ms(started_at: float) -> float:
-    return (time.perf_counter() - started_at) * 1000.0
-
-
 def _result_status(result: "ActionResultEnvelope") -> str:
     return "ok" if bool(result.get("ok", True)) else "failed"
 
@@ -659,13 +682,3 @@ def _json_object_or_empty(value: JsonValue) -> JsonObject:
     if not isinstance(value, dict):
         return {}
     return {str(key): item for key, item in value.items()}
-
-
-def _coerce_json_value(value: JsonValue) -> JsonValue:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, list):
-        return [_coerce_json_value(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _coerce_json_value(item) for key, item in value.items()}
-    return str(value)

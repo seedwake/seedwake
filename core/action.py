@@ -12,8 +12,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 from urllib import error, request
-
-import redis as redis_lib
+from typing import Protocol
 from redis import exceptions as redis_exceptions
 
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient
@@ -29,8 +28,10 @@ from core.types import (
     JsonObject,
     JsonValue,
     NewsItem,
+    PerceptionStimulusPayload,
     RawActionRequest,
-    StimulusRecord,
+    coerce_json_value,
+    elapsed_ms,
 )
 
 ACTION_REDIS_KEY = "seedwake:actions"
@@ -165,15 +166,43 @@ class ActionCallbacks:
     event: Callable[[str, JsonObject], None] | None = None
 
 
+class PlannerLike(Protocol):
+    def plan(
+        self,
+        thought: Thought,
+        *,
+        conversation_source: str | None = None,
+    ) -> ActionPlan | tuple[None, str | None] | None: ...
+
+
+class OpenClawExecutorLike(Protocol):
+    def execute(self, action: ActionRecord) -> ActionResultEnvelope: ...
+
+
+class ActionRedisLike(Protocol):
+    def hset(self, key: str, hash_field: str, value: str) -> int: ...
+    def hvals(self, key: str) -> list[str]: ...
+    def hgetall(self, key: str) -> dict[str, str]: ...
+    def rpush(self, key: str, payload: str) -> int: ...
+    def ltrim(self, key: str, start: int, end: int) -> bool: ...
+    def lrange(self, key: str, start: int, end: int) -> list[str]: ...
+    def zscore(self, key: str, member: str) -> float | None: ...
+    def zadd(self, key: str, mapping: dict[str, float], nx: bool = False) -> int: ...
+    def zrem(self, key: str, member: str) -> int: ...
+    def zremrangebyscore(self, key: str, min_score: str | float, max_score: str | float) -> int: ...
+    def zcard(self, key: str) -> int: ...
+    def zremrangebyrank(self, key: str, start: int, end: int) -> int: ...
+
+
 class ActionManager:
     """Owns action planning, execution, state, and result stimuli."""
 
     def __init__(
         self,
-        redis_client: redis_lib.Redis | None,
+        redis_client: ActionRedisLike | None,
         stimulus_queue: StimulusQueue,
-        planner: "ActionPlanner",
-        openclaw_executor: OpenClawGatewayExecutor,
+        planner: PlannerLike,
+        openclaw_executor: OpenClawExecutorLike,
         *,
         auto_execute: list[str],
         require_confirmation: list[str],
@@ -310,7 +339,7 @@ class ActionManager:
             self._perception_observations.clear()
         return observations
 
-    def attach_redis(self, redis_client: redis_lib.Redis | None) -> bool:
+    def attach_redis(self, redis_client: ActionRedisLike | None) -> bool:
         self._redis = redis_client
         try:
             self._restore_from_redis()
@@ -414,7 +443,7 @@ class ActionManager:
                 action.action_id,
                 action.type,
                 action.executor,
-                _elapsed_ms(started_at),
+                elapsed_ms(started_at),
                 terminal_status,
             )
 
@@ -603,19 +632,20 @@ class ActionManager:
             summary = f"我刚才想 {raw_action_type}，但那股冲动被抑制了"
         result = _failure_result(summary, "ignored_by_planner", transport="planner")
         self._emit(f"行动已跳过 {thought.thought_id} [{raw_action_type}]")
+        metadata: JsonObject = {
+            "origin": "action",
+            "action_type": raw_action_type,
+            "status": "ignored",
+            "executor": "planner",
+            "source_thought_id": thought.thought_id,
+            "result": _action_result_to_json_object(result),
+        }
         self._stimulus_queue.push(
             "action_result",
             2,
             f"planner:{thought.thought_id}",
             summary,
-            metadata={
-                "origin": "action",
-                "action_type": raw_action_type,
-                "status": "ignored",
-                "executor": "planner",
-                "source_thought_id": thought.thought_id,
-                "result": result,
-            },
+            metadata=metadata,
         )
 
     def _publish_action_event(self, action: ActionRecord, status: str, summary: str) -> None:
@@ -649,8 +679,9 @@ class ActionManager:
         if not source or not message:
             return
         try:
+            # ActionRedisLike covers rpush/ltrim used by append_conversation_history
             append_conversation_history(
-                self._redis,
+                self._redis,  # type: ignore[arg-type]
                 role="assistant",
                 source=source,
                 content=message,
@@ -786,10 +817,10 @@ class ActionManager:
             if self._redis:
                 try:
                     self._redis.zremrangebyscore(NEWS_SEEN_REDIS_KEY, "-inf", now_ts)
-                    added = self._redis.zadd(
+                    added = _redis_zadd_nx(
+                        self._redis,
                         NEWS_SEEN_REDIS_KEY,
                         {item_key: expires_at},
-                        nx=True,
                     )
                     if not added:
                         score = self._redis.zscore(NEWS_SEEN_REDIS_KEY, item_key)
@@ -840,7 +871,7 @@ class ActionManager:
         for item_key, _ in ranked[:extra]:
             self._news_seen_shadow.pop(item_key, None)
 
-    def _prune_news_seen_redis(self, redis_client: redis_lib.Redis, now_ts: float) -> None:
+    def _prune_news_seen_redis(self, redis_client: ActionRedisLike, now_ts: float) -> None:
         redis_client.zremrangebyscore(NEWS_SEEN_REDIS_KEY, "-inf", now_ts)
         total = int(redis_client.zcard(NEWS_SEEN_REDIS_KEY) or 0)
         extra = total - self._news_seen_max_items
@@ -933,7 +964,7 @@ class ActionManager:
         }
         if not valid_items:
             return
-        redis_client.zadd(NEWS_SEEN_REDIS_KEY, valid_items)
+        _redis_zadd(redis_client, NEWS_SEEN_REDIS_KEY, valid_items)
         self._prune_news_seen_redis(redis_client, now_ts)
 
 
@@ -976,7 +1007,10 @@ class ActionPlanner:
                 tools=_planner_tools(),
                 options=self._options,
             )
-            tool_calls = response["message"].get("tool_calls") or []
+            message = response.get("message")
+            tool_calls = message.get("tool_calls") if isinstance(message, dict) else []
+            if not isinstance(tool_calls, list):
+                tool_calls = []
             if tool_calls:
                 tool_name = tool_calls[0]["function"]["name"]
                 logger.info("planner tool call: %s for %s (raw_type=%s)",
@@ -1010,10 +1044,11 @@ class ActionPlanner:
             messages=_planner_json_messages(thought, conversation_source=conversation_source),
             options={**self._options, "max_tokens": 512},
         )
+        message = response.get("message")
         logger.info("planner json decision for %s (raw_type=%s)",
                     thought.thought_id, action_request.get("type"))
         return _plan_from_json_reply(
-            raw_content=str(response["message"].get("content") or ""),
+            raw_content=str(message.get("content") or "") if isinstance(message, dict) else "",
             thought=thought,
             default_timeout_seconds=self._default_timeout_seconds,
             default_weather_location=self._default_weather_location,
@@ -1025,7 +1060,7 @@ class ActionPlanner:
 
 
 def create_action_manager(
-    redis_client: redis_lib.Redis | None,
+    redis_client: ActionRedisLike | None,
     stimulus_queue: StimulusQueue,
     planner_client: ModelClient,
     model_config: dict,
@@ -1801,7 +1836,7 @@ def _build_action_result(
         "ok": ok,
         "summary": summary,
         "data": data,
-        "error": _coerce_json_value(error_detail),
+        "error": coerce_json_value(error_detail),
         "run_id": run_id,
         "session_key": session_key,
         "transport": transport,
@@ -1963,7 +1998,7 @@ def _action_from_plan(
     request_payload = _build_action_request_payload(
         task=plan.task,
         reason=plan.reason,
-        raw_action=_coerce_raw_action_request(thought.action_request or {}),
+        raw_action=thought.action_request,
         news_feed_urls=plan.news_feed_urls,
         worker_agent_id=plan.worker_agent_id,
         target_source=plan.target_source or str(conversation_source or "").strip(),
@@ -2214,7 +2249,7 @@ def _send_telegram_message(
     if not token:
         logger.info(
             "telegram send finished in %.1f ms (target=%s, status=%s)",
-            _elapsed_ms(started_at),
+            elapsed_ms(started_at),
             target_source,
             "telegram_token_missing",
         )
@@ -2223,7 +2258,7 @@ def _send_telegram_message(
     if chat_id is None:
         logger.info(
             "telegram send finished in %.1f ms (target=%s, status=%s)",
-            _elapsed_ms(started_at),
+            elapsed_ms(started_at),
             target_source,
             "invalid_telegram_target",
         )
@@ -2247,7 +2282,7 @@ def _send_telegram_message(
     except error.HTTPError as exc:
         logger.info(
             "telegram send finished in %.1f ms (target=%s, status=http_%s)",
-            _elapsed_ms(started_at),
+            elapsed_ms(started_at),
             target_source,
             exc.code,
         )
@@ -2255,7 +2290,7 @@ def _send_telegram_message(
     except TELEGRAM_SEND_EXCEPTIONS as exc:
         logger.info(
             "telegram send finished in %.1f ms (target=%s, status=%s)",
-            _elapsed_ms(started_at),
+            elapsed_ms(started_at),
             target_source,
             str(exc),
         )
@@ -2266,14 +2301,14 @@ def _send_telegram_message(
             description = str(payload.get("description") or "").strip()
         logger.info(
             "telegram send finished in %.1f ms (target=%s, status=%s)",
-            _elapsed_ms(started_at),
+            elapsed_ms(started_at),
             target_source,
             description or "telegram_send_failed",
         )
         return description or "telegram_send_failed"
     logger.info(
         "telegram send finished in %.1f ms (target=%s, status=ok)",
-        _elapsed_ms(started_at),
+        elapsed_ms(started_at),
         target_source,
     )
     return None
@@ -2354,7 +2389,7 @@ def _build_result_stimulus(
     action: ActionRecord,
     status: str,
     result: ActionResultEnvelope,
-) -> StimulusRecord:
+) -> PerceptionStimulusPayload:
     stimulus_type = _infer_stimulus_type(action, status, result)
     return {
         "type": stimulus_type,
@@ -2366,7 +2401,7 @@ def _build_result_stimulus(
             "action_type": action.type,
             "status": status,
             "executor": action.executor,
-            "result": result,
+            "result": _action_result_to_json_object(result),
         },
     }
 
@@ -2585,7 +2620,7 @@ def _clip_prompt_text(text: str, limit: int) -> tuple[str, bool]:
 
 
 def push_action_control(
-    redis_client: redis_lib.Redis | None,
+    redis_client: ActionRedisLike | None,
     action_id: str,
     *,
     approved: bool,
@@ -2608,7 +2643,7 @@ def push_action_control(
     return True
 
 
-def load_action_items(redis_client: redis_lib.Redis | None) -> list[JsonObject]:
+def load_action_items(redis_client: ActionRedisLike | None) -> list[JsonObject]:
     if redis_client is None:
         return []
     try:
@@ -2633,7 +2668,7 @@ def load_action_items(redis_client: redis_lib.Redis | None) -> list[JsonObject]:
     return items
 
 
-def pop_action_controls(redis_client: redis_lib.Redis | None, limit: int = 20) -> list[ActionControl]:
+def pop_action_controls(redis_client: ActionRedisLike | None, limit: int = 20) -> list[ActionControl]:
     if redis_client is None or limit <= 0:
         return []
     controls = []
@@ -2803,7 +2838,7 @@ def _coerce_restored_action_result(value: JsonValue) -> ActionResultEnvelope | N
         "ok": bool(value.get("ok", False)),
         "summary": _stringify_json_field(value.get("summary")) or "",
         "data": restored_data,
-        "error": _coerce_json_value(value.get("error")),
+        "error": coerce_json_value(value.get("error")),
         "run_id": _stringify_json_field(value.get("run_id")) or None,
         "session_key": _stringify_json_field(value.get("session_key")) or None,
         "transport": _stringify_json_field(value.get("transport")) or "",
@@ -2844,13 +2879,14 @@ def _coerce_action_control(value: JsonValue) -> ActionControl | None:
         or not isinstance(approved, bool)
     ):
         return None
-    return {
+    control: ActionControl = {
         "action_id": action_id,
         "approved": approved,
         "actor": actor,
         "note": note,
         "timestamp": timestamp,
     }
+    return control
 
 
 def _parse_action_datetime(value: JsonValue) -> datetime | None:
@@ -2862,21 +2898,28 @@ def _parse_action_datetime(value: JsonValue) -> datetime | None:
         return None
 
 
+def _action_result_to_json_object(result: ActionResultEnvelope) -> JsonObject:
+    payload: JsonObject = {}
+    for key, value in result.items():
+        payload[key] = coerce_json_value(value)
+    return payload
+
+
 def _coerce_json_object(value: JsonValue) -> JsonObject:
     if not isinstance(value, dict):
         return {}
-    return {str(key): _coerce_json_value(item) for key, item in value.items()}
+    return {str(key): coerce_json_value(item) for key, item in value.items()}
 
 
-def _coerce_json_value(value: JsonValue) -> JsonValue:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, list):
-        return [_coerce_json_value(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _coerce_json_value(item) for key, item in value.items()}
-    return str(value)
+def _redis_zadd(redis_client: ActionRedisLike, key: str, mapping: dict[str, float]) -> int:
+    # redis-py supports mapping-based ZADD, but the bundled IDE stub still models
+    # the legacy score/member signature.
+    # noinspection PyArgumentList
+    return int(redis_client.zadd(key, mapping))
 
 
-def _elapsed_ms(started_at: float) -> float:
-    return (time.perf_counter() - started_at) * 1000.0
+def _redis_zadd_nx(redis_client: ActionRedisLike, key: str, mapping: dict[str, float]) -> int:
+    # redis-py supports mapping-based ZADD with NX, but the bundled IDE stub still
+    # models the legacy score/member signature.
+    # noinspection PyArgumentList
+    return int(redis_client.zadd(key, mapping, nx=True))

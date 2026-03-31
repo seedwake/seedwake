@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from contextlib import suppress
+from typing import Protocol, cast
 
 import redis as redis_lib
 from dotenv import load_dotenv
@@ -25,10 +26,10 @@ from bot.helpers import (
     load_admin_user_ids,
     load_allowed_user_ids,
 )
-from core.action import load_action_items, push_action_control
+from core.action import ActionRedisLike, load_action_items, push_action_control
 from core.logging import setup_logging
 from core.runtime import connect_redis_from_env, load_yaml_config
-from core.stimulus import StimulusQueue
+from core.stimulus import ConversationRedisLike, StimulusQueue
 from core.types import (
     ActionEventPayload,
     AuthorizedTelegramUser,
@@ -50,6 +51,16 @@ BOT_REDIS_EXCEPTIONS = (
     TypeError,
     ValueError,
 )
+
+
+class _RedisPubSub(Protocol):
+    def subscribe(self, *channels: str) -> int: ...
+
+    def get_message(self, timeout: float = 0.0) -> dict[str, JsonValue] | None: ...
+
+    def close(self) -> None: ...
+
+
 BOT_SEND_EXCEPTIONS = (
     TelegramError,
     RuntimeError,
@@ -205,7 +216,7 @@ async def _handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if not text:
         return
     content = _build_conversation_content(text)
-    queue = StimulusQueue(redis_client)
+    queue = StimulusQueue(_as_conversation_redis(redis_client))
     queue.push(
         "conversation",
         1,
@@ -229,7 +240,7 @@ async def _handle_action_callback(update: Update, context: ContextTypes.DEFAULT_
     approved = action == "approve"
     redis_client = _ensure_redis_client(context.application)
     pushed = push_action_control(
-        redis_client,
+        _as_action_redis(redis_client),
         action_id,
         approved=approved,
         actor=f"telegram:{user['user_id']}",
@@ -289,7 +300,7 @@ async def _start_event_forwarder(application: Application) -> None:
     await asyncio.sleep(0)
 
 
-async def _open_event_pubsub(redis_client: redis_lib.Redis) -> redis_lib.client.PubSub:
+async def _open_event_pubsub(redis_client: redis_lib.Redis) -> _RedisPubSub:
     pubsub = redis_client.pubsub(ignore_subscribe_messages=True)
     await asyncio.to_thread(pubsub.subscribe, EVENT_CHANNEL)
     return pubsub
@@ -297,7 +308,7 @@ async def _open_event_pubsub(redis_client: redis_lib.Redis) -> redis_lib.client.
 
 async def _forward_event_messages(
     application: Application,
-    pubsub: redis_lib.client.PubSub,
+    pubsub: _RedisPubSub,
 ) -> None:
     while True:
         envelope = await _read_event_envelope(pubsub)
@@ -307,7 +318,7 @@ async def _forward_event_messages(
         await _dispatch_event(application, envelope)
 
 
-async def _read_event_envelope(pubsub: redis_lib.client.PubSub) -> EventEnvelope | None:
+async def _read_event_envelope(pubsub: _RedisPubSub) -> EventEnvelope | None:
     message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
     if message is None:
         return None
@@ -373,7 +384,7 @@ async def _handle_control_command(
     note = " ".join(context.args[1:]).strip()
     redis_client = _ensure_redis_client(context.application)
     pushed = push_action_control(
-        redis_client,
+        _as_action_redis(redis_client),
         action_id,
         approved=approved,
         actor=f"telegram:{effective_user.id}",
@@ -452,6 +463,14 @@ def _ensure_redis_client(application: Application) -> redis_lib.Redis | None:
     return redis_client
 
 
+def _as_action_redis(redis_client: redis_lib.Redis | None) -> ActionRedisLike | None:
+    return cast(ActionRedisLike | None, redis_client)
+
+
+def _as_conversation_redis(redis_client: redis_lib.Redis | None) -> ConversationRedisLike | None:
+    return cast(ConversationRedisLike | None, redis_client)
+
+
 def _mark_redis_unavailable(application: Application) -> None:
     application.bot_data["redis"] = None
 
@@ -527,7 +546,7 @@ def _load_actions(redis_client: redis_lib.Redis | None) -> list[JsonObject]:
     if redis_client is None:
         return []
     try:
-        return load_action_items(redis_client)
+        return load_action_items(_as_action_redis(redis_client))
     except BOT_REDIS_EXCEPTIONS as exc:
         raise RuntimeError("redis unavailable") from exc
 

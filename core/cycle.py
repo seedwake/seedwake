@@ -9,7 +9,7 @@ from core.model_client import ModelClient, build_generation_request_log
 from core.prompt_builder import build_prompt
 from core.stimulus import Stimulus
 from core.thought_parser import Thought, fallback_thought, parse_thoughts
-from core.types import RecentConversationPrompt
+from core.types import RecentConversationPrompt, elapsed_ms
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ def run_cycle(
         perception_cues=perception_cues,
         recent_conversations=recent_conversations,
     )
-    build_elapsed_ms = _elapsed_ms(build_started_at)
+    build_elapsed_ms = elapsed_ms(build_started_at)
     logger.info("cycle C%s prompt built in %.1f ms (chars=%d)", cycle_id, build_elapsed_ms, len(prompt))
     write_prompt_log_block(
         prompt_log_file,
@@ -48,11 +48,11 @@ def run_cycle(
     )
     generation_started_at = time.perf_counter()
     raw_output = _call_ollama(client, prompt, model_config)
-    generation_elapsed_ms = _elapsed_ms(generation_started_at)
+    generation_elapsed_ms = elapsed_ms(generation_started_at)
     logger.info("cycle C%s generation finished in %.1f ms (chars=%d)", cycle_id, generation_elapsed_ms, len(raw_output))
     parse_started_at = time.perf_counter()
     thoughts = parse_thoughts(raw_output, cycle_id)
-    parse_elapsed_ms = _elapsed_ms(parse_started_at)
+    parse_elapsed_ms = elapsed_ms(parse_started_at)
     logger.info("cycle C%s thought parsing finished in %.1f ms (count=%d)", cycle_id, parse_elapsed_ms, len(thoughts))
 
     if not thoughts:
@@ -93,7 +93,3 @@ def write_prompt_log_block(
     prompt_log_file.write(prompt)
     prompt_log_file.write("\n" + end_banner + "\n" + f"🔴🔴🔴 {title} END 🔴🔴🔴\n" + end_banner + "\n\n")
     prompt_log_file.flush()
-
-
-def _elapsed_ms(started_at: float) -> float:
-    return (time.perf_counter() - started_at) * 1000.0

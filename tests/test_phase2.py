@@ -3,6 +3,7 @@ import unittest
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import psycopg
@@ -10,6 +11,7 @@ import redis as redis_lib
 
 # noinspection PyProtectedMember
 from core.main import (
+    EngineRuntime,
     _execute_cycle,
     _run_engine_loop,
     _maybe_reconnect_pg,
@@ -80,6 +82,16 @@ def _seed_existing_history(redis_client: MagicMock, *, latest_cycle_id: str | No
     redis_client.get.return_value = latest_cycle_id
     redis_client.zrange.return_value = [json.dumps(_thought_to_dict(_make_thought(8, 1, "old")))]
     redis_client.eval.return_value = 9
+
+
+def _as_runtime(value: SimpleNamespace) -> EngineRuntime:
+    return cast(EngineRuntime, cast(object, value))
+
+
+def _build_association_stm() -> ShortTermMemory:
+    stm = ShortTermMemory(redis_client=None, context_window=2)
+    stm.append([_make_thought(1, 1, "当前念头")])
+    return stm
 
 
 class ShortTermMemoryRedisDegradationTests(unittest.TestCase):
@@ -277,8 +289,7 @@ class LongTermMemoryPromptNormalizationTests(unittest.TestCase):
             LongTermEntry(2, "读过一段材料 {action:reading}", "episodic", 1, 0.5, entry_time, 0.8),
             LongTermEntry(3, "另一段记忆", "episodic", 1, 0.5, entry_time, 0.7),
         ]
-        stm = ShortTermMemory(redis_client=None, context_window=2)
-        stm.append([_make_thought(1, 1, "当前念头")])
+        stm = _build_association_stm()
 
         with patch("core.main.embed_text", return_value=[0.1, 0.2]):
             memories = _retrieve_associations(ltm, MagicMock(), stm, "embed-model")
@@ -287,7 +298,11 @@ class LongTermMemoryPromptNormalizationTests(unittest.TestCase):
         ltm.search.assert_called_once_with([0.1, 0.2], top_k=15, exclude_cycle_ids=[1])
         ltm.mark_accessed.assert_called_once_with([1, 3])
 
-    def test_retrieve_associations_overfetches_to_preserve_distinct_memories(self) -> None:
+    @staticmethod
+    def _run_dedup_association_test(
+        extra_entries: list[LongTermEntry],
+    ) -> tuple[list[str] | None, MagicMock]:
+        """Shared setup for retrieval-dedup tests with top_k=2."""
         entry_time = _make_thought(1, 1).timestamp
         ltm = MagicMock()
         ltm.available = True
@@ -296,12 +311,15 @@ class LongTermMemoryPromptNormalizationTests(unittest.TestCase):
             LongTermEntry(1, "重复记忆 {action:news}", "episodic", 1, 0.5, entry_time, 0.99),
             LongTermEntry(2, "重复记忆 {action:news}", "episodic", 1, 0.5, entry_time, 0.98),
             LongTermEntry(3, "另一段记忆", "episodic", 1, 0.5, entry_time, 0.97),
+            *extra_entries,
         ]
-        stm = ShortTermMemory(redis_client=None, context_window=2)
-        stm.append([_make_thought(1, 1, "当前念头")])
-
+        stm = _build_association_stm()
         with patch("core.main.embed_text", return_value=[0.1, 0.2]):
             memories = _retrieve_associations(ltm, MagicMock(), stm, "embed-model")
+        return memories, ltm
+
+    def test_retrieve_associations_overfetches_to_preserve_distinct_memories(self) -> None:
+        memories, ltm = self._run_dedup_association_test([])
 
         self.assertEqual(memories, ["重复记忆", "另一段记忆"])
         ltm.search.assert_called_once_with([0.1, 0.2], top_k=6, exclude_cycle_ids=[1])
@@ -309,26 +327,16 @@ class LongTermMemoryPromptNormalizationTests(unittest.TestCase):
 
     def test_retrieve_associations_truncates_deduped_results_back_to_top_k(self) -> None:
         entry_time = _make_thought(1, 1).timestamp
-        ltm = MagicMock()
-        ltm.available = True
-        ltm.retrieval_top_k = 2
-        ltm.search.return_value = [
-            LongTermEntry(1, "重复记忆 {action:news}", "episodic", 1, 0.5, entry_time, 0.99),
-            LongTermEntry(2, "重复记忆 {action:news}", "episodic", 1, 0.5, entry_time, 0.98),
-            LongTermEntry(3, "另一段记忆", "episodic", 1, 0.5, entry_time, 0.97),
+        memories, ltm = self._run_dedup_association_test([
             LongTermEntry(4, "第三段记忆", "episodic", 1, 0.5, entry_time, 0.96),
-        ]
-        stm = ShortTermMemory(redis_client=None, context_window=2)
-        stm.append([_make_thought(1, 1, "当前念头")])
-
-        with patch("core.main.embed_text", return_value=[0.1, 0.2]):
-            memories = _retrieve_associations(ltm, MagicMock(), stm, "embed-model")
+        ])
 
         self.assertEqual(memories, ["重复记忆", "另一段记忆"])
         ltm.search.assert_called_once_with([0.1, 0.2], top_k=6, exclude_cycle_ids=[1])
         ltm.mark_accessed.assert_called_once_with([1, 3])
 
-    def test_retrieve_associations_excludes_all_cycles_in_stm_window(self) -> None:
+    @staticmethod
+    def test_retrieve_associations_excludes_all_cycles_in_stm_window() -> None:
         entry_time = _make_thought(1, 1).timestamp
         ltm = MagicMock()
         ltm.available = True
@@ -430,7 +438,7 @@ class CycleTimingLogTests(unittest.TestCase):
         with self.assertLogs("core.main", level="INFO") as logs:
             with self.assertRaises(RuntimeError):
                 _execute_cycle(
-                    runtime,
+                    _as_runtime(runtime),
                     cycle_id=42,
                     identity={"self_description": "我"},
                     stimuli=[],
@@ -616,7 +624,7 @@ class CycleCounterTests(unittest.TestCase):
             patch("core.main._finish_cycle", side_effect=finish_cycle) as finish_cycle_mock,
         ):
             with self.assertRaises(KeyboardInterrupt):
-                _run_engine_loop(log_file=None, prompt_log_file=None, runtime=runtime, identity={})
+                _run_engine_loop(log_file=None, prompt_log_file=None, runtime=_as_runtime(runtime), identity={})
 
         next_cycle_id.assert_called_once_with(runtime.stm, 0)
         handle_failure.assert_called_once()

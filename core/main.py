@@ -20,7 +20,13 @@ import psycopg
 import redis as redis_lib
 from dotenv import load_dotenv
 
-from core.action import ActionManager, ActionRecord, create_action_manager, pop_action_controls
+from core.action import (
+    ActionManager,
+    ActionRecord,
+    ActionRedisLike,
+    create_action_manager,
+    pop_action_controls,
+)
 from core.cycle import run_cycle, write_prompt_log_block
 from core.embedding import embed_text
 from core.logging import resolve_log_path, setup_logging
@@ -31,6 +37,7 @@ from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient, create_model
 from core.perception import PerceptionManager
 from core.runtime import connect_redis_from_env, load_yaml_config
 from core.stimulus import (
+    ConversationRedisLike,
     RECENT_CONVERSATION_SUMMARY_MAX_CHARS,
     Stimulus,
     StimulusQueue,
@@ -45,6 +52,7 @@ from core.types import (
     JsonValue,
     RecentConversationPrompt,
     StatusEventPayload,
+    elapsed_ms,
 )
 
 # Terminal colors
@@ -196,10 +204,10 @@ def _build_runtime_components(
     identity = load_identity(pg_conn, bootstrap_identity)
     stm = ShortTermMemory(redis_client, context_window, buffer_size)
     ltm = LongTermMemory(pg_conn, retrieval_top_k)
-    stimulus_queue = StimulusQueue(redis_client)
+    stimulus_queue = StimulusQueue(_as_conversation_redis(redis_client))
     perception = PerceptionManager.from_config(_perception_config(config))
     action_manager = create_action_manager(
-        redis_client,
+        _as_action_redis(redis_client),
         stimulus_queue,
         primary_client,
         model_config,
@@ -363,7 +371,7 @@ def _prepare_cycle(
         last_pg_reconnect,
     )
     _push_passive_stimuli(runtime.stimulus_queue, runtime.perception.collect_passive_stimuli(cycle_id))
-    controls = pop_action_controls(runtime.stm.redis_client)
+    controls = pop_action_controls(_as_action_redis(runtime.stm.redis_client))
     runtime.action_manager.apply_controls(controls)
     runtime.action_manager.retry_deferred_actions()
     stimuli = _select_cycle_stimuli(runtime.stimulus_queue)
@@ -589,8 +597,8 @@ def _redis_recovered(
         return False
     if had_redis and stimulus_queue.redis_available and action_manager.redis_available:
         return False
-    queue_ok = stimulus_queue.attach_redis(stm.redis_client)
-    action_ok = action_manager.attach_redis(stm.redis_client)
+    queue_ok = stimulus_queue.attach_redis(stm.redis_client)  # type: ignore[arg-type]
+    action_ok = action_manager.attach_redis(stm.redis_client)  # type: ignore[arg-type]
     return queue_ok and action_ok
 
 
@@ -617,7 +625,7 @@ def _execute_cycle(
         logger.info(
             "cycle C%s association retrieval finished in %.1f ms (count=%d)",
             cycle_id,
-            _elapsed_ms(ltm_started_at),
+            elapsed_ms(ltm_started_at),
             len(ltm_context or []),
         )
         conversations_started_at = time.perf_counter()
@@ -625,7 +633,7 @@ def _execute_cycle(
         logger.info(
             "cycle C%s recent conversations loaded in %.1f ms (count=%d)",
             cycle_id,
-            _elapsed_ms(conversations_started_at),
+            elapsed_ms(conversations_started_at),
             len(recent_conversations),
         )
         thought_cycle_started_at = time.perf_counter()
@@ -646,22 +654,22 @@ def _execute_cycle(
         logger.info(
             "cycle C%s thought generation finished in %.1f ms (count=%d)",
             cycle_id,
-            _elapsed_ms(thought_cycle_started_at),
+            elapsed_ms(thought_cycle_started_at),
             len(thoughts),
         )
         _sanitize_cycle_trigger_refs(thoughts, recent_thoughts)
         stm_started_at = time.perf_counter()
         runtime.stm.append(thoughts)
-        logger.info("cycle C%s stm append finished in %.1f ms", cycle_id, _elapsed_ms(stm_started_at))
+        logger.info("cycle C%s stm append finished in %.1f ms", cycle_id, elapsed_ms(stm_started_at))
         ltm_store_started_at = time.perf_counter()
         _store_to_ltm(runtime.ltm, runtime.embedding_client, thoughts, runtime.embedding_model, cycle_id)
-        logger.info("cycle C%s ltm store finished in %.1f ms", cycle_id, _elapsed_ms(ltm_store_started_at))
+        logger.info("cycle C%s ltm store finished in %.1f ms", cycle_id, elapsed_ms(ltm_store_started_at))
         action_submit_started_at = time.perf_counter()
         created_actions = runtime.action_manager.submit_from_thoughts(thoughts, stimuli=stimuli)
         logger.info(
             "cycle C%s action submission finished in %.1f ms (created=%d)",
             cycle_id,
-            _elapsed_ms(action_submit_started_at),
+            elapsed_ms(action_submit_started_at),
             len(created_actions),
         )
         cycle_status = "ok"
@@ -670,7 +678,7 @@ def _execute_cycle(
         logger.info(
             "cycle C%s total execution finished in %.1f ms (status=%s)",
             cycle_id,
-            _elapsed_ms(cycle_started_at),
+            elapsed_ms(cycle_started_at),
             cycle_status,
         )
 
@@ -682,7 +690,7 @@ def _load_recent_conversations(
     prompt_log_file: TextIO | None,
 ) -> list[RecentConversationPrompt]:
     return load_recent_conversations(
-        runtime.stm.redis_client,
+        _as_conversation_redis(runtime.stm.redis_client),
         include_sources={stimulus.source for stimulus in stimuli if stimulus.type == "conversation"},
         exclude_stimulus_ids=_conversation_stimulus_ids(stimuli),
         summary_builder=lambda source_name, existing_summary, entries: _summarize_recent_conversation(
@@ -741,7 +749,10 @@ def _summarize_recent_conversation(
         except MODEL_CLIENT_EXCEPTIONS as exc:
             logger.warning("recent conversation summary failed for %s: %s", source_name, exc)
             return None
-        summary = _clean_recent_conversation_summary(response["message"].get("content"))
+        message = response.get("message")
+        summary = _clean_recent_conversation_summary(
+            message.get("content") if isinstance(message, dict) else None,
+        )
         logger.info(
             "cycle C%s recent conversation summary batch %d/%d for %s finished in "
             "%.1f ms (input_chars=%d, output_chars=%d)",
@@ -749,7 +760,7 @@ def _summarize_recent_conversation(
             index,
             total_batches,
             source_name,
-            _elapsed_ms(batch_started_at),
+            elapsed_ms(batch_started_at),
             len(user_prompt),
             len(summary or ""),
         )
@@ -761,7 +772,7 @@ def _summarize_recent_conversation(
         "cycle C%s recent conversation summary for %s finished in %.1f ms (batches=%d, output_chars=%d)",
         cycle_id,
         source_name,
-        _elapsed_ms(total_started_at),
+        elapsed_ms(total_started_at),
         total_batches,
         len(current_summary),
     )
@@ -785,10 +796,6 @@ def _write_recent_conversation_summary_prompt_log(
         prompt=f"[SYSTEM]\n{system_prompt}\n\n[USER]\n{user_prompt}",
         emoji="🟣",
     )
-
-
-def _elapsed_ms(started_at: float) -> float:
-    return (time.perf_counter() - started_at) * 1000.0
 
 
 def _handle_cycle_failure(
@@ -1191,6 +1198,14 @@ def _status_payload(message: str) -> StatusEventPayload:
 
 
 # -- Utilities -------------------------------------------------------------
+
+
+def _as_action_redis(redis_client: redis_lib.Redis | None) -> ActionRedisLike | None:
+    return redis_client  # type: ignore[return-value]
+
+
+def _as_conversation_redis(redis_client: redis_lib.Redis | None) -> ConversationRedisLike | None:
+    return redis_client  # type: ignore[return-value]
 
 
 def _load_config(path: str) -> dict:

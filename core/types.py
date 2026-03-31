@@ -1,5 +1,6 @@
-"""Shared structured types."""
+"""Shared structured types and utilities."""
 
+import time
 from typing import NotRequired, TypedDict
 
 
@@ -206,3 +207,17 @@ class ActionsResponse(TypedDict):
     items: list[JsonObject]
     count: int
     requested_by: str
+
+
+def elapsed_ms(started_at: float) -> float:
+    return (time.perf_counter() - started_at) * 1000.0
+
+
+def coerce_json_value(value: JsonValue) -> JsonValue:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [coerce_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): coerce_json_value(item) for key, item in value.items()}
+    return str(value)

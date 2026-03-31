@@ -4,10 +4,18 @@ import json
 import logging
 import os
 import time
+from collections.abc import Iterator
+from typing import Protocol
 from urllib import error, request
 
-from ollama import Client, RequestError as OllamaRequestError, ResponseError as OllamaResponseError
-from core.types import JsonObject, JsonValue
+from ollama import (
+    ChatResponse,
+    Client,
+    GenerateResponse,
+    RequestError as OllamaRequestError,
+    ResponseError as OllamaResponseError,
+)
+from core.types import JsonObject, JsonValue, elapsed_ms
 
 OPENCLAW_SCOPES_HEADER = "x-openclaw-scopes"
 OPENCLAW_DEFAULT_SCOPES = "operator.read, operator.write"
@@ -96,7 +104,7 @@ class OllamaModelClient(ModelClient):
         started_at = time.perf_counter()
         status = "failed"
         try:
-            response = self._client.generate(
+            response = _normalize_ollama_generate_response(self._client.generate(
                 model=model_config["name"],
                 prompt=prompt,
                 options={
@@ -105,8 +113,8 @@ class OllamaModelClient(ModelClient):
                     "temperature": model_config.get("temperature", 0.8),
                 },
                 think=False,
-            )
-            text = str(response["response"])
+            ))
+            text = _ollama_generate_text(response)
             status = "ok"
             return text
         finally:
@@ -139,8 +147,8 @@ class OllamaModelClient(ModelClient):
                 payload["tools"] = tools
             if options:
                 payload["options"] = _normalize_ollama_chat_options(options)
-            response = self._client.chat(**payload)
-            message = response["message"]
+            response = _normalize_ollama_chat_response(self._client.chat(**payload))  # type: ignore[arg-type]
+            message = _ollama_chat_message(response)
             normalized = {
                 "message": {
                     "content": str(message.get("content") or ""),
@@ -229,7 +237,7 @@ class OpenAICompatibleModelClient(ModelClient):
                 },
             )
             response = _normalize_openai_chat_response(body)
-            text = str(response["message"].get("content") or "")
+            text = _openai_message_content(response)
             status = "ok"
             return text
         finally:
@@ -403,8 +411,46 @@ def _normalize_ollama_chat_options(options: dict) -> dict:
     return normalized
 
 
-def _elapsed_ms(started_at: float) -> float:
-    return (time.perf_counter() - started_at) * 1000.0
+class _OllamaGenerateResponse(Protocol):
+    response: str | None
+
+
+class _OllamaChatResponse(Protocol):
+    message: JsonValue
+
+
+def _normalize_ollama_generate_response(
+    response: _OllamaGenerateResponse | JsonObject | Iterator[GenerateResponse],
+) -> _OllamaGenerateResponse | JsonObject:
+    if isinstance(response, dict):
+        return response
+    if hasattr(response, "response"):
+        return response  # type: ignore[return-value]
+    raise RuntimeError("ollama generate streaming response is not supported")
+
+
+def _normalize_ollama_chat_response(
+    response: _OllamaChatResponse | JsonObject | Iterator[ChatResponse],
+) -> _OllamaChatResponse | JsonObject:
+    if isinstance(response, dict):
+        return response
+    if hasattr(response, "message"):
+        return response  # type: ignore[return-value]
+    raise RuntimeError("ollama chat streaming response is not supported")
+
+
+def _ollama_generate_text(response: _OllamaGenerateResponse | JsonObject) -> str:
+    raw_text = getattr(response, "response", None)
+    if raw_text is None and isinstance(response, dict):
+        raw_text = response.get("response")
+    return str(raw_text or "")
+
+
+def _ollama_chat_message(response: _OllamaChatResponse | JsonObject) -> JsonObject:
+    message = getattr(response, "message", None)
+    if message is None and isinstance(response, dict):
+        message = response.get("message")
+    return _coerce_json_object(message)
 
 
 def _log_model_call(
@@ -421,7 +467,7 @@ def _log_model_call(
         provider,
         operation,
         model,
-        _elapsed_ms(started_at),
+        elapsed_ms(started_at),
         status,
         detail,
     )
@@ -439,6 +485,13 @@ def _openai_generate_messages(prompt: str) -> list[JsonObject]:
         },
         {"role": "user", "content": OPENAI_COMPAT_GENERATE_USER_MARKER},
     ]
+
+
+def _openai_message_content(response: JsonObject) -> str:
+    message = response.get("message")
+    if not isinstance(message, dict):
+        return ""
+    return str(message.get("content") or "")
 
 
 def _format_generation_messages_for_log(messages: list[JsonObject]) -> str:

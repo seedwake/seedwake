@@ -89,6 +89,12 @@ def _send_message_mock(context: ContextTypes.DEFAULT_TYPE) -> AsyncMock:
     return application.bot.send_message
 
 
+def _awaited_text(mock: AsyncMock) -> str:
+    await_args = mock.await_args
+    assert await_args is not None
+    return str(await_args.args[0])
+
+
 def _make_update(
     *,
     user_id: int = 1,
@@ -178,7 +184,7 @@ async def _assert_live_actions_output(
 
     reply_mock = _reply_text_mock(update)
     reply_mock.assert_awaited_once()
-    test_case.assertIn("act_1", reply_mock.await_args.args[0])
+    test_case.assertIn("act_1", _awaited_text(reply_mock))
 
 
 class TelegramBotHelpersTests(unittest.TestCase):
@@ -271,7 +277,7 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(STIMULUS_REDIS_KEY, redis_client.lists)
         reply_mock = _reply_text_mock(update)
         reply_mock.assert_awaited_once()
-        self.assertIn("无权限", reply_mock.await_args.args[0])
+        self.assertIn("无权限", _awaited_text(reply_mock))
 
     async def test_handle_text_message_rejects_admin_only_user(self) -> None:
         redis_client = FakeRedis()
@@ -283,7 +289,7 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(STIMULUS_REDIS_KEY, redis_client.lists)
         reply_mock = _reply_text_mock(update)
         reply_mock.assert_awaited_once()
-        self.assertIn("无权限", reply_mock.await_args.args[0])
+        self.assertIn("无权限", _awaited_text(reply_mock))
 
     async def test_handle_text_message_rejects_group_chat(self) -> None:
         redis_client = FakeRedis()
@@ -295,7 +301,7 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(STIMULUS_REDIS_KEY, redis_client.lists)
         reply_mock = _reply_text_mock(update)
         reply_mock.assert_awaited_once()
-        self.assertIn("仅支持私聊", reply_mock.await_args.args[0])
+        self.assertIn("仅支持私聊", _awaited_text(reply_mock))
 
     async def test_dispatch_reply_event_is_ignored(self) -> None:
         context = _make_context(FakeRedis(), allowed_user_ids={1})
@@ -349,7 +355,7 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(ACTION_CONTROL_KEY, redis_client.lists)
         reply_mock = _reply_text_mock(update)
         reply_mock.assert_awaited_once()
-        self.assertIn("无管理权限", reply_mock.await_args.args[0])
+        self.assertIn("无管理权限", _awaited_text(reply_mock))
 
     async def test_handle_actions_reads_live_actions(self) -> None:
         redis_client = FakeRedis()
@@ -370,7 +376,7 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         await _handle_actions(update, context)
 
         self.assertIsNone(context.application.bot_data["redis"])
-        self.assertIn("Redis 不可用", _reply_text_mock(update).await_args.args[0])
+        self.assertIn("Redis 不可用", _awaited_text(_reply_text_mock(update)))
 
     async def test_handle_actions_rejects_non_admin_user(self) -> None:
         redis_client = FakeRedis()
@@ -381,7 +387,7 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         reply_mock = _reply_text_mock(update)
         reply_mock.assert_awaited_once()
-        self.assertIn("无管理权限", reply_mock.await_args.args[0])
+        self.assertIn("无管理权限", _awaited_text(reply_mock))
 
     async def test_handle_text_message_reports_redis_write_failure(self) -> None:
         class FailingRedis(FakeRedis):
@@ -394,7 +400,7 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         await _handle_text_message(update, context)
 
         self.assertIsNone(context.application.bot_data["redis"])
-        self.assertIn("Redis 不可用", _reply_text_mock(update).await_args.args[0])
+        self.assertIn("Redis 不可用", _awaited_text(_reply_text_mock(update)))
 
 
 class TelegramBotRedisRecoveryTests(unittest.TestCase):

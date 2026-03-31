@@ -7,7 +7,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from threading import RLock
-import redis as redis_lib
+from typing import Protocol
 from redis import exceptions as redis_exceptions
 from uuid import uuid4
 
@@ -54,6 +54,16 @@ STIMULUS_REDIS_EXCEPTIONS = (
 logger = logging.getLogger(__name__)
 
 
+class ConversationRedisLike(Protocol):
+    def rpush(self, key: str, payload: str) -> int: ...
+    def lpush(self, key: str, *values: str) -> int: ...
+    def lrange(self, key: str, start: int, end: int) -> list[str]: ...
+    def ltrim(self, key: str, start: int, end: int) -> bool: ...
+    def lrem(self, key: str, count: int, value: str) -> int: ...
+    def hset(self, key: str, hash_field: str, value: str) -> int: ...
+    def hgetall(self, key: str) -> dict[str, str]: ...
+
+
 @dataclass
 class Stimulus:
     stimulus_id: str
@@ -69,7 +79,7 @@ class Stimulus:
 class StimulusQueue:
     """Priority queue backed by Redis List with in-memory fallback."""
 
-    def __init__(self, redis_client: redis_lib.Redis | None) -> None:
+    def __init__(self, redis_client: ConversationRedisLike | None) -> None:
         self._redis = redis_client
         self._deque: deque[Stimulus] = deque()
         self._lock = RLock()
@@ -158,7 +168,7 @@ class StimulusQueue:
         with self._lock:
             return self._redis is not None
 
-    def attach_redis(self, redis_client: redis_lib.Redis | None) -> bool:
+    def attach_redis(self, redis_client: ConversationRedisLike | None) -> bool:
         with self._lock:
             self._redis = redis_client
         try:
@@ -168,7 +178,7 @@ class StimulusQueue:
                 self._redis = None
         return self.redis_available
 
-    def _redis_pop_many(self, redis_client: redis_lib.Redis, limit: int) -> list[Stimulus]:
+    def _redis_pop_many(self, redis_client: ConversationRedisLike, limit: int) -> list[Stimulus]:
         raw_items = redis_client.lrange(REDIS_KEY, 0, -1)
         if not raw_items:
             return []
@@ -190,7 +200,7 @@ class StimulusQueue:
         self._drop_shadow_items([stimulus.stimulus_id for stimulus in chosen_items])
         return chosen_items
 
-    def _redis_pop_all(self, redis_client: redis_lib.Redis) -> list[Stimulus]:
+    def _redis_pop_all(self, redis_client: ConversationRedisLike) -> list[Stimulus]:
         raw_items = redis_client.lrange(REDIS_KEY, 0, -1)
         if not raw_items:
             return []
@@ -224,6 +234,8 @@ class StimulusQueue:
         with self._lock:
             redis_client = self._redis
             shadow_items = list(self._deque)
+        if redis_client is None:
+            return
         existing = redis_client.lrange(REDIS_KEY, 0, -1)
         existing_ids = {
             json.loads(item)["stimulus_id"]
@@ -239,7 +251,7 @@ class StimulusQueue:
 
 
 def append_conversation_history(
-    redis_client: redis_lib.Redis | None,
+    redis_client: ConversationRedisLike | None,
     *,
     role: str,
     source: str,
@@ -264,7 +276,7 @@ def append_conversation_history(
 
 
 def _sync_conversation_history(
-    redis_client: redis_lib.Redis,
+    redis_client: ConversationRedisLike,
     stimulus: Stimulus,
     existing_history_ids: set[str],
 ) -> None:
@@ -301,7 +313,7 @@ def _sync_conversation_history(
 
 
 def _append_merged_conversation_history_entry(
-    redis_client: redis_lib.Redis,
+    redis_client: ConversationRedisLike,
     stimulus: Stimulus,
     message: JsonValue,
     stimulus_id: str | None,
@@ -349,7 +361,7 @@ def _conversation_history_timestamp_from_merged_message(
         return fallback
 
 
-def _conversation_history_stimulus_ids(redis_client: redis_lib.Redis) -> set[str]:
+def _conversation_history_stimulus_ids(redis_client: ConversationRedisLike) -> set[str]:
     history = load_conversation_history(redis_client, limit=CONVERSATION_HISTORY_LIMIT)
     return {
         stimulus_id
@@ -362,7 +374,7 @@ def _conversation_history_stimulus_ids(redis_client: redis_lib.Redis) -> set[str
 
 
 def load_conversation_history(
-    redis_client: redis_lib.Redis | None,
+    redis_client: ConversationRedisLike | None,
     limit: int = 100,
 ) -> list[ConversationEntry]:
     if redis_client is None or limit <= 0:
@@ -383,7 +395,7 @@ def load_conversation_history(
 
 
 def load_recent_conversations(
-    redis_client: redis_lib.Redis | None,
+    redis_client: ConversationRedisLike | None,
     *,
     include_sources: set[str] | None = None,
     exclude_stimulus_ids: set[str] | None = None,
@@ -431,24 +443,25 @@ def load_recent_conversations(
         recent_entries = display_entries[-raw_limit:] if raw_limit > 0 else []
         if not recent_entries and not summary:
             continue
+        prompt: RecentConversationPrompt = {
+            "source": source,
+            "source_name": source_name,
+            "source_label": source_label,
+            "summary": summary,
+            "last_timestamp": last_timestamp.isoformat(),
+            "messages": [
+                _recent_conversation_message(entry, source_name) for entry in recent_entries
+            ],
+        }
         recent_conversations.append((
             last_timestamp,
-            {
-                "source": source,
-                "source_name": source_name,
-                "source_label": source_label,
-                "summary": summary,
-                "last_timestamp": last_timestamp.isoformat(),
-                "messages": [
-                    _recent_conversation_message(entry, source_name) for entry in recent_entries
-                ],
-            },
+            prompt,
         ))
     recent_conversations.sort(key=lambda item: item[0])
     return [item for _, item in recent_conversations]
 
 
-def _load_conversation_summaries(redis_client: redis_lib.Redis) -> dict[str, tuple[str, str, bool]]:
+def _load_conversation_summaries(redis_client: ConversationRedisLike) -> dict[str, tuple[str, str, bool]]:
     try:
         raw_map = redis_client.hgetall(CONVERSATION_SUMMARY_KEY)
     except STIMULUS_REDIS_EXCEPTIONS:
@@ -462,7 +475,7 @@ def _load_conversation_summaries(redis_client: redis_lib.Redis) -> dict[str, tup
 
 
 def _refresh_conversation_summary(
-    redis_client: redis_lib.Redis,
+    redis_client: ConversationRedisLike,
     source: str,
     source_name: str,
     existing_summary: str,
@@ -531,21 +544,6 @@ def _conversation_display_entries(
         if str(entry.get("stimulus_id") or "").strip() not in exclude_stimulus_ids
     ]
     return filtered
-
-
-def _older_conversation_entries(
-    entries: list[ConversationEntry],
-    raw_limit: int,
-) -> list[ConversationEntry]:
-    if raw_limit <= 0:
-        return list(entries)
-    if len(entries) <= raw_limit:
-        return []
-    return entries[:-raw_limit]
-
-
-def _conversation_entry_ids(entries: list[ConversationEntry]) -> list[str]:
-    return [str(entry.get("entry_id") or "").strip() for entry in entries]
 
 
 def _conversation_is_recent(

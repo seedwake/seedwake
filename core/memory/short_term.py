@@ -112,33 +112,43 @@ class ShortTermMemory:
     # -- Redis operations --------------------------------------------------
 
     def _redis_append(self, t: Thought) -> None:
+        redis_client = self._redis
+        assert redis_client is not None
         score = t.timestamp.timestamp()
         value = json.dumps(_thought_to_dict(t), ensure_ascii=False)
-        self._redis.zadd(REDIS_KEY, {value: score})
+        _redis_zadd(redis_client, REDIS_KEY, {value: score})
 
     def _redis_recent(self, limit: int) -> list[Thought]:
-        raw_items = _redis_list(self._redis.zrange(REDIS_KEY, -limit, -1))
+        redis_client = self._redis
+        assert redis_client is not None
+        raw_items = _redis_payloads(redis_client.zrange(REDIS_KEY, -limit, -1))
         return [_dict_to_thought(json.loads(item)) for item in raw_items]
 
     def _trim(self) -> None:
         """Keep only the most recent buffer_size * 3 entries."""
+        redis_client = self._redis
+        assert redis_client is not None
         max_entries = self._buffer_size * 3
-        total = _redis_int(self._redis.zcard(REDIS_KEY))
+        total = _redis_int(redis_client.zcard(REDIS_KEY))
         if total > max_entries:
-            self._redis.zremrangebyrank(REDIS_KEY, 0, total - max_entries - 1)
+            redis_client.zremrangebyrank(REDIS_KEY, 0, total - max_entries - 1)
 
     def _publish(self, thoughts: list[Thought]) -> None:
         """Publish new thoughts to Redis Pub/Sub for SSE consumers."""
+        redis_client = self._redis
+        assert redis_client is not None
         payload = json.dumps(
             [_thought_to_dict(t) for t in thoughts],
             ensure_ascii=False,
         )
-        self._redis.publish(REDIS_CHANNEL, payload)
+        redis_client.publish(REDIS_CHANNEL, payload)
 
     def _rewrite_recent_redis_thoughts(self, thoughts: list[Thought]) -> None:
-        raw_items = _redis_list(self._redis.zrange(REDIS_KEY, -len(thoughts), -1))
+        redis_client = self._redis
+        assert redis_client is not None
+        raw_items = _redis_payloads(redis_client.zrange(REDIS_KEY, -len(thoughts), -1))
         if raw_items:
-            self._redis.zrem(REDIS_KEY, *raw_items)
+            redis_client.zrem(REDIS_KEY, *raw_items)
         for thought in thoughts:
             self._redis_append(thought)
 
@@ -157,7 +167,9 @@ class ShortTermMemory:
         self._trim()
 
     def _update_latest_cycle_id(self, cycle_id: int) -> None:
-        self._redis.eval(
+        redis_client = self._redis
+        assert redis_client is not None
+        redis_client.eval(
             """
             local current = tonumber(redis.call("GET", KEYS[1]) or "0")
             local incoming = tonumber(ARGV[1]) or 0
@@ -217,10 +229,27 @@ def _redis_int(value: JsonValue | bytes) -> int:
     return value
 
 
-def _redis_list(value: JsonValue | bytes) -> list[JsonValue]:
+def _redis_payloads(value: JsonValue | bytes) -> list[str | bytes | bytearray]:
     if not isinstance(value, list):
         raise TypeError(f"unexpected redis list result: {type(value).__name__}")
-    return value
+    payloads: list[str | bytes | bytearray] = []
+    for item in value:
+        if isinstance(item, (str, bytes, bytearray)):
+            payloads.append(item)
+            continue
+        raise TypeError(f"unexpected redis payload result: {type(item).__name__}")
+    return payloads
+
+
+def _redis_zadd(
+    redis_client: redis_lib.Redis,
+    key: str,
+    mapping: dict[str, float],
+) -> int:
+    # redis-py supports mapping-based ZADD, but the bundled IDE stub still models
+    # the legacy score/member signature.
+    # noinspection PyArgumentList
+    return int(redis_client.zadd(key, mapping))
 
 
 def _sanitize_trigger_refs(thoughts: list[Thought]) -> bool:

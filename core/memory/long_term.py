@@ -71,8 +71,8 @@ class LongTermMemory:
                     (normalized_content,),
                 )
                 existing = cur.fetchone()
-                if existing:
-                    entry_id = existing[0]
+                if existing is not None:
+                    entry_id = _row_first_int(existing)
                 else:
                     cur.execute(
                         """
@@ -86,7 +86,7 @@ class LongTermMemory:
                          source_cycle_id, importance),
                     )
                     row = cur.fetchone()
-                    entry_id = row[0] if row else None
+                    entry_id = _row_first_int(row)
             conn.commit()
             return entry_id
         except psycopg.Error:
@@ -242,6 +242,13 @@ def _entity_tag_candidates(entity_tag: str) -> list[str]:
         canonical = normalized.removeprefix("entity:")
         return [canonical, legacy]
     return [normalized, f"entity:{normalized}"]
+
+
+def _row_first_int(row: tuple[int | None, ...] | list[int | None] | None) -> int | None:
+    if not row:
+        return None
+    value = row[0]
+    return value if isinstance(value, int) else None
 
 
 TELEGRAM_TARGET_PATTERNS = (
