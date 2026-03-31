@@ -34,6 +34,7 @@ from core.types import (
     AuthorizedTelegramUser,
     EventEnvelope,
     JsonObject,
+    JsonValue,
     StatusEventPayload,
 )
 
@@ -198,6 +199,8 @@ async def _handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await _reply_text(update, "Redis 不可用，当前无法与 Seedwake 对话。")
         return
     message = update.effective_message
+    if message is None:
+        return
     text = str(message.text or "").strip()
     if not text:
         return
@@ -358,6 +361,10 @@ async def _handle_control_command(
     *,
     approved: bool,
 ) -> None:
+    effective_user = update.effective_user
+    if effective_user is None:
+        await _reply_text(update, "无法识别发送者。")
+        return
     if not context.args:
         usage = "/approve <action_id> [note]" if approved else "/reject <action_id> [note]"
         await _reply_text(update, f"用法：{usage}")
@@ -365,12 +372,11 @@ async def _handle_control_command(
     action_id = context.args[0].strip()
     note = " ".join(context.args[1:]).strip()
     redis_client = _ensure_redis_client(context.application)
-    user_id = update.effective_user.id if update.effective_user else 0
     pushed = push_action_control(
         redis_client,
         action_id,
         approved=approved,
-        actor=f"telegram:{user_id}",
+        actor=f"telegram:{effective_user.id}",
         note=note,
     )
     if not pushed:
@@ -511,7 +517,7 @@ def _read_env(name: str) -> str:
     return os.environ.get(name, "")
 
 
-def _decode_pubsub_value(value: object) -> str:
+def _decode_pubsub_value(value: JsonValue | bytes) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8")
     return str(value or "")

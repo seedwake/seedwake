@@ -13,6 +13,7 @@ from datetime import datetime
 import redis as redis_lib
 
 from core.thought_parser import Thought
+from core.types import JsonValue
 
 REDIS_KEY = "seedwake:thoughts"
 REDIS_CHANNEL = "seedwake:stream"
@@ -116,13 +117,13 @@ class ShortTermMemory:
         self._redis.zadd(REDIS_KEY, {value: score})
 
     def _redis_recent(self, limit: int) -> list[Thought]:
-        raw = self._redis.zrange(REDIS_KEY, -limit, -1)
-        return [_dict_to_thought(json.loads(item)) for item in raw]
+        raw_items = _redis_list(self._redis.zrange(REDIS_KEY, -limit, -1))
+        return [_dict_to_thought(json.loads(item)) for item in raw_items]
 
     def _trim(self) -> None:
         """Keep only the most recent buffer_size * 3 entries."""
         max_entries = self._buffer_size * 3
-        total = self._redis.zcard(REDIS_KEY)
+        total = _redis_int(self._redis.zcard(REDIS_KEY))
         if total > max_entries:
             self._redis.zremrangebyrank(REDIS_KEY, 0, total - max_entries - 1)
 
@@ -135,7 +136,7 @@ class ShortTermMemory:
         self._redis.publish(REDIS_CHANNEL, payload)
 
     def _rewrite_recent_redis_thoughts(self, thoughts: list[Thought]) -> None:
-        raw_items = self._redis.zrange(REDIS_KEY, -len(thoughts), -1)
+        raw_items = _redis_list(self._redis.zrange(REDIS_KEY, -len(thoughts), -1))
         if raw_items:
             self._redis.zrem(REDIS_KEY, *raw_items)
         for thought in thoughts:
@@ -200,7 +201,7 @@ def _dict_to_thought(d: dict) -> Thought:
     )
 
 
-def _coerce_cycle_id(value: object) -> int:
+def _coerce_cycle_id(value: JsonValue | bytes) -> int:
     if isinstance(value, bytes):
         value = value.decode("utf-8")
     if isinstance(value, str) and value.isdigit():
@@ -208,6 +209,18 @@ def _coerce_cycle_id(value: object) -> int:
     if isinstance(value, int):
         return value
     return 0
+
+
+def _redis_int(value: JsonValue | bytes) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"unexpected redis integer result: {type(value).__name__}")
+    return value
+
+
+def _redis_list(value: JsonValue | bytes) -> list[JsonValue]:
+    if not isinstance(value, list):
+        raise TypeError(f"unexpected redis list result: {type(value).__name__}")
+    return value
 
 
 def _sanitize_trigger_refs(thoughts: list[Thought]) -> bool:

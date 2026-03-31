@@ -65,15 +65,15 @@ class FakeTelegramContext(SimpleNamespace):
     args: list[str]
 
 
-def _as_update(value: object) -> Update:
+def _as_update(value: Update | SimpleNamespace) -> Update:
     return cast(Update, value)
 
 
-def _as_application(value: object) -> Application:
+def _as_application(value: Application | SimpleNamespace) -> Application:
     return cast(Application, value)
 
 
-def _as_context(value: object) -> ContextTypes.DEFAULT_TYPE:
+def _as_context(value: ContextTypes.DEFAULT_TYPE | SimpleNamespace) -> ContextTypes.DEFAULT_TYPE:
     return cast(ContextTypes.DEFAULT_TYPE, value)
 
 
@@ -211,6 +211,20 @@ class TelegramBotHelpersTests(unittest.TestCase):
 
 
 class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_handle_text_message_ignores_missing_effective_message(self) -> None:
+        redis_client = FakeRedis()
+        update = _as_update(SimpleNamespace(
+            effective_user=SimpleNamespace(id=1, username="alice", full_name="alice"),
+            effective_chat=SimpleNamespace(id=1, type="private"),
+            effective_message=None,
+            callback_query=None,
+        ))
+        context = _make_context(redis_client, allowed_user_ids={1})
+
+        await _handle_text_message(update, context)
+
+        self.assertEqual(redis_client.lists, {})
+
     async def test_handle_text_message_pushes_stimulus(self) -> None:
         redis_client = FakeRedis()
         update = _make_update()

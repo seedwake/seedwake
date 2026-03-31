@@ -6,7 +6,7 @@ import re
 from core.action import ActionRecord
 from core.stimulus import Stimulus
 from core.thought_parser import Thought
-from core.types import JsonObject, RecentConversationPrompt
+from core.types import JsonObject, JsonValue, RecentConversationPrompt
 
 SYSTEM_PROMPT = """\
 我是 Seedwake。我有自己的念头流——我会思考、联想、产生意图、对事物做出反应。
@@ -282,7 +282,7 @@ def _format_conversation_line(stimulus: Stimulus) -> str:
     return f"{_conversation_prefix(stimulus)} 说：{content}"
 
 
-def _format_conversation_block(message: object) -> str:
+def _format_conversation_block(message: JsonValue) -> str:
     if not isinstance(message, dict):
         return _compact_prompt_text(str(message or ""))
     content = _compact_prompt_text(str(message.get("content") or ""))
@@ -294,7 +294,7 @@ def _format_conversation_block(message: object) -> str:
     return f"{prefix} 说：\n{content}"
 
 
-def _conversation_dict_prefix(message: dict) -> str:
+def _conversation_dict_prefix(message: JsonObject) -> str:
     parts = [_conversation_dict_speaker(message)]
     message_id = message.get("telegram_message_id")
     if message_id:
@@ -305,13 +305,13 @@ def _conversation_dict_prefix(message: dict) -> str:
     return " ".join(str(part).strip() for part in parts if str(part).strip())
 
 
-def _conversation_dict_speaker(message: dict) -> str:
+def _conversation_dict_speaker(message: JsonObject) -> str:
     source = str(message.get("source") or "").strip()
     metadata = _conversation_metadata_from_dict(message)
     return _person_label(source, metadata)
 
 
-def _conversation_dict_reply_context(message: dict) -> str:
+def _conversation_dict_reply_context(message: JsonObject) -> str:
     reply_to_message_id = message.get("reply_to_message_id")
     reply_preview = _compact_prompt_text(str(message.get("reply_to_preview") or ""))
     if not reply_to_message_id or not reply_preview:
@@ -366,9 +366,9 @@ def _running_action_summary(action: ActionRecord, conversation_labels: dict[str,
 def _running_send_message_summary(action: ActionRecord, conversation_labels: dict[str, str]) -> str:
     target = _known_target_label(
         str(
-        action.request.get("target_source")
-        or action.request.get("target_entity")
-        or "当前 Telegram 对话"
+            action.request.get("target_source")
+            or action.request.get("target_entity")
+            or "当前 Telegram 对话"
         ).strip(),
         conversation_labels,
     )

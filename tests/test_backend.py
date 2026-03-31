@@ -22,7 +22,7 @@ async def _read_first_stream_chunk(iterator: AsyncIterable[str | bytes | memoryv
     return first_chunk
 
 
-def _as_request(value: object) -> Request:
+def _as_request(value: Request | SimpleNamespace) -> Request:
     return cast(Request, value)
 
 

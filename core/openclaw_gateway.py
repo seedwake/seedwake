@@ -10,12 +10,12 @@ import time
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, AsyncContextManager, Protocol, cast
 from urllib import error, request
 from uuid import uuid4
 
 from ollama import RequestError as OllamaRequestError, ResponseError as OllamaResponseError
-from core.types import ActionResultEnvelope, JsonObject
+from core.types import ActionResultEnvelope, JsonObject, JsonValue
 
 if TYPE_CHECKING:
     from core.action import ActionRecord
@@ -61,6 +61,15 @@ logger = logging.getLogger(__name__)
 
 class OpenClawUnavailableError(RuntimeError):
     """Transport-level OpenClaw unavailability."""
+
+
+class _GatewaySocket(Protocol):
+    async def send(self, message: str) -> None: ...
+    async def recv(self) -> str: ...
+
+
+class _WebsocketsModule(Protocol):
+    def connect(self, uri: str, *, max_size: int) -> AsyncContextManager[_GatewaySocket]: ...
 
 
 class OpenClawGatewayExecutor:
@@ -295,7 +304,7 @@ class OpenClawGatewayExecutor:
 
 
 class _GatewayRpcClient:
-    def __init__(self, ws: object) -> None:
+    def __init__(self, ws: _GatewaySocket) -> None:
         self._ws = ws
         self._responses: dict[str, asyncio.Queue] = {}
         self._events: dict[str, asyncio.Queue] = {}
@@ -388,7 +397,7 @@ async def _abort_session(client: _GatewayRpcClient, session_key: str, run_id: st
 
 
 def _normalize_agent_final(frame: JsonObject, *, run_id: str | None, session_key: str) -> ActionResultEnvelope:
-    payload = frame.get("payload") or {}
+    payload = _json_object_or_empty(frame.get("payload"))
     if not frame.get("ok"):
         return _build_gateway_result(
             ok=False,
@@ -400,7 +409,7 @@ def _normalize_agent_final(frame: JsonObject, *, run_id: str | None, session_key
             transport="ws",
         )
 
-    result_payload = payload.get("result") or {}
+    result_payload = _json_object_or_empty(payload.get("result"))
     text = _extract_payload_text(result_payload)
     normalized = _normalize_worker_text(text)
     normalized["run_id"] = payload.get("runId") or run_id
@@ -423,9 +432,11 @@ def _extract_responses_api_text(response_body: dict) -> str:
     output = response_body.get("output") or []
     texts = []
     for item in output:
+        if not isinstance(item, dict):
+            continue
         content = item.get("content") or []
         for part in content:
-            if part.get("type") == "output_text" and part.get("text"):
+            if isinstance(part, dict) and part.get("type") == "output_text" and part.get("text"):
                 texts.append(str(part["text"]).strip())
     return "\n\n".join(texts).strip()
 
@@ -475,7 +486,7 @@ def _build_gateway_result(
     ok: bool,
     summary: str,
     data: JsonObject,
-    error_detail: object | None,
+    error_detail: JsonValue,
     run_id: str | None,
     session_key: str | None,
     transport: str,
@@ -485,7 +496,7 @@ def _build_gateway_result(
         "ok": ok,
         "summary": summary,
         "data": data,
-        "error": error_detail,
+        "error": _coerce_json_value(error_detail),
         "run_id": run_id,
         "session_key": session_key,
         "transport": transport,
@@ -503,25 +514,14 @@ def _format_gateway_error(frame: dict) -> str:
     return "OpenClaw Gateway 请求失败"
 
 
-def _import_websockets() -> object:
+def _import_websockets() -> _WebsocketsModule:
     try:
         import websockets
     except ImportError as exc:
         raise RuntimeError(
             "缺少 websockets 依赖，无法使用 OpenClaw WS。可安装依赖或启用 HTTP fallback。"
         ) from exc
-    return websockets
-
-
-def _import_crypto() -> tuple[object, object]:
-    try:
-        from cryptography.hazmat.primitives import serialization
-        from cryptography.hazmat.primitives.asymmetric import ed25519
-    except ImportError as exc:
-        raise RuntimeError(
-            "缺少 cryptography 依赖，无法完成 OpenClaw device auth。"
-        ) from exc
-    return serialization, ed25519
+    return cast(_WebsocketsModule, websockets)
 
 
 def _load_or_create_device_identity(path_str: str) -> dict[str, str]:
@@ -540,7 +540,13 @@ def _load_or_create_device_identity(path_str: str) -> dict[str, str]:
         except (json.JSONDecodeError, KeyError, OSError, TypeError):
             pass
 
-    serialization, ed25519 = _import_crypto()
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+    except ImportError as exc:
+        raise RuntimeError(
+            "缺少 cryptography 依赖，无法完成 OpenClaw device auth。"
+        ) from exc
     private_key = ed25519.Ed25519PrivateKey.generate()
     public_key = private_key.public_key()
     public_key_pem = public_key.public_bytes(
@@ -579,7 +585,12 @@ def _public_key_raw_base64url_from_pem(public_key_pem: str) -> str:
 
 
 def _public_key_raw_from_pem(public_key_pem: str) -> bytes:
-    serialization, _ = _import_crypto()
+    try:
+        from cryptography.hazmat.primitives import serialization
+    except ImportError as exc:
+        raise RuntimeError(
+            "缺少 cryptography 依赖，无法完成 OpenClaw device auth。"
+        ) from exc
     key = serialization.load_pem_public_key(public_key_pem.encode("utf-8"))
     spki = key.public_bytes(
         encoding=serialization.Encoding.DER,
@@ -591,7 +602,12 @@ def _public_key_raw_from_pem(public_key_pem: str) -> bytes:
 
 
 def _sign_device_payload(private_key_pem: str, payload: str) -> str:
-    serialization, _ = _import_crypto()
+    try:
+        from cryptography.hazmat.primitives import serialization
+    except ImportError as exc:
+        raise RuntimeError(
+            "缺少 cryptography 依赖，无法完成 OpenClaw device auth。"
+        ) from exc
     private_key = serialization.load_pem_private_key(
         private_key_pem.encode("utf-8"),
         password=None,
@@ -637,3 +653,19 @@ def _elapsed_ms(started_at: float) -> float:
 
 def _result_status(result: "ActionResultEnvelope") -> str:
     return "ok" if bool(result.get("ok", True)) else "failed"
+
+
+def _json_object_or_empty(value: JsonValue) -> JsonObject:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in value.items()}
+
+
+def _coerce_json_value(value: JsonValue) -> JsonValue:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [_coerce_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _coerce_json_value(item) for key, item in value.items()}
+    return str(value)

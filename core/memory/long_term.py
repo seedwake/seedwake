@@ -9,6 +9,7 @@ from datetime import datetime
 import re
 
 import psycopg
+from psycopg import sql
 
 
 @dataclass
@@ -52,11 +53,14 @@ class LongTermMemory:
         normalized_content = content.strip()
         if not normalized_content:
             return None
+        conn = self._conn
+        if conn is None:
+            return None
         tags = entity_tags or []
         vec_literal = _format_vector(embedding)
         try:
             entry_id: int | None = None
-            with self._conn.cursor() as cur:
+            with conn.cursor() as cur:
                 cur.execute(
                     """
                     SELECT id
@@ -83,10 +87,10 @@ class LongTermMemory:
                     )
                     row = cur.fetchone()
                     entry_id = row[0] if row else None
-            self._conn.commit()
+            conn.commit()
             return entry_id
         except psycopg.Error:
-            self._conn.rollback()
+            conn.rollback()
             raise
 
     # NOTE: SPECS §4.2 requires ranking by similarity × importance × time_decay.
@@ -102,33 +106,36 @@ class LongTermMemory:
         """Retrieve semantically similar memories."""
         if not self.available:
             return []
+        conn = self._conn
+        if conn is None:
+            return []
         k = top_k or self._top_k
         vec_literal = _format_vector(query_embedding)
-        filters = ["is_active = TRUE"]
-        params: list[object] = [vec_literal]
+        filters = [sql.SQL("is_active = TRUE")]
+        params: list[str | int | list[int]] = [vec_literal]
         if entity_filter:
-            filters.append("%s = ANY(entity_tags)")
+            filters.append(sql.SQL("%s = ANY(entity_tags)"))
             params.append(entity_filter)
         if exclude_cycle_ids:
-            filters.append("(source_cycle_id IS NULL OR source_cycle_id <> ALL(%s))")
+            filters.append(sql.SQL("(source_cycle_id IS NULL OR source_cycle_id <> ALL(%s))"))
             params.append(exclude_cycle_ids)
         params.extend([vec_literal, k])
-        query = f"""
+        query = sql.SQL("""
             SELECT id, content, memory_type, source_cycle_id,
                    importance, created_at,
                    1 - (embedding <=> %s::vector) AS similarity
             FROM long_term_memory
-            WHERE {' AND '.join(filters)}
+            WHERE {filters}
             ORDER BY embedding <=> %s::vector
             LIMIT %s
-        """
+        """).format(filters=sql.SQL(" AND ").join(filters))
 
         try:
-            with self._conn.cursor() as cur:
+            with conn.cursor() as cur:
                 cur.execute(query, params)
                 rows = cur.fetchall()
         except psycopg.Error:
-            self._conn.rollback()
+            conn.rollback()
             raise
 
         return [
@@ -144,8 +151,11 @@ class LongTermMemory:
         """Bump access_count and last_accessed for retrieved memories."""
         if not self.available or not memory_ids:
             return
+        conn = self._conn
+        if conn is None:
+            return
         try:
-            with self._conn.cursor() as cur:
+            with conn.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE long_term_memory
@@ -155,19 +165,22 @@ class LongTermMemory:
                     """,
                     (memory_ids,),
                 )
-            self._conn.commit()
+            conn.commit()
         except psycopg.Error:
-            self._conn.rollback()
+            conn.rollback()
             raise
 
     def resolve_telegram_target_for_entity(self, entity_tag: str) -> str | None:
         """Resolve a Telegram chat target from semantic/impression entity memories."""
         if not self.available or not entity_tag:
             return None
+        conn = self._conn
+        if conn is None:
+            return None
         candidate_tags = _entity_tag_candidates(entity_tag)
         try:
             rows = []
-            with self._conn.cursor() as cur:
+            with conn.cursor() as cur:
                 for candidate_tag in candidate_tags:
                     cur.execute(
                         """
@@ -183,7 +196,7 @@ class LongTermMemory:
                     )
                     rows.extend(cur.fetchall())
         except psycopg.Error:
-            self._conn.rollback()
+            conn.rollback()
             raise
         for row in rows:
             target = _extract_telegram_target(str(row[0] or ""))

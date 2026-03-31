@@ -7,6 +7,7 @@ import time
 from urllib import error, request
 
 from ollama import Client, RequestError as OllamaRequestError, ResponseError as OllamaResponseError
+from core.types import JsonObject, JsonValue
 
 OPENCLAW_SCOPES_HEADER = "x-openclaw-scopes"
 OPENCLAW_DEFAULT_SCOPES = "operator.read, operator.write"
@@ -56,10 +57,10 @@ class ModelClient:
         self,
         *,
         model: str,
-        messages: list[dict[str, object]],
-        tools: list[dict] | None = None,
+        messages: list[JsonObject],
+        tools: list[JsonObject] | None = None,
         options: dict | None = None,
-    ) -> dict:
+    ) -> JsonObject:
         raise NotImplementedError
 
     def embed_text(self, text: str, model: str) -> list[float]:
@@ -122,14 +123,14 @@ class OllamaModelClient(ModelClient):
         self,
         *,
         model: str,
-        messages: list[dict[str, object]],
-        tools: list[dict] | None = None,
+        messages: list[JsonObject],
+        tools: list[JsonObject] | None = None,
         options: dict | None = None,
-    ) -> dict:
+    ) -> JsonObject:
         started_at = time.perf_counter()
         status = "failed"
         try:
-            payload: dict[str, object] = {
+            payload: JsonObject = {
                 "model": model,
                 "messages": messages,
                 "think": False,
@@ -245,10 +246,10 @@ class OpenAICompatibleModelClient(ModelClient):
         self,
         *,
         model: str,
-        messages: list[dict[str, object]],
-        tools: list[dict] | None = None,
+        messages: list[JsonObject],
+        tools: list[JsonObject] | None = None,
         options: dict | None = None,
-    ) -> dict:
+    ) -> JsonObject:
         started_at = time.perf_counter()
         status = "failed"
         try:
@@ -312,11 +313,11 @@ class OpenAICompatibleModelClient(ModelClient):
         self,
         *,
         model: str,
-        messages: list[dict[str, object]],
-        tools: list[dict] | None,
+        messages: list[JsonObject],
+        tools: list[JsonObject] | None,
         options: dict | None,
-    ) -> dict:
-        payload: dict[str, object] = {
+    ) -> JsonObject:
+        payload: JsonObject = {
             "model": model,
             "messages": messages,
         }
@@ -331,7 +332,7 @@ class OpenAICompatibleModelClient(ModelClient):
                 payload["max_tokens"] = max_tokens
         return self._post_json("/v1/chat/completions", payload)
 
-    def _post_json(self, path: str, payload: dict[str, object]) -> dict:
+    def _post_json(self, path: str, payload: JsonObject) -> JsonObject:
         req = request.Request(
             url=f"{self._base_url}{path}",
             data=json.dumps(payload).encode("utf-8"),
@@ -342,7 +343,7 @@ class OpenAICompatibleModelClient(ModelClient):
             raw = json.loads(resp.read().decode("utf-8"))
         if not isinstance(raw, dict):
             raise RuntimeError("model provider returned non-object JSON")
-        return raw
+        return _coerce_json_object(raw)
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -426,7 +427,7 @@ def _log_model_call(
     )
 
 
-def _openai_generate_messages(prompt: str) -> list[dict[str, str]]:
+def _openai_generate_messages(prompt: str) -> list[JsonObject]:
     return [
         {
             "role": "system",
@@ -440,7 +441,7 @@ def _openai_generate_messages(prompt: str) -> list[dict[str, str]]:
     ]
 
 
-def _format_generation_messages_for_log(messages: list[dict[str, str]]) -> str:
+def _format_generation_messages_for_log(messages: list[JsonObject]) -> str:
     parts: list[str] = []
     for message in messages:
         role = str(message.get("role") or "message").upper()
@@ -455,14 +456,14 @@ def _generation_log_message_content(content: str) -> str:
     return content
 
 
-def _normalize_provider(raw_provider: object) -> str:
+def _normalize_provider(raw_provider: JsonValue) -> str:
     provider = str(raw_provider or "ollama").strip().lower().replace("-", "_")
     if provider not in SUPPORTED_MODEL_PROVIDERS:
         raise RuntimeError(f"不支持的模型 provider：{provider or '空'}")
     return provider
 
 
-def _resolve_tool_call_capability(provider: str, raw_value: object) -> bool:
+def _resolve_tool_call_capability(provider: str, raw_value: JsonValue) -> bool:
     if raw_value is None:
         return DEFAULT_TOOL_CALL_SUPPORT[provider]
     if isinstance(raw_value, bool):
@@ -475,7 +476,7 @@ def _resolve_tool_call_capability(provider: str, raw_value: object) -> bool:
     raise RuntimeError(f"models.*.supports_tool_calls 配置无效：{raw_value}")
 
 
-def _normalize_openai_chat_response(body: dict) -> dict:
+def _normalize_openai_chat_response(body: JsonObject) -> JsonObject:
     message = _openai_chat_message(body)
     return {
         "message": {
@@ -485,7 +486,7 @@ def _normalize_openai_chat_response(body: dict) -> dict:
     }
 
 
-def _openai_chat_message(body: dict) -> dict:
+def _openai_chat_message(body: JsonObject) -> JsonObject:
     choices = body.get("choices")
     if not isinstance(choices, list) or not choices:
         raise RuntimeError("chat response missing choices")
@@ -495,13 +496,13 @@ def _openai_chat_message(body: dict) -> dict:
     message = first_choice.get("message")
     if not isinstance(message, dict):
         raise RuntimeError("chat response missing message")
-    return message
+    return _coerce_json_object(message)
 
 
-def _normalize_openai_tool_calls(raw_tool_calls: object) -> list[dict[str, dict[str, str]]]:
+def _normalize_openai_tool_calls(raw_tool_calls: JsonValue) -> list[JsonObject]:
     if not isinstance(raw_tool_calls, list):
         return []
-    normalized: list[dict[str, dict[str, str]]] = []
+    normalized: list[JsonObject] = []
     for item in raw_tool_calls:
         normalized_call = _normalize_openai_tool_call(item)
         if normalized_call:
@@ -509,7 +510,7 @@ def _normalize_openai_tool_calls(raw_tool_calls: object) -> list[dict[str, dict[
     return normalized
 
 
-def _normalize_openai_tool_call(item: object) -> dict[str, dict[str, str]] | None:
+def _normalize_openai_tool_call(item: JsonValue) -> JsonObject | None:
     if not isinstance(item, dict):
         return None
     function = item.get("function")
@@ -525,7 +526,7 @@ def _normalize_openai_tool_call(item: object) -> dict[str, dict[str, str]] | Non
     }
 
 
-def _extract_openai_message_text(content: object) -> str:
+def _extract_openai_message_text(content: JsonValue) -> str:
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
@@ -550,3 +551,9 @@ def _require_env(name: str) -> str:
     if not value:
         raise RuntimeError(f"{name} 未配置")
     return value
+
+
+def _coerce_json_object(value: JsonValue) -> JsonObject:
+    if not isinstance(value, dict):
+        raise RuntimeError("model provider returned non-object JSON")
+    return {str(key): item for key, item in value.items()}

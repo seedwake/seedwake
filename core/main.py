@@ -13,6 +13,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import FrameType
 from typing import TextIO
 
 import psycopg
@@ -39,7 +40,9 @@ from core.thought_parser import Thought
 from core.types import (
     ConversationEntry,
     EventPayload,
+    JsonObject,
     PerceptionStimulusPayload,
+    JsonValue,
     RecentConversationPrompt,
     StatusEventPayload,
 )
@@ -276,6 +279,7 @@ def _run_engine_loop(
     while True:
         if pending_cycle_id is None:
             pending_cycle_id = _next_cycle_id(runtime.stm, last_completed_cycle_id)
+        assert pending_cycle_id is not None
         cycle_id = pending_cycle_id
         (
             identity,
@@ -478,8 +482,8 @@ def _compact_conversation_text(content: str) -> str:
     return " ".join(content.split())
 
 
-def _merged_conversation_message(stimulus: Stimulus) -> dict:
-    payload = {
+def _merged_conversation_message(stimulus: Stimulus) -> JsonObject:
+    payload: JsonObject = {
         "source": stimulus.source,
         "content": _compact_conversation_text(stimulus.content),
         "timestamp": stimulus.timestamp.isoformat(),
@@ -490,11 +494,11 @@ def _merged_conversation_message(stimulus: Stimulus) -> dict:
     return payload
 
 
-def _conversation_message_pairs(stimulus: Stimulus) -> list[tuple[str, dict]]:
+def _conversation_message_pairs(stimulus: Stimulus) -> list[tuple[str, JsonObject]]:
     merged_messages = stimulus.metadata.get("merged_messages")
     merged_ids = stimulus.metadata.get("merged_stimulus_ids")
     if isinstance(merged_messages, list) and isinstance(merged_ids, list) and len(merged_messages) == len(merged_ids):
-        pairs: list[tuple[str, dict]] = []
+        pairs: list[tuple[str, JsonObject]] = []
         for index, raw_message in enumerate(merged_messages):
             message = _normalize_merged_conversation_message(raw_message, stimulus)
             pairs.append((str(merged_ids[index] or "").strip(), message))
@@ -502,10 +506,10 @@ def _conversation_message_pairs(stimulus: Stimulus) -> list[tuple[str, dict]]:
     return [(stimulus.stimulus_id, _merged_conversation_message(stimulus))]
 
 
-def _normalize_merged_conversation_message(message: object, stimulus: Stimulus) -> dict:
+def _normalize_merged_conversation_message(message: JsonValue, stimulus: Stimulus) -> JsonObject:
     if not isinstance(message, dict):
         return _merged_conversation_message(stimulus)
-    normalized = dict(message)
+    normalized: JsonObject = {str(key): value for key, value in message.items()}
     normalized["source"] = str(message.get("source") or stimulus.source)
     normalized["content"] = _compact_conversation_text(str(message.get("content") or ""))
     normalized["timestamp"] = str(message.get("timestamp") or stimulus.timestamp.isoformat())
@@ -545,31 +549,32 @@ def _next_cycle_id(stm: ShortTermMemory, last_cycle_id: int) -> int:
     if redis_client is None:
         return fallback_cycle_id
     try:
-        return int(
-            redis_client.eval(
-                """
-                local counter = tonumber(redis.call("GET", KEYS[1]) or "0")
-                local latest = tonumber(redis.call("GET", KEYS[2]) or "0")
-                local baseline = tonumber(ARGV[1]) or 0
-                if latest > baseline then
-                  baseline = latest
-                end
-                if counter > baseline then
-                  baseline = counter
-                end
-                local nextv = baseline + 1
-                redis.call("SET", KEYS[1], nextv)
-                if nextv > latest then
-                  redis.call("SET", KEYS[2], nextv)
-                end
-                return nextv
-                """,
-                2,
-                CYCLE_COUNTER_KEY,
-                LATEST_CYCLE_KEY,
-                baseline_cycle_id,
-            )
+        next_cycle_id = redis_client.eval(
+            """
+            local counter = tonumber(redis.call("GET", KEYS[1]) or "0")
+            local latest = tonumber(redis.call("GET", KEYS[2]) or "0")
+            local baseline = tonumber(ARGV[1]) or 0
+            if latest > baseline then
+              baseline = latest
+            end
+            if counter > baseline then
+              baseline = counter
+            end
+            local nextv = baseline + 1
+            redis.call("SET", KEYS[1], nextv)
+            if nextv > latest then
+              redis.call("SET", KEYS[2], nextv)
+            end
+            return nextv
+            """,
+            2,
+            CYCLE_COUNTER_KEY,
+            LATEST_CYCLE_KEY,
+            baseline_cycle_id,
         )
+        if not isinstance(next_cycle_id, (str, int)):
+            raise TypeError(f"unexpected cycle counter result: {type(next_cycle_id).__name__}")
+        return int(next_cycle_id)
     except CYCLE_COUNTER_EXCEPTIONS:
         return fallback_cycle_id
 
@@ -738,7 +743,8 @@ def _summarize_recent_conversation(
             return None
         summary = _clean_recent_conversation_summary(response["message"].get("content"))
         logger.info(
-            "cycle C%s recent conversation summary batch %d/%d for %s finished in %.1f ms (input_chars=%d, output_chars=%d)",
+            "cycle C%s recent conversation summary batch %d/%d for %s finished in "
+            "%.1f ms (input_chars=%d, output_chars=%d)",
             cycle_id,
             index,
             total_batches,
@@ -1009,7 +1015,7 @@ def _clip_recent_conversation_summary_content(content: str, max_chars: int) -> s
     return content[: max_chars - 3].rstrip() + "..."
 
 
-def _clean_recent_conversation_summary(raw_summary: object) -> str:
+def _clean_recent_conversation_summary(raw_summary: JsonValue) -> str:
     summary = " ".join(str(raw_summary or "").split()).strip()
     for prefix in ("摘要：", "对话摘要：", "新的摘要："):
         if summary.startswith(prefix):
@@ -1133,7 +1139,7 @@ def _stimulus_display_content(stimulus: Stimulus) -> str:
     return " | ".join(_merged_message_log_text(message) for message in merged_messages)
 
 
-def _merged_message_log_text(message: object) -> str:
+def _merged_message_log_text(message: JsonValue) -> str:
     if isinstance(message, dict):
         return _compact_conversation_text(str(message.get("content") or ""))
     return _compact_conversation_text(str(message or ""))
@@ -1240,7 +1246,7 @@ def _install_signal_handler(
     prompt_log_file: TextIO | None,
     action_manager: ActionManager,
 ) -> None:
-    def handler(sig: int, frame: object) -> None:
+    def handler(sig: int, frame: FrameType | None) -> None:
         _ = sig, frame
         print(f"\n\n{C_DIM}心相续止息。{C_RESET}")
         drained = action_manager.shutdown_with_timeout(wait_timeout_seconds=5.0)

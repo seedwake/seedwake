@@ -14,6 +14,7 @@ from core.action import (
     ActionManager,
     ActionPlan,
     NEWS_SEEN_REDIS_KEY,
+    _coerce_action_request_payload,
     _fallback_plan,
     _native_send_message_plan,
     _plan_delegate_tool_call,
@@ -46,6 +47,7 @@ from core.stimulus import (
     load_conversation_history,
     load_recent_conversations,
 )
+from core.types import JsonObject
 from core.thought_parser import Thought
 from core.types import ActionControl, ActionResultEnvelope, NewsItem
 from test_support import ListRedisStub
@@ -140,10 +142,10 @@ class _JsonPlannerClient(ModelClient):
         self,
         *,
         model: str,
-        messages: list[dict[str, object]],
-        tools: list[dict] | None = None,
+        messages: list[JsonObject],
+        tools: list[JsonObject] | None = None,
         options: dict | None = None,
-    ) -> dict:
+    ) -> JsonObject:
         _ = model, messages, tools, options
         return {"message": {"content": self._content, "tool_calls": []}}
 
@@ -1111,7 +1113,10 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             conversations[0]["summary"],
             "Alice 摘要：" + "；".join(f"第{i}句" for i in range(1, 11)),
         )
-        self.assertEqual([message["content"] for message in conversations[0]["messages"]], [f"第{i}句" for i in range(9, 19)])
+        self.assertEqual(
+            [message["content"] for message in conversations[0]["messages"]],
+            [f"第{i}句" for i in range(9, 19)],
+        )
         self.assertEqual(builder_calls, [])
 
     def test_load_recent_conversations_refreshes_persistent_summary_from_full_history(self) -> None:
@@ -2759,6 +2764,19 @@ class ActionManagerTests(unittest.TestCase):
         restored = json.loads(redis_stub.hvals(ACTION_REDIS_KEY)[0])
         self.assertEqual(restored["status"], "failed")
         self.assertEqual(restored["result"]["error"], "delivery_status_unknown")
+
+    def test_restore_action_request_payload_preserves_reply_to_message_id(self) -> None:
+        payload = _coerce_action_request_payload(
+            {
+                "task": "向 telegram:42 发送消息：我在。",
+                "reason": "测试",
+                "raw_action": {"type": "send_message", "params": 'message:"我在。"'},
+                "reply_to_message_id": "101",
+            },
+            "fallback",
+        )
+
+        self.assertEqual(payload["reply_to_message_id"], "101")
 
     def test_news_fallback_uses_fixed_rss_feeds(self) -> None:
         thought = _make_thought(

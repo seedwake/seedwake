@@ -11,7 +11,14 @@ import redis as redis_lib
 from redis import exceptions as redis_exceptions
 from uuid import uuid4
 
-from core.types import ConversationEntry, JsonObject, RecentConversationMessage, RecentConversationPrompt, StimulusRecord
+from core.types import (
+    ConversationEntry,
+    JsonObject,
+    JsonValue,
+    RecentConversationMessage,
+    RecentConversationPrompt,
+    StimulusRecord,
+)
 
 REDIS_KEY = "seedwake:stimuli"
 CONVERSATION_HISTORY_KEY = "seedwake:conversation_history"
@@ -296,7 +303,7 @@ def _sync_conversation_history(
 def _append_merged_conversation_history_entry(
     redis_client: redis_lib.Redis,
     stimulus: Stimulus,
-    message: object,
+    message: JsonValue,
     stimulus_id: str | None,
 ) -> None:
     if not isinstance(message, dict):
@@ -498,6 +505,7 @@ def _refresh_conversation_summary(
         return summary
     return summary
 
+
 def _recent_conversation_message(
     entry: ConversationEntry,
     source_name: str,
@@ -602,7 +610,7 @@ def _conversation_source_name(source: str, metadata: JsonObject) -> str:
     return full_name or username or source
 
 
-def _conversation_summary_state(raw_value: object) -> tuple[str, str, bool]:
+def _conversation_summary_state(raw_value: JsonValue | bytes) -> tuple[str, str, bool]:
     text = str(raw_value or "").strip()
     if not text:
         return "", "", False

@@ -8,7 +8,7 @@ from email.utils import parsedate_to_datetime
 from urllib import error, request
 from xml.etree import ElementTree
 
-from core.types import ActionResultEnvelope, JsonObject, NewsItem
+from core.types import ActionResultEnvelope, JsonObject, JsonValue, NewsItem
 
 FEED_TIMEOUT_SECONDS = 10
 MAX_ITEMS_PER_FEED = 10
@@ -94,7 +94,7 @@ def _build_result(
     ok: bool,
     summary: str,
     data: JsonObject,
-    error_detail: object | None,
+    error_detail: JsonValue,
 ) -> ActionResultEnvelope:
     return {
         "ok": ok,
