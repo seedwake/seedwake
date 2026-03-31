@@ -1071,7 +1071,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         self.assertEqual([message["content"] for message in conversations[0]["messages"]], ["更早那句"])
 
-    def test_load_recent_conversations_rebuilds_prompt_summary_when_hidden_messages_shift_window(self) -> None:
+    def test_load_recent_conversations_keeps_persistent_summary_when_hidden_messages_shift_window(self) -> None:
         redis_client = ListRedisStub()
         for index in range(20):
             append_conversation_history(
@@ -1098,7 +1098,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 existing_summary,
                 [str(entry.get("content") or "") for entry in entries],
             ))
-            return "缩减后的摘要"
+            return "不该触发的新摘要"
 
         conversations = load_recent_conversations(
             redis_client,
@@ -1107,9 +1107,65 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             summary_builder=prompt_summary_builder,
         )
 
-        self.assertEqual(conversations[0]["summary"], "缩减后的摘要")
+        self.assertEqual(
+            conversations[0]["summary"],
+            "Alice 摘要：" + "；".join(f"第{i}句" for i in range(1, 11)),
+        )
         self.assertEqual([message["content"] for message in conversations[0]["messages"]], [f"第{i}句" for i in range(9, 19)])
-        self.assertEqual(builder_calls, [("Alice", "", [f"第{i}句" for i in range(1, 9)])])
+        self.assertEqual(builder_calls, [])
+
+    def test_load_recent_conversations_refreshes_persistent_summary_from_full_history(self) -> None:
+        redis_client = ListRedisStub()
+        for index in range(12):
+            append_conversation_history(
+                redis_client,
+                role="user",
+                source="telegram:1",
+                content=f"第{index + 1}句",
+                stimulus_id=f"stim_{index + 1}",
+                metadata={"telegram_full_name": "Alice"},
+                timestamp=_make_thought(1, index + 1).timestamp,
+            )
+
+        load_recent_conversations(
+            redis_client,
+            include_sources={"telegram:1"},
+            summary_builder=_conversation_summary_stub,
+        )
+
+        for index in range(12, 14):
+            append_conversation_history(
+                redis_client,
+                role="user",
+                source="telegram:1",
+                content=f"第{index + 1}句",
+                stimulus_id=f"stim_{index + 1}",
+                metadata={"telegram_full_name": "Alice"},
+                timestamp=_make_thought(1, index + 1).timestamp,
+            )
+
+        builder_calls: list[tuple[str, str, list[str]]] = []
+
+        def prompt_summary_builder(source_name: str, existing_summary: str, entries: list[dict]) -> str:
+            builder_calls.append((
+                source_name,
+                existing_summary,
+                [str(entry.get("content") or "") for entry in entries],
+            ))
+            return _conversation_summary_stub(source_name, existing_summary, entries)
+
+        conversations = load_recent_conversations(
+            redis_client,
+            include_sources={"telegram:1"},
+            exclude_stimulus_ids={"stim_13", "stim_14"},
+            summary_builder=prompt_summary_builder,
+        )
+
+        self.assertEqual(conversations[0]["summary"], "Alice 摘要：第1句；第2句｜第3句；第4句")
+        self.assertEqual(
+            builder_calls,
+            [("Alice", "Alice 摘要：第1句；第2句", ["第3句", "第4句"])],
+        )
 
     def test_load_recent_conversations_skips_empty_recent_block_for_current_only_source(self) -> None:
         redis_client = ListRedisStub()

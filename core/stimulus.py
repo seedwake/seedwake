@@ -410,7 +410,7 @@ def load_recent_conversations(
         source_name = _conversation_source_name(source, metadata)
         source_label = _conversation_source_label(source, metadata)
         existing_summary, absorbed_until, summary_current = stored_summaries.get(source, ("", "", False))
-        stored_summary = _refresh_conversation_summary(
+        summary = _refresh_conversation_summary(
             redis_client,
             source,
             source_name,
@@ -418,14 +418,6 @@ def load_recent_conversations(
             absorbed_until,
             summary_current,
             entries,
-            summary_builder,
-            raw_limit,
-        )
-        summary = _prompt_conversation_summary(
-            source_name,
-            stored_summary,
-            entries,
-            display_entries,
             summary_builder,
             raw_limit,
         )
@@ -505,27 +497,6 @@ def _refresh_conversation_summary(
     except STIMULUS_REDIS_EXCEPTIONS:
         return summary
     return summary
-
-
-def _prompt_conversation_summary(
-    source_name: str,
-    stored_summary: str,
-    all_entries: list[ConversationEntry],
-    display_entries: list[ConversationEntry],
-    summary_builder: Callable[[str, str, list[ConversationEntry]], str | None] | None,
-    raw_limit: int,
-) -> str:
-    prompt_older_entries = _older_conversation_entries(display_entries, raw_limit)
-    if not prompt_older_entries:
-        return ""
-    stored_older_entries = _older_conversation_entries(all_entries, raw_limit)
-    if _conversation_entry_ids(prompt_older_entries) == _conversation_entry_ids(stored_older_entries):
-        return str(stored_summary or "").strip()
-    if summary_builder is None:
-        return ""
-    prompt_summary = summary_builder(source_name, "", prompt_older_entries)
-    return str(prompt_summary or "").strip()
-
 
 def _recent_conversation_message(
     entry: ConversationEntry,
