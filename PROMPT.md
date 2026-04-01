@@ -317,3 +317,20 @@ news、reading、search 等信息类 action_result 被选入本轮 prompt 后即
 ## 接下来的念头
 --- 第 N 轮 ---
 ```
+
+## 35. reading action_result 的展示格式需要调整
+
+当前 reading 结果展示格式有三个问题：
+
+**a) 包含"笔记"部分。** `brief_note` 字段是外部 OpenClaw worker 的观点输出（"这段值得读，因为……"），不应该出现在意识流 prompt 里。外部程序只提供信息，不输出观点。模型应该自己判断值不值得读。
+
+**b) 原文片段太短。** 当前实际返回的摘要往往很短。应确保 excerpt 在 600 字左右，给模型足够的信息量来形成自己的判断。
+
+**c) 格式应简化为来源 + 原文要点。** 当前格式把 summary、source.title、source.url、excerpt_original、brief_note 全部拼在一行里，杂乱。应简化为：
+
+```
+来源：标题 (URL)
+原文：摘要或原文片段（约 600 字）
+```
+
+不需要"笔记"行。外部程序只提供信息，不输出观点。

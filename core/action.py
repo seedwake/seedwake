@@ -58,8 +58,7 @@ THOUGHT_ACTION_TYPES = {
     "file_modify",
     "system_change",
 }
-READING_STIMULUS_EXCERPT_MAX_CHARS = 1600
-READING_STIMULUS_NOTE_MAX_CHARS = 400
+READING_STIMULUS_EXCERPT_MAX_CHARS = 600
 SEARCH_STIMULUS_MAX_RESULTS = 5
 SEARCH_STIMULUS_TITLE_MAX_CHARS = 120
 SEARCH_STIMULUS_URL_MAX_CHARS = 160
@@ -71,7 +70,8 @@ SEARCH_RESULT_REQUIREMENTS = [
     "results 最多返回 5 条最相关结果。",
     "title、url、snippet 使用这些精确字段名。",
 ]
-READING_SOURCE_RESULT_DATA_SHAPE = '{"source":{"title":"","url":""},"excerpt_original":"","brief_note":""}'
+WEB_FETCH_RESULT_DATA_SHAPE = '{"source":{"title":"","url":""},"excerpt_original":"","brief_note":""}'
+READING_SOURCE_RESULT_DATA_SHAPE = '{"source":{"title":"","url":""},"excerpt_original":""}'
 WEB_FETCH_RESULT_REQUIREMENTS = [
     "source.title 和 source.url 使用这些精确字段名。",
     "excerpt_original 必须是网页原文片段，不要改写成综述。",
@@ -80,7 +80,7 @@ WEB_FETCH_RESULT_REQUIREMENTS = [
 READING_RESULT_REQUIREMENTS = [
     "source.title 和 source.url 使用这些精确字段名。",
     "excerpt_original 必须是原文片段，不要改写成综述。",
-    "brief_note 用 1-2 句说明为什么这段材料值得我读。",
+    "excerpt_original 尽量提供约 600 字、足以让我自行判断的内容。",
 ]
 WEATHER_RESULT_DATA_SHAPE = (
     '{"location":"","condition":"","temperature_c":"","feels_like_c":"",'
@@ -1803,7 +1803,7 @@ def _build_web_fetch_task(raw_params: str, explicit_task: str, thought: Thought)
 def _build_reading_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
     reading_query = _extract_action_first_param(raw_params, "query", "topic", "keywords")
     if reading_query:
-        return _reading_result_contract(f"围绕“{reading_query}”寻找一小段值得阅读的外部材料，返回原文片段和简短说明。")
+        return _reading_result_contract(f"围绕“{reading_query}”寻找一小段值得阅读的外部材料，返回来源和原文片段。")
     if explicit_task:
         return _reading_result_contract(explicit_task)
     return _reading_result_contract(
@@ -1858,7 +1858,7 @@ def _search_result_contract(task: str) -> str:
 def _web_fetch_result_contract(task: str) -> str:
     return _with_openclaw_result_contract(
         task,
-        data_shape=READING_SOURCE_RESULT_DATA_SHAPE,
+        data_shape=WEB_FETCH_RESULT_DATA_SHAPE,
         requirements=WEB_FETCH_RESULT_REQUIREMENTS,
     )
 
@@ -2655,20 +2655,20 @@ def _send_message_success_summary(target_source: str, message_text: str) -> str:
 def _reading_stimulus_content(summary: str, data: JsonValue) -> str:
     if not isinstance(data, dict):
         return summary
-    excerpt, excerpt_truncated = _clip_prompt_text(
+    excerpt, _ = _clip_prompt_text(
         str(data.get("excerpt_original") or data.get("excerpt") or "").strip(),
         READING_STIMULUS_EXCERPT_MAX_CHARS,
     )
-    note, note_truncated = _clip_prompt_text(
-        str(data.get("brief_note") or data.get("note") or "").strip(),
-        READING_STIMULUS_NOTE_MAX_CHARS,
-    )
-    parts = [summary]
-    title, url = _reading_source_title_and_url(data)
-    if title:
-        parts.append(f"来源：{title}" + (f" ({url})" if url else ""))
-    _append_reading_excerpt(parts, excerpt, excerpt_truncated)
-    _append_reading_note(parts, note, note_truncated)
+    parts: list[str] = []
+    source_line = _reading_source_line(data)
+    if source_line:
+        parts.append(source_line)
+    if excerpt:
+        parts.append(f"原文：{excerpt}")
+    elif summary.strip():
+        parts.append(f"摘要：{summary.strip()}")
+    if not parts:
+        return summary
     return "\n".join(parts)
 
 
@@ -2713,22 +2713,15 @@ def _reading_source_title_and_url(data: dict) -> tuple[str, str]:
     )
 
 
-def _append_reading_excerpt(parts: list[str], excerpt: str, excerpt_truncated: bool) -> None:
-    if not excerpt:
-        return
-    excerpt_label = "原文片段（节选）" if excerpt_truncated else "原文片段"
-    parts.append(f"{excerpt_label}：{excerpt}")
-    if excerpt_truncated:
-        parts.append(
-            "说明：这里只展示节选；如果我还想继续读，可以再次使用 {action:reading} 或 {action:web_fetch}。"
-        )
-
-
-def _append_reading_note(parts: list[str], note: str, note_truncated: bool) -> None:
-    if not note:
-        return
-    note_label = "笔记（节选）" if note_truncated else "笔记"
-    parts.append(f"{note_label}：{note}")
+def _reading_source_line(data: dict) -> str:
+    title, url = _reading_source_title_and_url(data)
+    if title and url:
+        return f"来源：{title} ({url})"
+    if title:
+        return f"来源：{title}"
+    if url:
+        return f"来源：{url}"
+    return ""
 
 
 def _news_stimulus_entry(item: JsonValue) -> str:

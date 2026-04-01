@@ -1412,8 +1412,14 @@ def _install_signal_handler(
     prompt_log_file: TextIO | None,
     action_manager: ActionManager,
 ) -> None:
+    shutting_down = False
+
     def handler(sig: int, frame: FrameType | None) -> None:
+        nonlocal shutting_down
         _ = sig, frame
+        if shutting_down:
+            return
+        shutting_down = True
         print(f"\n\n{C_DIM}心相续止息。{C_RESET}")
         drained = action_manager.shutdown_with_timeout(wait_timeout_seconds=5.0)
         if log_file:

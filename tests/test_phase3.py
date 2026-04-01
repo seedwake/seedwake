@@ -2570,7 +2570,7 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(stimulus.type, "weather")
         self.assertIn("多云", stimulus.content)
 
-    def test_reading_stimulus_contains_excerpt_and_note(self) -> None:
+    def test_reading_stimulus_simplifies_to_source_and_original_text(self) -> None:
         queue = StimulusQueue(redis_client=None)
         planner = _Planner(ActionPlan("reading", "openclaw", "阅读外部材料", 30, "测试"))
         executor = _OpenClawExecutor(_action_result(
@@ -2606,12 +2606,12 @@ class ActionManagerTests(unittest.TestCase):
 
         stimulus = queue.pop_many(limit=1)[0]
         self.assertEqual(stimulus.type, "reading")
-        self.assertIn("找到一段贴题材料", stimulus.content)
-        self.assertIn("来源：Example Article (https://example.com/article)", stimulus.content)
-        self.assertIn("原文片段：The answer lies in the logs.", stimulus.content)
-        self.assertIn("笔记：这段适合当前主题。", stimulus.content)
+        self.assertEqual(
+            stimulus.content,
+            "来源：Example Article (https://example.com/article)\n原文：The answer lies in the logs.",
+        )
 
-    def test_reading_stimulus_truncates_long_excerpt_and_marks_continuation(self) -> None:
+    def test_reading_stimulus_truncates_long_excerpt_without_note_or_extra_hint(self) -> None:
         queue = StimulusQueue(redis_client=None)
         planner = _Planner(ActionPlan("reading", "openclaw", "阅读外部材料", 30, "测试"))
         long_excerpt = "A" * 1800 + "TAIL"
@@ -2647,11 +2647,52 @@ class ActionManagerTests(unittest.TestCase):
             manager.shutdown()
 
         stimulus = queue.pop_many(limit=1)[0]
-        self.assertIn("原文片段（节选）：", stimulus.content)
-        self.assertIn("说明：这里只展示节选；如果我还想继续读，可以再次使用 {action:reading} 或 {action:web_fetch}。", stimulus.content)
+        self.assertIn("来源：Long Article (https://example.com/long)", stimulus.content)
+        self.assertIn("原文：", stimulus.content)
         self.assertNotIn(long_excerpt, stimulus.content)
         self.assertNotIn("TAIL", stimulus.content)
-        self.assertIn("笔记：这段很长，需要节选。", stimulus.content)
+        self.assertNotIn("笔记：", stimulus.content)
+        self.assertNotIn("说明：", stimulus.content)
+        self.assertNotIn("找到一段很长的材料", stimulus.content)
+
+    def test_reading_stimulus_uses_summary_label_when_excerpt_missing(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        planner = _Planner(ActionPlan("reading", "openclaw", "阅读外部材料", 30, "测试"))
+        executor = _OpenClawExecutor(_action_result(
+            summary="这段材料讨论了意识与自我边界的关系。",
+            data={
+                "source": {
+                    "title": "Mind Notes",
+                    "url": "https://example.com/mind",
+                },
+                "excerpt_original": "",
+            },
+            run_id="run_reading_3",
+            session_key="agent:seedwake-worker:seedwake:action:act_C1-1",
+        ))
+        manager = ActionManager(
+            redis_client=None,
+            stimulus_queue=queue,
+            planner=planner,
+            openclaw_executor=executor,
+            auto_execute=[],
+            require_confirmation=[],
+            forbidden=[],
+        )
+
+        try:
+            manager.submit_from_thoughts([
+                _make_thought(action_request={"type": "reading", "params": 'query:"意识"'})
+            ])
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        stimulus = queue.pop_many(limit=1)[0]
+        self.assertEqual(
+            stimulus.content,
+            "来源：Mind Notes (https://example.com/mind)\n摘要：这段材料讨论了意识与自我边界的关系。",
+        )
 
     def test_planner_ignore_emits_feedback_stimulus(self) -> None:
         created, stimulus = _submit_planner_feedback(None)
@@ -3158,6 +3199,7 @@ class ActionManagerTests(unittest.TestCase):
         self.assertNotIn("{action:web_fetch", plan.task)
         self.assertIn('"source"', plan.task)
         self.assertIn('"excerpt_original"', plan.task)
+        self.assertIn('"brief_note"', plan.task)
 
     def test_unknown_action_fallback_is_rejected(self) -> None:
         thought = _make_thought(
@@ -3239,7 +3281,9 @@ class ActionManagerTests(unittest.TestCase):
         plan = _as_action_plan(plan)
         self.assertEqual(plan.executor, "openclaw")
         self.assertIn("雨后泥土气味", plan.task)
-        self.assertIn('"brief_note"', plan.task)
+        self.assertIn('"source"', plan.task)
+        self.assertIn('"excerpt_original"', plan.task)
+        self.assertNotIn('"brief_note"', plan.task)
 
     def test_system_change_fallback_includes_structured_result_contract(self) -> None:
         thought = _make_thought(
