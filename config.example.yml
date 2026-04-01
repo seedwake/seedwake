@@ -12,16 +12,16 @@ models:
     #   openai_compatible 默认 true
     # 如需覆盖 provider 默认能力，可显式设为 true / false
     name: "qwen3.5:27b"
-    num_predict: 2048
-    num_ctx: 32768
+    num_predict: 4096
+    num_ctx: 131072
     temperature: 0.8
 
   # Auxiliary model for memory consolidation, sleep tasks, etc. (Phase 2+)
   auxiliary:
     provider: "ollama"
     name: "qwen3.5:9b"
-    num_predict: 1024
-    num_ctx: 16384
+    num_predict: 2048
+    num_ctx: 65536
     temperature: 0.3
 
   # Embedding model for semantic retrieval (Phase 2+)

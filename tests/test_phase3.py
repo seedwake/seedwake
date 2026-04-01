@@ -1,6 +1,7 @@
 import json
 import io
 import unittest
+from concurrent.futures import wait
 from email.message import Message
 from threading import Barrier
 from typing import cast
@@ -324,13 +325,20 @@ def _target_entity_message_params() -> str:
     return 'target_entity:"person:alice", message:"你好"'
 
 
-def _telegram_http_error() -> error.HTTPError:
+def _telegram_http_error(
+    *,
+    code: int = 403,
+    msg: str = "forbidden",
+    description: str = "Forbidden: bot was blocked by the user",
+) -> error.HTTPError:
     return error.HTTPError(
         url="https://api.telegram.org",
-        code=403,
-        msg="forbidden",
+        code=code,
+        msg=msg,
         hdrs=Message(),
-        fp=io.BytesIO(b'{"ok": false, "description": "Forbidden: bot was blocked by the user"}'),
+        fp=io.BytesIO(
+            json.dumps({"ok": False, "description": description}, ensure_ascii=False).encode("utf-8")
+        ),
     )
 
 
@@ -2845,6 +2853,85 @@ class ActionManagerTests(unittest.TestCase):
         req = mock_urlopen.call_args[0][0]
         body = json.loads(req.data.decode("utf-8"))
         self.assertEqual(body["reply_parameters"]["message_id"], 103)
+
+    def test_native_send_message_retries_without_reply_to_when_reply_target_missing(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        manager = _build_action_manager(
+            queue,
+            _Planner(ActionPlan("send_message", "native", "发送消息", 30, "测试", message_text="我在。")),
+            redis_client=ListRedisStub(),
+            auto_execute=["send_message"],
+        )
+
+        try:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
+                with patch("core.action.request.urlopen") as mock_urlopen:
+                    response = MagicMock()
+                    response.read.return_value = b'{"ok": true}'
+                    mock_urlopen.side_effect = [
+                        _telegram_http_error(
+                            code=400,
+                            msg="bad request",
+                            description="Bad Request: message to be replied not found",
+                        ),
+                        MagicMock(__enter__=MagicMock(return_value=response), __exit__=MagicMock(return_value=None)),
+                    ]
+                    created = manager.submit_from_thoughts(
+                        [_make_thought(action_request={"type": "send_message", "params": 'message:"我在。"'})],
+                        stimuli=[_conversation_stimulus(message_id=103)],
+                    )
+                    manager.shutdown_with_timeout(1.0)
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(created[0].status, "succeeded")
+        self.assertEqual(mock_urlopen.call_count, 2)
+        first_body = json.loads(mock_urlopen.call_args_list[0][0][0].data.decode("utf-8"))
+        second_body = json.loads(mock_urlopen.call_args_list[1][0][0].data.decode("utf-8"))
+        self.assertEqual(first_body["reply_parameters"]["message_id"], 103)
+        self.assertNotIn("reply_parameters", second_body)
+
+    def test_native_send_message_retry_without_reply_to_records_dedup_without_reply(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        manager = _build_action_manager(
+            queue,
+            _Planner(ActionPlan("send_message", "native", "发送消息", 30, "测试", message_text="我在。")),
+            redis_client=ListRedisStub(),
+            auto_execute=["send_message"],
+        )
+
+        try:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
+                with patch("core.action.request.urlopen") as mock_urlopen:
+                    response = MagicMock()
+                    response.read.return_value = b'{"ok": true}'
+                    mock_urlopen.side_effect = [
+                        _telegram_http_error(
+                            code=400,
+                            msg="bad request",
+                            description="Bad Request: message to be replied not found",
+                        ),
+                        MagicMock(__enter__=MagicMock(return_value=response), __exit__=MagicMock(return_value=None)),
+                    ]
+                    first_created = manager.submit_from_thoughts(
+                        [_make_thought(action_request={"type": "send_message", "params": 'message:"我在。"'})],
+                        stimuli=[_conversation_stimulus(message_id=103)],
+                    )
+                    wait(manager._snapshot_futures(), timeout=1.0)
+                    second_created = manager.submit_from_thoughts(
+                        [_make_thought(index=2, action_request={"type": "send_message", "params": 'message:"我在。"'})],
+                        stimuli=[_conversation_stimulus()],
+                    )
+                    manager.shutdown_with_timeout(1.0)
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(first_created[0].status, "succeeded")
+        self.assertEqual(second_created[0].status, "failed")
+        self.assertEqual(mock_urlopen.call_count, 2)
+        self.assertEqual(manager._recent_sent_messages[-1], ("telegram:1", "我在。", ""))
 
     def test_send_message_fallback_preserves_target_entity(self) -> None:
         thought = _make_thought(

@@ -522,7 +522,7 @@ class ActionManager:
                 summary="消息发送前无法持久化状态",
                 error_detail="delivery_state_unavailable",
             )
-        send_error = _send_telegram_message(
+        send_error, delivered_reply_to = _send_telegram_message(
             target_source,
             message_text,
             timeout_seconds=action.timeout_seconds,
@@ -537,7 +537,7 @@ class ActionManager:
                 summary=f"Telegram 发送失败：{send_error}",
                 error_detail=send_error,
             )
-        self._record_sent_message(target_source, message_text, reply_to)
+        self._record_sent_message(target_source, message_text, delivered_reply_to)
         return _build_action_result(
             ok=True,
             summary=_send_message_success_summary(target_source, message_text),
@@ -2441,7 +2441,7 @@ def _send_telegram_message(
     *,
     timeout_seconds: int,
     reply_to_message_id: str = "",
-) -> str | None:
+) -> tuple[str | None, str]:
     started_at = time.perf_counter()
     logger.info(
         "telegram send started (target=%s, reply_to=%s, chars=%d, timeout=%ds)",
@@ -2453,18 +2453,48 @@ def _send_telegram_message(
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         _log_telegram_send_finished(started_at, target_source, "telegram_token_missing")
-        return "telegram_token_missing"
+        return "telegram_token_missing", reply_to_message_id
     chat_id = _telegram_chat_id_from_source(target_source)
     if chat_id is None:
         _log_telegram_send_finished(started_at, target_source, "invalid_telegram_target")
-        return "invalid_telegram_target"
-    body_dict: JsonObject = {
-        "chat_id": chat_id,
-        "text": message_text,
-    }
-    if reply_to_message_id.strip().isdigit():
-        body_dict["reply_parameters"] = {"message_id": int(reply_to_message_id)}
-    body = json.dumps(body_dict).encode("utf-8")
+        return "invalid_telegram_target", reply_to_message_id
+    send_error = _send_telegram_message_once(
+        token,
+        chat_id,
+        message_text,
+        timeout_seconds=timeout_seconds,
+        reply_to_message_id=reply_to_message_id,
+    )
+    delivered_reply_to = reply_to_message_id
+    if reply_to_message_id and send_error and _should_retry_without_reply_to(send_error):
+        logger.warning(
+            "telegram reply target missing for %s (reply_to=%s), retrying without reply",
+            target_source,
+            reply_to_message_id,
+        )
+        send_error = _send_telegram_message_once(
+            token,
+            chat_id,
+            message_text,
+            timeout_seconds=timeout_seconds,
+            reply_to_message_id="",
+        )
+        delivered_reply_to = ""
+    _log_telegram_send_finished(started_at, target_source, send_error or "ok")
+    return send_error, delivered_reply_to
+
+
+def _send_telegram_message_once(
+    token: str,
+    chat_id: str,
+    message_text: str,
+    *,
+    timeout_seconds: int,
+    reply_to_message_id: str,
+) -> str | None:
+    body = json.dumps(
+        _telegram_send_body(chat_id, message_text, reply_to_message_id)
+    ).encode("utf-8")
     req = request.Request(
         url=f"https://api.telegram.org/bot{token}/sendMessage",
         data=body,
@@ -2475,24 +2505,25 @@ def _send_telegram_message(
         with request.urlopen(req, timeout=max(1, timeout_seconds)) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except error.HTTPError as exc:
-        detail = _telegram_http_error_detail(exc)
-        _log_telegram_send_finished(started_at, target_source, detail)
-        return detail
+        return _telegram_http_error_detail(exc)
     except TELEGRAM_SEND_EXCEPTIONS as exc:
-        _log_telegram_send_finished(started_at, target_source, str(exc))
         return str(exc)
     if not isinstance(payload, dict) or not bool(payload.get("ok")):
         description = ""
         if isinstance(payload, dict):
             description = str(payload.get("description") or "").strip()
-        _log_telegram_send_finished(
-            started_at,
-            target_source,
-            description or "telegram_send_failed",
-        )
         return description or "telegram_send_failed"
-    _log_telegram_send_finished(started_at, target_source, "ok")
     return None
+
+
+def _telegram_send_body(chat_id: str, message_text: str, reply_to_message_id: str) -> JsonObject:
+    body_dict: JsonObject = {
+        "chat_id": chat_id,
+        "text": message_text,
+    }
+    if reply_to_message_id.strip().isdigit():
+        body_dict["reply_parameters"] = {"message_id": int(reply_to_message_id)}
+    return body_dict
 
 
 def _telegram_chat_id_from_source(source: str) -> str | None:
@@ -2523,6 +2554,10 @@ def _telegram_http_error_detail(exc: error.HTTPError) -> str:
     if description:
         return f"http_{exc.code}: {description}"
     return f"http_{exc.code}"
+
+
+def _should_retry_without_reply_to(send_error: str) -> bool:
+    return "message to be replied not found" in str(send_error or "").lower()
 
 
 def _log_telegram_send_finished(
