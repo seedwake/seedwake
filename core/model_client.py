@@ -450,7 +450,38 @@ def _ollama_chat_message(response: _OllamaChatResponse | JsonObject) -> JsonObje
     message = getattr(response, "message", None)
     if message is None and isinstance(response, dict):
         message = response.get("message")
-    return _coerce_json_object(message)
+    if message is None:
+        raise RuntimeError(f"ollama chat response has no message field: {type(response).__name__}")
+    if isinstance(message, dict):
+        return _coerce_json_object(message)
+    # Ollama Message object — extract fields manually
+    return {
+        "content": str(getattr(message, "content", "") or ""),
+        "tool_calls": _normalize_ollama_tool_calls(getattr(message, "tool_calls", None)),
+    }
+
+
+def _normalize_ollama_tool_calls(raw_tool_calls: object) -> list[JsonObject]:
+    if not raw_tool_calls:
+        return []
+    if not isinstance(raw_tool_calls, list):
+        return []
+    normalized: list[JsonObject] = []
+    for item in raw_tool_calls:
+        if isinstance(item, dict):
+            normalized.append(_coerce_json_object(item))
+            continue
+        # Ollama ToolCall object
+        function = getattr(item, "function", None)
+        if function is None:
+            continue
+        normalized.append({
+            "function": {
+                "name": str(getattr(function, "name", "") or ""),
+                "arguments": getattr(function, "arguments", None) or {},
+            },
+        })
+    return normalized
 
 
 def _log_model_call(
@@ -608,5 +639,8 @@ def _require_env(name: str) -> str:
 
 def _coerce_json_object(value: JsonValue) -> JsonObject:
     if not isinstance(value, dict):
-        raise RuntimeError("model provider returned non-object JSON")
+        raise RuntimeError(
+            f"model provider returned non-object JSON: type={type(value).__name__}, "
+            f"repr={repr(value)[:200]}"
+        )
     return {str(key): item for key, item in value.items()}
