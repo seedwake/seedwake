@@ -241,6 +241,7 @@ class ActionManager:
         self._news_seen_shadow: dict[str, float] = {}
         self._note_shadow = ""
         self._note_shadow_dirty = False
+        self._pending_prompt_echoes: list[Stimulus] = []
         self._perception_observations: list[str] = []
         self._futures: set[Future] = set()
         self._recent_sent_messages: list[tuple[str, str, str]] = []  # (target, message, reply_to) dedup window
@@ -346,6 +347,18 @@ class ActionManager:
             observations = list(self._perception_observations)
             self._perception_observations.clear()
         return observations
+
+    def pop_prompt_echoes(self) -> list[Stimulus]:
+        with self._lock:
+            echoes = list(self._pending_prompt_echoes)
+            self._pending_prompt_echoes.clear()
+        return echoes
+
+    def requeue_prompt_echoes(self, echoes: list[Stimulus]) -> None:
+        if not echoes:
+            return
+        with self._lock:
+            self._pending_prompt_echoes = [*echoes, *self._pending_prompt_echoes]
 
     def current_note(self) -> str:
         redis_client = self._redis
@@ -548,6 +561,9 @@ class ActionManager:
         if not should_emit_stimulus:
             return
         stimulus = _build_result_stimulus(action, status, result)
+        if _should_emit_prompt_echo_directly(action, status, result):
+            self._remember_prompt_echo(action.action_id, stimulus)
+            return
         self._stimulus_queue.push(
             stimulus["type"],
             stimulus["priority"],
@@ -648,6 +664,19 @@ class ActionManager:
     def _emit(self, text: str) -> None:
         if self._log_callback:
             self._log_callback(text)
+
+    def _remember_prompt_echo(self, action_id: str, stimulus: PerceptionStimulusPayload) -> None:
+        pending = Stimulus(
+            stimulus_id=f"prompt_{action_id}",
+            type=stimulus["type"],
+            priority=stimulus["priority"],
+            source=stimulus["source"],
+            content=stimulus["content"],
+            action_id=action_id,
+            metadata=dict(stimulus["metadata"]),
+        )
+        with self._lock:
+            self._pending_prompt_echoes.append(pending)
 
     def _emit_planner_feedback(self, thought: Thought, raw_action_type: str, reason: str | None) -> None:
         reason_text = (reason or "").strip()
@@ -2430,8 +2459,9 @@ def _send_telegram_message(
         with request.urlopen(req, timeout=max(1, timeout_seconds)) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except error.HTTPError as exc:
-        _log_telegram_send_finished(started_at, target_source, f"http_{exc.code}")
-        return f"http_{exc.code}"
+        detail = _telegram_http_error_detail(exc)
+        _log_telegram_send_finished(started_at, target_source, detail)
+        return detail
     except TELEGRAM_SEND_EXCEPTIONS as exc:
         _log_telegram_send_finished(started_at, target_source, str(exc))
         return str(exc)
@@ -2456,6 +2486,27 @@ def _telegram_chat_id_from_source(source: str) -> str | None:
     if chat_id.isdigit() or (chat_id.startswith("-") and chat_id[1:].isdigit()):
         return chat_id
     return None
+
+
+def _telegram_http_error_detail(exc: error.HTTPError) -> str:
+    description = ""
+    try:
+        raw_body = exc.read()
+    except TELEGRAM_SEND_EXCEPTIONS:
+        raw_body = b""
+    if raw_body:
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            description = raw_body.decode("utf-8", errors="replace").strip()
+        else:
+            if isinstance(payload, dict):
+                description = str(payload.get("description") or "").strip()
+    if not description:
+        description = str(exc.reason or exc.msg or "").strip()
+    if description:
+        return f"http_{exc.code}: {description}"
+    return f"http_{exc.code}"
 
 
 def _log_telegram_send_finished(
@@ -2603,6 +2654,14 @@ def _stimulus_content(
 
 def _action_result_succeeded(status: str, result: ActionResultEnvelope) -> bool:
     return status == "succeeded" and bool(result.get("ok", True))
+
+
+def _should_emit_prompt_echo_directly(
+    action: ActionRecord,
+    status: str,
+    result: ActionResultEnvelope,
+) -> bool:
+    return action.type == "note_rewrite" and _action_result_succeeded(status, result)
 
 
 def _search_stimulus_content(summary: str, data: JsonValue) -> str:

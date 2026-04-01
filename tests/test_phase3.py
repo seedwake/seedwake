@@ -330,7 +330,7 @@ def _telegram_http_error() -> error.HTTPError:
         code=403,
         msg="forbidden",
         hdrs=Message(),
-        fp=None,
+        fp=io.BytesIO(b'{"ok": false, "description": "Forbidden: bot was blocked by the user"}'),
     )
 
 
@@ -1910,10 +1910,12 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(created_second[0].status, "succeeded")
         self.assertEqual(manager.current_note(), second_content)
         self.assertEqual(redis_stub.get(NOTE_REDIS_KEY), second_content)
-        stimuli = queue.pop_many(limit=5)
-        self.assertEqual(len(stimuli), 2)
-        self.assertTrue(all(stimulus.metadata["action_type"] == "note_rewrite" for stimulus in stimuli))
-        self.assertEqual([stimulus.content for stimulus in stimuli], ["我的笔记已覆写", "我的笔记已覆写"])
+        self.assertEqual(queue.pop_many(limit=5), [])
+        prompt_echoes = manager.pop_prompt_echoes()
+        self.assertEqual(len(prompt_echoes), 2)
+        self.assertTrue(all(stimulus.metadata["action_type"] == "note_rewrite" for stimulus in prompt_echoes))
+        self.assertEqual([stimulus.content for stimulus in prompt_echoes], ["我的笔记已覆写", "我的笔记已覆写"])
+        self.assertEqual(manager.pop_prompt_echoes(), [])
 
     def test_attach_redis_keeps_local_note_written_while_disconnected(self) -> None:
         queue = StimulusQueue(redis_client=None)
@@ -1939,6 +1941,27 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(created[0].status, "succeeded")
         self.assertEqual(manager.current_note(), "断线期间的新笔记")
         self.assertEqual(redis_stub.get(NOTE_REDIS_KEY), "断线期间的新笔记")
+
+    def test_requeue_prompt_echoes_restores_pending_note_echoes(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        manager = _build_action_manager(
+            queue,
+            _Planner(ActionPlan("note_rewrite", "native", "覆写我的笔记", 30, "测试", message_text="新的笔记")),
+            redis_client=None,
+        )
+
+        try:
+            manager.submit_from_thoughts([
+                _make_thought(action_request={"type": "note_rewrite", "params": 'content:"新的笔记"'})
+            ])
+            prompt_echoes = manager.pop_prompt_echoes()
+            self.assertEqual([stimulus.content for stimulus in prompt_echoes], ["我的笔记已覆写"])
+            manager.requeue_prompt_echoes(prompt_echoes)
+            restored = manager.pop_prompt_echoes()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual([stimulus.content for stimulus in restored], ["我的笔记已覆写"])
 
     def test_news_stimulus_skips_already_seen_rss_items(self) -> None:
         queue = StimulusQueue(redis_client=None)
@@ -2887,7 +2910,7 @@ class ActionManagerTests(unittest.TestCase):
                             action_request={"type": "send_message", "params": 'chat_id:"42", message:"你好"'}
                         )
                     ])
-            manager.shutdown()
+                    manager.shutdown()
         finally:
             manager.shutdown()
 
@@ -2895,6 +2918,7 @@ class ActionManagerTests(unittest.TestCase):
         stimulus = queue.pop_many(limit=1)[0]
         self.assertEqual(stimulus.type, "action_result")
         self.assertIn("Telegram 发送失败", stimulus.content)
+        self.assertIn("Forbidden: bot was blocked by the user", stimulus.content)
 
     def test_native_send_message_fails_when_target_entity_cannot_be_resolved(self) -> None:
         queue = StimulusQueue(redis_client=None)

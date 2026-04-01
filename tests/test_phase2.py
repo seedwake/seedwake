@@ -27,6 +27,7 @@ from core.memory.identity import load_identity
 from core.memory.long_term import LongTermEntry, LongTermMemory
 # noinspection PyProtectedMember
 from core.memory.short_term import ShortTermMemory, _thought_to_dict, _dict_to_thought
+from core.stimulus import Stimulus
 from core.thought_parser import Thought
 
 
@@ -451,6 +452,46 @@ class CycleTimingLogTests(unittest.TestCase):
         self.assertIn("cycle C42 stm get_context finished", output)
         self.assertIn("cycle C42 total execution finished", output)
         self.assertIn("status=failed", output)
+
+    @patch("core.main.run_cycle", side_effect=RuntimeError("boom"))
+    def test_execute_cycle_requeues_pending_prompt_echoes_on_failure(self, _) -> None:
+        pending_echo = Stimulus(
+            stimulus_id="prompt_act_C1-1",
+            type="action_result",
+            priority=2,
+            source="action:act_C1-1",
+            content="我的笔记已覆写",
+            action_id="act_C1-1",
+            metadata={"origin": "action", "action_type": "note_rewrite", "status": "succeeded"},
+        )
+        action_manager = MagicMock()
+        action_manager.pop_prompt_echoes.return_value = [pending_echo]
+        runtime = SimpleNamespace(
+            stm=MagicMock(),
+            ltm=MagicMock(),
+            embedding_client=MagicMock(),
+            embedding_model="embed-model",
+            primary_client=MagicMock(),
+            context_window=30,
+            model_config={"name": "test-model"},
+            action_manager=action_manager,
+        )
+        runtime.stm.get_context.return_value = []
+        runtime.stm.redis_client = None
+        runtime.ltm.available = False
+
+        with self.assertRaises(RuntimeError):
+            _execute_cycle(
+                _as_runtime(runtime),
+                cycle_id=42,
+                identity={"self_description": "我"},
+                stimuli=[],
+                running_actions=[],
+                perception_cues=[],
+                prompt_log_file=None,
+            )
+
+        action_manager.requeue_prompt_echoes.assert_called_once_with([pending_echo])
 
 
 class CoreLogHandleTests(unittest.TestCase):

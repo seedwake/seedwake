@@ -725,6 +725,7 @@ def _execute_cycle(
 ) -> list[Thought]:
     cycle_started_at = time.perf_counter()
     cycle_status = "failed"
+    pending_prompt_echoes: list[Stimulus] = []
     context_started_at = time.perf_counter()
     recent_thoughts = runtime.stm.get_context()
     logger.info(
@@ -760,6 +761,9 @@ def _execute_cycle(
             current_cycle_id=cycle_id,
             exclude_action_ids=_action_echo_action_ids(stimuli),
         )
+        pending_prompt_echoes = runtime.action_manager.pop_prompt_echoes()
+        if pending_prompt_echoes:
+            stimuli = [*stimuli, *pending_prompt_echoes]
         note_text = runtime.action_manager.current_note()
         thought_cycle_started_at = time.perf_counter()
         thoughts = run_cycle(
@@ -810,6 +814,10 @@ def _execute_cycle(
         )
         cycle_status = "ok"
         return thoughts
+    except Exception:
+        if pending_prompt_echoes:
+            runtime.action_manager.requeue_prompt_echoes(pending_prompt_echoes)
+        raise
     finally:
         logger.info(
             "cycle C%s total execution finished in %.1f ms (status=%s)",
