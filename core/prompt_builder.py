@@ -485,15 +485,26 @@ def _action_echo_text(stimulus: Stimulus, conversation_labels: dict[str, str]) -
     result = stimulus.metadata.get("result")
     if not isinstance(result, dict):
         return _compact_prompt_text(stimulus.content)
+    succeeded = bool(result.get("ok", True))
+    summary = _compact_prompt_text(str(result.get("summary") or stimulus.content))
     data = result.get("data")
     if not isinstance(data, dict):
         return _compact_prompt_text(stimulus.content)
-    target = _known_target_label(str(data.get("source") or "").strip(), conversation_labels)
+    target = _known_target_label(
+        str(data.get("source") or data.get("target_entity") or "").strip(),
+        conversation_labels,
+    )
     message = _running_message_excerpt(str(data.get("message") or ""))
-    if target and message:
+    if succeeded and target and message:
         return f'已成功发送给 {target}：“{message}”'
-    if target:
+    if succeeded and target:
         return f"已成功发送给 {target}"
+    if target and message:
+        return f'发送给 {target} 失败：“{message}” （{summary}）'
+    if message:
+        return f'发送失败：“{message}” （{summary}）'
+    if target:
+        return f"发送给 {target} 失败（{summary}）"
     return _compact_prompt_text(stimulus.content)
 
 

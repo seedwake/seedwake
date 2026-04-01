@@ -498,19 +498,29 @@ class ActionManager:
             contact_resolver=self._contact_resolver,
         )
         if failure is not None:
-            return failure
+            return _send_message_failure_result(
+                target_source=target_source,
+                target_entity=target_entity,
+                message_text=message_text,
+                summary=str(failure.get("summary") or "发送消息失败"),
+                error_detail=failure.get("error"),
+            )
         reply_to = str(action.request.get("reply_to_message_id") or "").strip()
         if self._is_duplicate_message(target_source, message_text, reply_to):
-            return _failure_result(
-                "和刚才发的一样，跳过重复发送",
-                "duplicate_message",
-                transport="native",
+            return _send_message_failure_result(
+                target_source=target_source,
+                target_entity=target_entity,
+                message_text=message_text,
+                summary="和刚才发的一样，跳过重复发送",
+                error_detail="duplicate_message",
             )
         if not self._mark_dispatch_started(action_id):
-            return _failure_result(
-                "消息发送前无法持久化状态",
-                "delivery_state_unavailable",
-                transport="native",
+            return _send_message_failure_result(
+                target_source=target_source,
+                target_entity=target_entity,
+                message_text=message_text,
+                summary="消息发送前无法持久化状态",
+                error_detail="delivery_state_unavailable",
             )
         send_error = _send_telegram_message(
             target_source,
@@ -520,16 +530,22 @@ class ActionManager:
         )
         if send_error:
             self._update_action(action_id, dispatch_started_at=None)
-            return _failure_result(f"Telegram 发送失败：{send_error}", send_error, transport="native")
+            return _send_message_failure_result(
+                target_source=target_source,
+                target_entity=target_entity,
+                message_text=message_text,
+                summary=f"Telegram 发送失败：{send_error}",
+                error_detail=send_error,
+            )
         self._record_sent_message(target_source, message_text, reply_to)
         return _build_action_result(
             ok=True,
             summary=_send_message_success_summary(target_source, message_text),
-            data={
-                "source": target_source,
-                "target_entity": target_entity,
-                "message": message_text,
-            },
+            data=_send_message_result_data(
+                target_source=target_source,
+                target_entity=target_entity,
+                message_text=message_text,
+            ),
             error_detail=None,
             run_id=None,
             session_key=None,
@@ -2637,10 +2653,10 @@ def _stimulus_content(
     result: ActionResultEnvelope,
 ) -> str:
     summary = str(result.get("summary") or "行动完成")
+    if action.type == "send_message":
+        return _send_message_stimulus_content(summary, result.get("data"), _action_result_succeeded(status, result))
     if _action_result_succeeded(status, result) and action.type == "search":
         return _search_stimulus_content(summary, result.get("data"))
-    if _action_result_succeeded(status, result) and action.type == "send_message":
-        return summary
     if _action_result_succeeded(status, result) and action.type == "note_rewrite":
         return summary
     if _action_result_succeeded(status, result) and action.type in {"reading", "web_fetch"}:
@@ -2709,6 +2725,62 @@ def _send_message_success_summary(target_source: str, message_text: str) -> str:
     if excerpt:
         return f'已成功发送给 {target_source}：“{excerpt}”'
     return f"已成功发送给 {target_source}"
+
+
+def _send_message_result_data(
+    *,
+    target_source: str,
+    target_entity: str,
+    message_text: str,
+) -> JsonObject:
+    data: JsonObject = {}
+    if target_source:
+        data["source"] = target_source
+    if target_entity:
+        data["target_entity"] = target_entity
+    if message_text:
+        data["message"] = message_text
+    return data
+
+
+def _send_message_failure_result(
+    *,
+    target_source: str,
+    target_entity: str,
+    message_text: str,
+    summary: str,
+    error_detail: JsonValue,
+) -> ActionResultEnvelope:
+    return _build_action_result(
+        ok=False,
+        summary=summary,
+        data=_send_message_result_data(
+            target_source=target_source,
+            target_entity=target_entity,
+            message_text=message_text,
+        ),
+        error_detail=error_detail,
+        run_id=None,
+        session_key=None,
+        transport="native",
+    )
+
+
+def _send_message_stimulus_content(summary: str, data: JsonValue, succeeded: bool) -> str:
+    if not isinstance(data, dict):
+        return summary
+    target = str(data.get("source") or data.get("target_entity") or "").strip()
+    message = str(data.get("message") or "").strip()
+    excerpt, _ = _clip_prompt_text(message, SEND_MESSAGE_SUMMARY_MAX_CHARS)
+    if succeeded:
+        return summary
+    if target and excerpt:
+        return f'发送给 {target} 失败：“{excerpt}” （{summary}）'
+    if excerpt:
+        return f'发送失败：“{excerpt}” （{summary}）'
+    if target:
+        return f"发送给 {target} 失败（{summary}）"
+    return summary
 
 
 def _reading_stimulus_content(summary: str, data: JsonValue) -> str:

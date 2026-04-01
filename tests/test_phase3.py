@@ -1682,6 +1682,46 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         self.assertIn('[发信结果] 已成功发送给 [Alice](telegram:1)：“我在。”', prompt)
 
+    def test_send_message_failed_action_echo_includes_message_and_reason(self) -> None:
+        recent_conversations: list[RecentConversationPrompt] = [{
+            "source": "telegram:1",
+            "source_name": "Alice",
+            "source_label": "[Alice](telegram:1)",
+            "summary": "",
+            "last_timestamp": "2026-03-30T01:43:00+00:00",
+            "messages": [],
+        }]
+        prompt = build_prompt(
+            3,
+            {"self_description": "我是 Seedwake。"},
+            [],
+            30,
+            stimuli=[
+                Stimulus(
+                    stimulus_id="stim_send_failed",
+                    type="action_result",
+                    priority=2,
+                    source="action:act_send_failed",
+                    content="发送给 telegram:1 失败：“我在。” （Telegram 发送失败：http_400）",
+                    metadata={
+                        "origin": "action",
+                        "action_type": "send_message",
+                        "result": {
+                            "ok": False,
+                            "summary": "Telegram 发送失败：http_400",
+                            "data": {"source": "telegram:1", "message": "我在。"},
+                        },
+                    },
+                ),
+            ],
+            recent_conversations=recent_conversations,
+        )
+
+        self.assertIn(
+            '[发信结果] 发送给 [Alice](telegram:1) 失败：“我在。” （Telegram 发送失败：http_400）',
+            prompt,
+        )
+
 
 class TriggerValidationTests(unittest.TestCase):
     def test_sanitize_cycle_trigger_refs_strips_forward_reference(self) -> None:
@@ -2917,6 +2957,7 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(created[0].status, "failed")
         stimulus = queue.pop_many(limit=1)[0]
         self.assertEqual(stimulus.type, "action_result")
+        self.assertIn("你好", stimulus.content)
         self.assertIn("Telegram 发送失败", stimulus.content)
         self.assertIn("Forbidden: bot was blocked by the user", stimulus.content)
 
