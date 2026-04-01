@@ -43,8 +43,11 @@ SYSTEM_PROMPT = """\
 - {action:send_message, message:"针对那条消息的回复", reply_to:"294"}
 - {action:send_message, target:"telegram:123456", message:"发给特定的人"}
 - {action:send_message, target_entity:"person:alice", message:"发给已知实体"}
+- {action:note_rewrite, content:"任意内容"}
 - {action:file_modify, path:"文件路径", instruction:"修改要求"}
 - {action:system_change, instruction:"我想进行的系统变更"}
+
+我有一块笔记，可以用 {action:note_rewrite} 随时覆写，内容不限语言和形式，800 字以内。
 
 ## 示例
 
@@ -92,6 +95,7 @@ ACTION_ECHO_LABELS = {
     "search": "[搜索结果]",
     "web_fetch": "[网页内容]",
     "send_message": "[发信结果]",
+    "note_rewrite": "[笔记]",
     "file_modify": "[文件修改]",
     "system_change": "[系统变更]",
 }
@@ -107,6 +111,7 @@ def build_prompt(
     recent_thoughts: list[Thought],
     context_window: int,
     long_term_context: list[str] | None = None,
+    note_text: str = "",
     stimuli: list[Stimulus] | None = None,
     recent_action_echoes: list[Stimulus] | None = None,
     running_actions: list[ActionRecord] | None = None,
@@ -126,6 +131,8 @@ def build_prompt(
     if long_term_context:
         ltm = long_term_context
         _append_prompt_section(parts, "long_term", lambda: _format_long_term(ltm))
+    if note_text.strip():
+        _append_prompt_section(parts, "note", lambda: _format_note(note_text))
     if perception_cues:
         cues = perception_cues
         _append_prompt_section(parts, "perception_cues", lambda: _format_perception_cues(cues))
@@ -202,6 +209,10 @@ def _format_long_term(memories: list[str]) -> str:
     for mem in memories:
         lines.append(f"- {_compact_prompt_text(mem)}")
     return _render_section("浮上来的记忆", lines)
+
+
+def _format_note(note_text: str) -> str:
+    return _render_section("我的笔记", [str(note_text).strip()], keep_blank_lines=True)
 
 
 def _split_stimuli(stimuli: list[Stimulus]) -> tuple[list[Stimulus], list[Stimulus], list[Stimulus]]:

@@ -37,6 +37,8 @@ from core.types import (
 ACTION_REDIS_KEY = "seedwake:actions"
 ACTION_CONTROL_KEY = "seedwake:action_control"
 NEWS_SEEN_REDIS_KEY = "seedwake:news_seen"
+NOTE_REDIS_KEY = "seedwake:note"
+NOTE_MAX_CHARS = 800
 TELEGRAM_SEND_FINISHED_LOG = "telegram send finished in %.1f ms (target=%s, status=%s)"
 TELEGRAM_SOURCE_PREFIX = "telegram:"
 OPENCLAW_ACTION_TYPES = {"search", "web_fetch", "system_change", "custom", "weather", "reading", "file_modify"}
@@ -52,6 +54,7 @@ THOUGHT_ACTION_TYPES = {
     "search",
     "web_fetch",
     "send_message",
+    "note_rewrite",
     "file_modify",
     "system_change",
 }
@@ -184,6 +187,8 @@ class ActionRedisLike(Protocol):
     def hset(self, key: str, hash_field: str, value: str) -> int: ...
     def hvals(self, key: str) -> list[str]: ...
     def hgetall(self, key: str) -> dict[str, str]: ...
+    def get(self, key: str) -> str | bytes | None: ...
+    def set(self, key: str, value: str) -> bool | str | None: ...
     def rpush(self, key: str, payload: str) -> int: ...
     def ltrim(self, key: str, start: int, end: int) -> bool: ...
     def lrange(self, key: str, start: int, end: int) -> list[str]: ...
@@ -234,6 +239,8 @@ class ActionManager:
         self._lock = Lock()
         self._actions: dict[str, ActionRecord] = {}
         self._news_seen_shadow: dict[str, float] = {}
+        self._note_shadow = ""
+        self._note_shadow_dirty = False
         self._perception_observations: list[str] = []
         self._futures: set[Future] = set()
         self._recent_sent_messages: list[tuple[str, str, str]] = []  # (target, message, reply_to) dedup window
@@ -339,6 +346,22 @@ class ActionManager:
             observations = list(self._perception_observations)
             self._perception_observations.clear()
         return observations
+
+    def current_note(self) -> str:
+        redis_client = self._redis
+        if redis_client is not None:
+            try:
+                raw_value = redis_client.get(NOTE_REDIS_KEY)
+            except ACTION_REDIS_EXCEPTIONS:
+                self._redis = None
+            else:
+                note = _normalize_note_content(raw_value)
+                with self._lock:
+                    self._note_shadow = note
+                    self._note_shadow_dirty = False
+                return note
+        with self._lock:
+            return self._note_shadow
 
     def attach_redis(self, redis_client: ActionRedisLike | None) -> bool:
         self._redis = redis_client
@@ -517,6 +540,7 @@ class ActionManager:
         self._upsert_action(action)
 
         summary = str(result.get("summary") or "行动完成")
+        self._maybe_update_note_shadow(action, status, result)
         self._emit(f"行动结束 {action.action_id} [{status}] {summary}")
         self._publish_action_event(action, status, summary)
         self._publish_native_message(action, status, result)
@@ -930,6 +954,7 @@ class ActionManager:
         with self._lock:
             actions = list(self._actions.values())
             seen_items = dict(self._news_seen_shadow)
+            note_text = self._note_shadow
             redis_client = self._redis
         if redis_client is None:
             return
@@ -937,6 +962,9 @@ class ActionManager:
             payload = json.dumps(_action_to_dict(action), ensure_ascii=False)
             redis_client.hset(ACTION_REDIS_KEY, action.action_id, payload)
         self._sync_news_seen_to_redis(seen_items)
+        redis_client.set(NOTE_REDIS_KEY, note_text)
+        with self._lock:
+            self._note_shadow_dirty = False
 
     def _restore_from_redis(self) -> None:
         now = datetime.now(timezone.utc)
@@ -950,6 +978,16 @@ class ActionManager:
                 self._actions[action.action_id] = action
             if str(item.get("status") or "") != action.status:
                 self._persist_action(action)
+        redis_client = self._redis
+        if redis_client is None:
+            return
+        with self._lock:
+            note_shadow_dirty = self._note_shadow_dirty
+        if note_shadow_dirty:
+            return
+        with self._lock:
+            self._note_shadow = _normalize_note_content(redis_client.get(NOTE_REDIS_KEY))
+            self._note_shadow_dirty = False
 
     def _sync_news_seen_to_redis(self, seen_items: dict[str, float]) -> None:
         if not seen_items:
@@ -967,6 +1005,29 @@ class ActionManager:
             return
         _redis_zadd(redis_client, NEWS_SEEN_REDIS_KEY, valid_items)
         self._prune_news_seen_redis(redis_client, now_ts)
+
+    def _maybe_update_note_shadow(
+        self,
+        action: ActionRecord,
+        status: str,
+        result: ActionResultEnvelope,
+    ) -> None:
+        if action.type != "note_rewrite" or status != "succeeded" or not bool(result.get("ok", True)):
+            return
+        data = result.get("data")
+        note_text = _normalize_note_content(data.get("content") if isinstance(data, dict) else None)
+        with self._lock:
+            self._note_shadow = note_text
+            self._note_shadow_dirty = True
+        redis_client = self._redis
+        if redis_client is None:
+            return
+        try:
+            redis_client.set(NOTE_REDIS_KEY, note_text)
+            with self._lock:
+                self._note_shadow_dirty = False
+        except ACTION_REDIS_EXCEPTIONS:
+            self._redis = None
 
 
 class ActionPlanner:
@@ -1169,7 +1230,7 @@ def _planner_system_prompt() -> str:
     return (
         "我是 Seedwake 的前额叶行动规划器。"
         "不要执行动作，只能返回结构化决定。"
-        "纯本地、无副作用、一次函数调用即可完成的时间读取、系统状态读取、固定 RSS 新闻读取，以及 Telegram 消息发送可选 native。"
+        "纯本地、无副作用、一次函数调用即可完成的时间读取、系统状态读取、固定 RSS 新闻读取、笔记覆写，以及 Telegram 消息发送可选 native。"
         "天气、阅读、网页搜索、网页抓取、浏览器和多步探索委托普通 OpenClaw worker。"
         "系统变更和文件修改委托 OpenClaw ops worker。"
         "news 只读取配置里的固定 RSS feed 列表，不需要 topic，也不委托 OpenClaw。"
@@ -1454,6 +1515,30 @@ def _planner_tools() -> list[JsonObject]:
         {
             "type": "function",
             "function": {
+                "name": "native_note_rewrite",
+                "description": "Rewrite the private note scratchpad in full.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "要完整覆写到笔记里的内容，800 字以内。",
+                        },
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "description": PLANNER_TIMEOUT_FIELD_DESCRIPTION,
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "为什么要改写笔记；不写则默认使用当前念头内容。",
+                        },
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "ignore_action",
                 "description": "Do not execute any action for this thought.",
                 "parameters": {
@@ -1569,6 +1654,13 @@ def _fallback_plan(
             reason="fallback",
             conversation_source=conversation_source,
         )
+    if action_type == "note_rewrite":
+        return _native_note_rewrite_plan(
+            raw_params=str((thought.action_request or {}).get("params") or ""),
+            thought=thought,
+            timeout_seconds=default_timeout_seconds,
+            reason="fallback",
+        )
     if action_type in OPENCLAW_ACTION_TYPES:
         return ActionPlan(
             action_type=action_type,
@@ -1623,6 +1715,20 @@ def _run_native_action(
                 "source": target_source,
                 "target_entity": target_entity,
                 "message": message_text,
+            },
+            error_detail=None,
+            run_id=None,
+            session_key=None,
+            transport="native",
+        )
+    if action.type == "note_rewrite":
+        note_text = _normalize_note_content(action.request.get("message_text"))
+        return _build_action_result(
+            ok=True,
+            summary="我的笔记已覆写",
+            data={
+                "content": note_text,
+                "length": len(note_text),
             },
             error_detail=None,
             run_id=None,
@@ -2124,6 +2230,14 @@ def _plan_native_tool_call(
             reason=reason,
             news_feed_urls=news_feed_urls,
         )
+    if tool_name == "native_note_rewrite":
+        return _native_note_rewrite_plan(
+            raw_params=_raw_action_params(thought),
+            thought=thought,
+            timeout_seconds=timeout_seconds,
+            reason=reason,
+            explicit_content=str(arguments.get("content") or "").strip(),
+        )
     if tool_name != "native_send_message":
         return None
     return _native_send_message_plan(
@@ -2206,6 +2320,26 @@ def _native_system_status_plan(*, timeout_seconds: int, reason: str) -> ActionPl
     )
 
 
+def _native_note_rewrite_plan(
+    *,
+    raw_params: str,
+    thought: Thought,
+    timeout_seconds: int,
+    reason: str,
+    explicit_content: str = "",
+) -> ActionPlan:
+    content = explicit_content or _build_note_rewrite_content(raw_params, thought)
+    task = f"覆写我的笔记：{_note_excerpt(content)}"
+    return ActionPlan(
+        action_type="note_rewrite",
+        executor="native",
+        task=task,
+        timeout_seconds=timeout_seconds,
+        reason=reason,
+        message_text=content,
+    )
+
+
 def _delegated_action_type(arguments: dict, thought: Thought) -> str:
     return str(
         arguments.get("action_type")
@@ -2240,6 +2374,13 @@ def _build_send_message_target_entity(raw_params: str) -> str:
 
 def _build_send_message_text(raw_params: str, thought: Thought) -> str:
     explicit = _extract_action_first_param(raw_params, "message", "text", "body", "content")
+    if explicit:
+        return explicit
+    return _strip_action_marker(thought.content)
+
+
+def _build_note_rewrite_content(raw_params: str, thought: Thought) -> str:
+    explicit = _extract_action_first_param(raw_params, "content", "text", "body")
     if explicit:
         return explicit
     return _strip_action_marker(thought.content)
@@ -2449,6 +2590,8 @@ def _stimulus_content(
         return _search_stimulus_content(summary, result.get("data"))
     if _action_result_succeeded(status, result) and action.type == "send_message":
         return summary
+    if _action_result_succeeded(status, result) and action.type == "note_rewrite":
+        return summary
     if _action_result_succeeded(status, result) and action.type in {"reading", "web_fetch"}:
         return _reading_stimulus_content(summary, result.get("data"))
     if _action_result_succeeded(status, result) and action.type == "news":
@@ -2624,6 +2767,23 @@ def _clip_prompt_text(text: str, limit: int) -> tuple[str, bool]:
         return text, False
     clipped = text[:limit].rstrip()
     return f"{clipped}...", True
+
+
+def _compact_prompt_text(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _normalize_note_content(value: JsonValue | bytes | None) -> str:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    text = str(value or "").strip()
+    clipped, _ = _clip_prompt_text(text, NOTE_MAX_CHARS)
+    return clipped
+
+
+def _note_excerpt(content: str) -> str:
+    excerpt, _ = _clip_prompt_text(_compact_prompt_text(content), 80)
+    return excerpt or "（空）"
 
 
 def push_action_control(

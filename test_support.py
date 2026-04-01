@@ -17,6 +17,7 @@ class ListRedisStub(ActionRedisLike, ConversationRedisLike):
         self.lists = {}
         self.hashes = {}
         self.sorted_sets = {}
+        self.values = {}
 
     def rpush(self, key, payload):
         self.lists.setdefault(key, []).append(payload)
@@ -59,6 +60,13 @@ class ListRedisStub(ActionRedisLike, ConversationRedisLike):
 
     def hgetall(self, key):
         return dict(self.hashes.get(key, {}))
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def set(self, key, value):
+        self.values[key] = value
+        return True
 
     @staticmethod
     def publish(_channel, _payload):

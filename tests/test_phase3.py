@@ -12,6 +12,7 @@ import redis as redis_lib
 # noinspection PyProtectedMember
 from core.action import (
     ACTION_REDIS_KEY,
+    NOTE_REDIS_KEY,
     ActionPlanner,
     ActionCallbacks,
     ActionManager,
@@ -524,6 +525,7 @@ class _RedisNewsSeenStub(ActionRedisLike):
         self.lists = {}
         self.hashes = {}
         self.sorted_sets = {}
+        self.values = {}
 
     def hset(self, key, hash_field, value):
         self.hashes.setdefault(key, {})[hash_field] = value
@@ -533,6 +535,13 @@ class _RedisNewsSeenStub(ActionRedisLike):
 
     def hgetall(self, key):
         return dict(self.hashes.get(key, {}))
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def set(self, key, value):
+        self.values[key] = value
+        return True
 
     def rpush(self, key, payload):
         self.lists.setdefault(key, []).append(payload)
@@ -972,6 +981,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             recent,
             30,
             long_term_context=["之前某次读到过关于雨后气味的解释。"],
+            note_text="记下：不要把刚刚的直觉弄丢。",
             stimuli=[stimulus, passive, action_echo],
             running_actions=[action, completed],
             perception_cues=["了解外界动态——最近发生了什么？"],
@@ -983,6 +993,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         self.assertIn("## 最近的念头", prompt)
         self.assertIn("## 浮上来的记忆", prompt)
+        self.assertIn("## 我的笔记", prompt)
         self.assertIn("## 好像有一阵子没有……", prompt)
         self.assertIn("## 我已经发起、正在等回音的事", prompt)
         self.assertIn("## 此刻我注意到", prompt)
@@ -991,7 +1002,8 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("## 有人对我说话了", prompt)
         self.assertIn("## 接下来的念头", prompt)
         self.assertLess(prompt.index("## 最近的念头"), prompt.index("## 浮上来的记忆"))
-        self.assertLess(prompt.index("## 浮上来的记忆"), prompt.index("## 好像有一阵子没有……"))
+        self.assertLess(prompt.index("## 浮上来的记忆"), prompt.index("## 我的笔记"))
+        self.assertLess(prompt.index("## 我的笔记"), prompt.index("## 好像有一阵子没有……"))
         self.assertLess(prompt.index("## 好像有一阵子没有……"), prompt.index("## 行动有了回音"))
         self.assertLess(prompt.index("## 行动有了回音"), prompt.index("## 我已经发起、正在等回音的事"))
         self.assertLess(prompt.index("## 我已经发起、正在等回音的事"), prompt.index("## 此刻我注意到"))
@@ -1012,8 +1024,10 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("外界动态", prompt)
         self.assertIn("探索和学习。", prompt)
         self.assertIn("我会在经验里慢慢形成自己。", prompt)
+        self.assertIn("记下：不要把刚刚的直觉弄丢。", prompt)
         self.assertIn("{action:web_fetch", prompt)
         self.assertIn("{action:system_change", prompt)
+        self.assertIn("{action:note_rewrite", prompt)
         self.assertIn("不要发明未列出的 action 名称", prompt)
         self.assertIn("历史里出现的 [思考-CX-Y]、[意图-CX-Y]、[反应-CX-Y] 是系统记录用编号", prompt)
         self.assertIn("- [思考] — 思维、分析、联想、好奇", prompt)
@@ -1023,6 +1037,17 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("这种回应必须外化成 {action:send_message, ...}", prompt)
         self.assertIn("对话是前景，时间感和身体感觉只是背景", prompt)
         self.assertNotIn("你想发出的内容", prompt)
+
+    def test_prompt_hides_note_section_when_empty(self) -> None:
+        prompt = build_prompt(
+            3,
+            {"self_description": "我是 Seedwake。"},
+            [],
+            30,
+            note_text="",
+        )
+
+        self.assertNotIn("## 我的笔记", prompt)
 
     def test_action_echo_section_lists_recent_before_current(self) -> None:
         recent_echo = Stimulus(
@@ -1848,6 +1873,73 @@ class PerceptionManagerTests(unittest.TestCase):
 
 
 class ActionManagerTests(unittest.TestCase):
+    def test_note_rewrite_native_action_overwrites_note_and_persists_to_redis(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        redis_stub = ListRedisStub()
+        first_content = "第一版笔记" * 200
+        second_content = "改成第二版"
+        manager = _build_action_manager(
+            queue,
+            _Planner(ActionPlan("note_rewrite", "native", "覆写我的笔记", 30, "测试", message_text=first_content)),
+            redis_client=redis_stub,
+        )
+
+        try:
+            created_first = manager.submit_from_thoughts([
+                _make_thought(
+                    action_request={"type": "note_rewrite", "params": f'content:"{first_content}"'}
+                )
+            ])
+            manager._planner = _Planner(
+                ActionPlan("note_rewrite", "native", "覆写我的笔记", 30, "测试", message_text=second_content)
+            )
+            created_second = manager.submit_from_thoughts([
+                _make_thought(
+                    cycle_id=2,
+                    action_request={"type": "note_rewrite", "params": f'content:"{second_content}"'}
+                )
+            ])
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        expected_first = first_content[:800].rstrip() + "..."
+        self.assertEqual(created_first[0].status, "succeeded")
+        assert created_first[0].result is not None
+        self.assertEqual(created_first[0].result["data"]["content"], expected_first)
+        self.assertEqual(created_second[0].status, "succeeded")
+        self.assertEqual(manager.current_note(), second_content)
+        self.assertEqual(redis_stub.get(NOTE_REDIS_KEY), second_content)
+        stimuli = queue.pop_many(limit=5)
+        self.assertEqual(len(stimuli), 2)
+        self.assertTrue(all(stimulus.metadata["action_type"] == "note_rewrite" for stimulus in stimuli))
+        self.assertEqual([stimulus.content for stimulus in stimuli], ["我的笔记已覆写", "我的笔记已覆写"])
+
+    def test_attach_redis_keeps_local_note_written_while_disconnected(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        manager = _build_action_manager(
+            queue,
+            _Planner(ActionPlan("note_rewrite", "native", "覆写我的笔记", 30, "测试", message_text="断线期间的新笔记")),
+            redis_client=None,
+        )
+        redis_stub = ListRedisStub()
+        redis_stub.set(NOTE_REDIS_KEY, "旧笔记")
+
+        try:
+            created = manager.submit_from_thoughts([
+                _make_thought(
+                    action_request={"type": "note_rewrite", "params": 'content:"断线期间的新笔记"'}
+                )
+            ])
+            self.assertTrue(manager.attach_redis(redis_stub))
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(created[0].status, "succeeded")
+        self.assertEqual(manager.current_note(), "断线期间的新笔记")
+        self.assertEqual(redis_stub.get(NOTE_REDIS_KEY), "断线期间的新笔记")
+
     def test_news_stimulus_skips_already_seen_rss_items(self) -> None:
         queue = StimulusQueue(redis_client=None)
         seen_feed_urls = []
@@ -3316,8 +3408,30 @@ class PlannerProviderTests(unittest.TestCase):
         self.assertIn("target（可选", system_prompt)
         self.assertIn("target_entity（可选", system_prompt)
         self.assertIn("reply_to（可选", system_prompt)
+        self.assertIn("native_note_rewrite", system_prompt)
+        self.assertIn("content（可选", system_prompt)
         self.assertIn("ignore_action", system_prompt)
         self.assertIn("为什么本轮不执行该动作", system_prompt)
+
+    def test_note_rewrite_fallback_builds_native_overwrite_plan(self) -> None:
+        thought = _make_thought(
+            thought_type="意图",
+            content='我想记下来 {action:note_rewrite, content:"把这句记下"}',
+            action_request={"type": "note_rewrite", "params": 'content:"把这句记下"'},
+        )
+
+        plan = _fallback_plan(
+            raw_action_type="note_rewrite",
+            thought=thought,
+            default_timeout_seconds=30,
+            default_weather_location="",
+            news_feed_urls=[],
+        )
+
+        plan = _as_action_plan(plan)
+        self.assertEqual(plan.executor, "native")
+        self.assertEqual(plan.action_type, "note_rewrite")
+        self.assertEqual(plan.message_text, "把这句记下")
 
     def test_json_planner_client_can_build_native_plan(self) -> None:
         planner = ActionPlanner(

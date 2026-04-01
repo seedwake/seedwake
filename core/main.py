@@ -27,7 +27,7 @@ from core.action import (
     create_action_manager,
     pop_action_controls,
 )
-from core.cycle import run_cycle, write_prompt_log_block
+from core.cycle import CyclePromptContext, run_cycle, write_prompt_log_block
 from core.embedding import embed_text
 from core.logging import resolve_log_path, setup_logging
 from core.memory.identity import load_identity
@@ -760,6 +760,7 @@ def _execute_cycle(
             current_cycle_id=cycle_id,
             exclude_action_ids=_action_echo_action_ids(stimuli),
         )
+        note_text = runtime.action_manager.current_note()
         thought_cycle_started_at = time.perf_counter()
         thoughts = run_cycle(
             runtime.primary_client,
@@ -768,12 +769,15 @@ def _execute_cycle(
             recent_thoughts,
             runtime.context_window,
             runtime.model_config,
-            long_term_context=ltm_context,
-            stimuli=stimuli,
-            recent_action_echoes=recent_action_echoes,
-            running_actions=running_actions,
-            perception_cues=perception_cues,
-            recent_conversations=recent_conversations,
+            prompt_context=CyclePromptContext(
+                long_term_context=ltm_context,
+                note_text=note_text,
+                stimuli=stimuli,
+                recent_action_echoes=recent_action_echoes,
+                running_actions=running_actions,
+                perception_cues=perception_cues,
+                recent_conversations=recent_conversations,
+            ),
             prompt_log_file=prompt_log_file,
         )
         logger.info(
