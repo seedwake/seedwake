@@ -44,14 +44,17 @@ from core.prompt_builder import build_prompt
 from core.rss import read_news_result, summarize_news_items
 from core.stimulus import (
     CONVERSATION_HISTORY_KEY,
+    RECENT_ACTION_ECHO_KEY,
     CONVERSATION_SUMMARY_KEY,
     ConversationRedisLike,
     RECENT_CONVERSATION_SUMMARY_MAX_CHARS,
     Stimulus,
     StimulusQueue,
     append_conversation_history,
+    load_recent_action_echoes,
     load_conversation_history,
     load_recent_conversations,
+    remember_recent_action_echoes,
 )
 from core.types import ConversationEntry, JsonObject, JsonValue, RawActionRequest, RecentConversationPrompt
 from core.thought_parser import Thought
@@ -1021,6 +1024,42 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("对话是前景，时间感和身体感觉只是背景", prompt)
         self.assertNotIn("你想发出的内容", prompt)
 
+    def test_action_echo_section_lists_recent_before_current(self) -> None:
+        recent_echo = Stimulus(
+            stimulus_id="stim_recent_search",
+            type="action_result",
+            priority=2,
+            source="action:act_old",
+            content="搜索完成\n1. 旧结果",
+            action_id="act_old",
+            metadata={"origin": "action", "action_type": "search", "status": "succeeded"},
+        )
+        current_echo = Stimulus(
+            stimulus_id="stim_current_news",
+            type="news",
+            priority=4,
+            source="action:act_new",
+            content="已查看 RSS，没有新的新闻条目",
+            action_id="act_new",
+            metadata={"origin": "action", "action_type": "news", "status": "succeeded"},
+        )
+
+        prompt = build_prompt(
+            3,
+            {"self_description": "我是 Seedwake。"},
+            [],
+            30,
+            stimuli=[current_echo],
+            recent_action_echoes=[recent_echo],
+        )
+
+        self.assertIn("## 行动有了回音", prompt)
+        self.assertIn("最近的行动回音：", prompt)
+        self.assertIn("刚刚收到的行动回音：", prompt)
+        self.assertLess(prompt.index("最近的行动回音："), prompt.index("刚刚收到的行动回音："))
+        self.assertIn("[搜索结果] 搜索完成 1. 旧结果", prompt)
+        self.assertIn("[外界消息] 已查看 RSS，没有新的新闻条目", prompt)
+
     def test_load_recent_conversations_builds_summary_and_keeps_recent_raw_lines(self) -> None:
         redis_client = ListRedisStub()
         for index in range(12):
@@ -1260,6 +1299,50 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             builder_calls,
             [("Alice", "Alice 摘要：第1句；第2句", ["第3句", "第4句"])],
         )
+
+    def test_recent_action_echo_cache_keeps_info_results_for_following_cycles(self) -> None:
+        redis_client = ListRedisStub()
+        current_echo = Stimulus(
+            stimulus_id="stim_search",
+            type="action_result",
+            priority=2,
+            source="action:act_search",
+            content="搜索完成\n1. 标题",
+            action_id="act_search",
+            metadata={"origin": "action", "action_type": "search", "status": "succeeded"},
+        )
+        remember_recent_action_echoes(_as_conversation_redis(redis_client), 10, [current_echo])
+
+        recent = load_recent_action_echoes(
+            _as_conversation_redis(redis_client),
+            current_cycle_id=11,
+            exclude_action_ids=set(),
+        )
+
+        self.assertEqual([stimulus.action_id for stimulus in recent], ["act_search"])
+        stored = redis_client.lrange(RECENT_ACTION_ECHO_KEY, 0, -1)
+        self.assertEqual(len(stored), 1)
+
+    def test_recent_action_echo_cache_excludes_current_action_ids(self) -> None:
+        redis_client = ListRedisStub()
+        current_echo = Stimulus(
+            stimulus_id="stim_search",
+            type="action_result",
+            priority=2,
+            source="action:act_search",
+            content="搜索完成\n1. 标题",
+            action_id="act_search",
+            metadata={"origin": "action", "action_type": "search", "status": "succeeded"},
+        )
+        remember_recent_action_echoes(_as_conversation_redis(redis_client), 10, [current_echo])
+
+        recent = load_recent_action_echoes(
+            _as_conversation_redis(redis_client),
+            current_cycle_id=11,
+            exclude_action_ids={"act_search"},
+        )
+
+        self.assertEqual(recent, [])
 
     def test_load_recent_conversations_skips_empty_recent_block_for_current_only_source(self) -> None:
         redis_client = ListRedisStub()

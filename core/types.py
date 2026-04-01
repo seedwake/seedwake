@@ -107,6 +107,11 @@ class RecentConversationPrompt(TypedDict):
     messages: list[RecentConversationMessage]
 
 
+class RecentActionEchoRecord(TypedDict):
+    cycle_id: int
+    stimulus: StimulusRecord
+
+
 class PerceptionStimulusPayload(TypedDict):
     type: str
     priority: int

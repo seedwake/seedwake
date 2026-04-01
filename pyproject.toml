@@ -5,7 +5,7 @@ description = "Add your description here"
 requires-python = ">=3.14"
 dependencies = [
     "cryptography>=45.0.0",
-    "fastapi>=0.122.0",
+    "fastapi>=0.135.2",
     "ollama>=0.6.1",
     "pydantic>=2.12.5",
     "psycopg[binary]>=3.3.3",

@@ -41,7 +41,9 @@ from core.stimulus import (
     RECENT_CONVERSATION_SUMMARY_MAX_CHARS,
     Stimulus,
     StimulusQueue,
+    load_recent_action_echoes,
     load_recent_conversations,
+    remember_recent_action_echoes,
 )
 from core.thought_parser import Thought
 from core.types import (
@@ -452,6 +454,11 @@ def _prepare_cycle(
         elapsed_ms(selection_started_at),
         len(stimuli),
     )
+    remember_recent_action_echoes(
+        _as_conversation_redis(runtime.stm.redis_client),
+        cycle_id,
+        stimuli,
+    )
     perception_started_at = time.perf_counter()
     runtime.perception.observe_stimuli(cycle_id, stimuli)
     runtime.perception.observe_types(cycle_id, runtime.action_manager.pop_perception_observations())
@@ -748,6 +755,11 @@ def _execute_cycle(
             elapsed_ms(conversations_started_at),
             len(recent_conversations),
         )
+        recent_action_echoes = load_recent_action_echoes(
+            _as_conversation_redis(runtime.stm.redis_client),
+            current_cycle_id=cycle_id,
+            exclude_action_ids=_action_echo_action_ids(stimuli),
+        )
         thought_cycle_started_at = time.perf_counter()
         thoughts = run_cycle(
             runtime.primary_client,
@@ -758,6 +770,7 @@ def _execute_cycle(
             runtime.model_config,
             long_term_context=ltm_context,
             stimuli=stimuli,
+            recent_action_echoes=recent_action_echoes,
             running_actions=running_actions,
             perception_cues=perception_cues,
             recent_conversations=recent_conversations,
@@ -1077,6 +1090,23 @@ def _conversation_stimulus_ids(stimuli: list[Stimulus]) -> set[str]:
         if isinstance(merged_ids, list):
             stimulus_ids.update(str(item).strip() for item in merged_ids if str(item).strip())
     return stimulus_ids
+
+
+def _action_echo_action_ids(stimuli: list[Stimulus]) -> set[str]:
+    action_ids: set[str] = set()
+    for stimulus in stimuli:
+        if str(stimulus.metadata.get("origin") or "").strip() != "action":
+            continue
+        action_id = str(stimulus.action_id or "").strip()
+        if action_id:
+            action_ids.add(action_id)
+            continue
+        source = str(stimulus.source or "").strip()
+        if source.startswith("action:"):
+            source_action_id = source.removeprefix("action:").strip()
+            if source_action_id:
+                action_ids.add(source_action_id)
+    return action_ids
 
 
 def _recent_conversation_summary_request(

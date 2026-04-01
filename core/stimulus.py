@@ -16,6 +16,7 @@ from core.types import (
     ConversationEntry,
     JsonObject,
     JsonValue,
+    RecentActionEchoRecord,
     RecentConversationMessage,
     RecentConversationPrompt,
     StimulusRecord,
@@ -26,10 +27,14 @@ REDIS_KEY = "seedwake:stimuli"
 CONVERSATION_HISTORY_KEY = "seedwake:conversation_history"
 CONVERSATION_HISTORY_LIMIT = 500
 CONVERSATION_SUMMARY_KEY = "seedwake:conversation_summaries"
+RECENT_ACTION_ECHO_KEY = "seedwake:recent_action_echoes"
+RECENT_ACTION_ECHO_LIMIT = 100
+RECENT_ACTION_ECHO_RETAIN_CYCLES = 3
 RECENT_CONVERSATION_RAW_LIMIT = 10
 RECENT_CONVERSATION_WINDOW_HOURS = 24
 RECENT_CONVERSATION_SUMMARY_VERSION = 2
 RECENT_CONVERSATION_SUMMARY_MAX_CHARS = 280
+RECENT_ACTION_ECHO_ACTION_TYPES = {"news", "search", "reading", "web_fetch", "weather"}
 MERGED_CONVERSATION_HISTORY_METADATA_KEYS = (
     "telegram_user_id",
     "telegram_chat_id",
@@ -493,6 +498,68 @@ def load_recent_conversations(
     return [item for _, item in recent_conversations]
 
 
+def remember_recent_action_echoes(
+    redis_client: ConversationRedisLike | None,
+    cycle_id: int,
+    stimuli: list[Stimulus],
+) -> None:
+    if redis_client is None:
+        return
+    retained = [
+        stimulus
+        for stimulus in stimuli
+        if _should_retain_recent_action_echo(stimulus)
+    ]
+    if not retained:
+        return
+    for stimulus in retained:
+        started_at = time.perf_counter()
+        redis_client.rpush(
+            RECENT_ACTION_ECHO_KEY,
+            json.dumps(_recent_action_echo_record(cycle_id, stimulus), ensure_ascii=False),
+        )
+        _log_redis_operation("rpush", started_at, f"key={RECENT_ACTION_ECHO_KEY}, count=1")
+    trim_started_at = time.perf_counter()
+    redis_client.ltrim(RECENT_ACTION_ECHO_KEY, -RECENT_ACTION_ECHO_LIMIT, -1)
+    _log_redis_operation(
+        "ltrim",
+        trim_started_at,
+        f"key={RECENT_ACTION_ECHO_KEY}, limit={RECENT_ACTION_ECHO_LIMIT}",
+    )
+
+
+def load_recent_action_echoes(
+    redis_client: ConversationRedisLike | None,
+    *,
+    current_cycle_id: int,
+    exclude_action_ids: set[str] | None = None,
+) -> list[Stimulus]:
+    if redis_client is None:
+        return []
+    started_at = time.perf_counter()
+    raw_items = redis_client.lrange(RECENT_ACTION_ECHO_KEY, 0, -1)
+    _log_redis_operation("lrange", started_at, f"key={RECENT_ACTION_ECHO_KEY}, count={len(raw_items)}")
+    if not raw_items:
+        return []
+    excluded = exclude_action_ids or set()
+    recent: list[Stimulus] = []
+    seen_action_ids: set[str] = set()
+    for raw_item in reversed(raw_items):
+        record = _recent_action_echo_record_from_raw(raw_item)
+        if record is None or not _recent_action_echo_is_visible(record, current_cycle_id):
+            continue
+        stimulus = _stimulus_from_dict(record["stimulus"])
+        action_id = str(stimulus.action_id or "").strip()
+        if not action_id or action_id in excluded or action_id in seen_action_ids:
+            continue
+        if not _should_retain_recent_action_echo(stimulus):
+            continue
+        seen_action_ids.add(action_id)
+        recent.append(stimulus)
+    recent.reverse()
+    return recent
+
+
 def _build_recent_conversation_prompt(
     redis_client: ConversationRedisLike,
     stored_summaries: dict[str, tuple[str, str, bool]],
@@ -782,6 +849,57 @@ def _conversation_summary_state(raw_value: JsonValue | bytes) -> tuple[str, str,
         logger.warning("skipping malformed conversation summary version: %r", payload.get("version"))
         version = 0
     return summary, absorbed_until, version == RECENT_CONVERSATION_SUMMARY_VERSION
+
+
+def _recent_action_echo_record(cycle_id: int, stimulus: Stimulus) -> RecentActionEchoRecord:
+    return {
+        "cycle_id": cycle_id,
+        "stimulus": _stimulus_to_dict(stimulus),
+    }
+
+
+def _recent_action_echo_record_from_raw(raw_value: str) -> RecentActionEchoRecord | None:
+    try:
+        payload = json.loads(raw_value)
+    except (TypeError, ValueError) as exc:
+        logger.warning("skipping malformed recent action echo record: %s", exc)
+        return None
+    if not isinstance(payload, dict):
+        logger.warning("skipping non-object recent action echo record")
+        return None
+    raw_cycle_id = payload.get("cycle_id")
+    raw_stimulus = payload.get("stimulus")
+    if not isinstance(raw_cycle_id, int) or not isinstance(raw_stimulus, dict):
+        logger.warning("skipping incomplete recent action echo record")
+        return None
+    stimulus_record: StimulusRecord = raw_stimulus  # type: ignore[assignment]
+    record: RecentActionEchoRecord = {
+        "cycle_id": raw_cycle_id,
+        "stimulus": stimulus_record,
+    }
+    return record
+
+
+def _recent_action_echo_is_visible(record: RecentActionEchoRecord, current_cycle_id: int) -> bool:
+    recorded_cycle_id = record["cycle_id"]
+    return (
+        recorded_cycle_id < current_cycle_id
+        and current_cycle_id - recorded_cycle_id <= RECENT_ACTION_ECHO_RETAIN_CYCLES
+    )
+
+
+def _should_retain_recent_action_echo(stimulus: Stimulus) -> bool:
+    if not _is_information_action_echo(stimulus):
+        return False
+    status = str(stimulus.metadata.get("status") or "").strip()
+    return status == "succeeded"
+
+
+def _is_information_action_echo(stimulus: Stimulus) -> bool:
+    action_type = str(stimulus.metadata.get("action_type") or "").strip()
+    if action_type not in RECENT_ACTION_ECHO_ACTION_TYPES:
+        return False
+    return str(stimulus.metadata.get("origin") or "").strip() == "action"
 
 
 def _select_ranked(items: list[Stimulus], limit: int) -> list[tuple[int, Stimulus]]:

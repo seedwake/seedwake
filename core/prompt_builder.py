@@ -108,6 +108,7 @@ def build_prompt(
     context_window: int,
     long_term_context: list[str] | None = None,
     stimuli: list[Stimulus] | None = None,
+    recent_action_echoes: list[Stimulus] | None = None,
     running_actions: list[ActionRecord] | None = None,
     perception_cues: list[str] | None = None,
     recent_conversations: list[RecentConversationPrompt] | None = None,
@@ -132,11 +133,15 @@ def build_prompt(
     if stimuli:
         conversations, action_echoes, passive = _split_stimuli(stimuli)
     conversation_labels = _conversation_label_map(conversations, recent_conversations)
-    if action_echoes:
+    if action_echoes or recent_action_echoes:
         _append_prompt_section(
             parts,
             "action_echoes",
-            lambda: _format_action_echoes(action_echoes, conversation_labels),
+            lambda: _format_action_echoes(
+                recent_action_echoes or [],
+                action_echoes,
+                conversation_labels,
+            ),
         )
     if visible_running_actions:
         _append_prompt_section(
@@ -249,13 +254,28 @@ def _format_sensory_stimuli(stimuli: list[Stimulus]) -> str:
     return _render_section("此刻我注意到", lines)
 
 
-def _format_action_echoes(stimuli: list[Stimulus], conversation_labels: dict[str, str]) -> str:
-    lines = []
-    for stimulus in stimuli:
-        lines.append(
-            f"- {_action_echo_label(stimulus)} {_action_echo_text(stimulus, conversation_labels)}"
-        )
+def _format_action_echoes(
+    recent_stimuli: list[Stimulus],
+    current_stimuli: list[Stimulus],
+    conversation_labels: dict[str, str],
+) -> str:
+    lines: list[str] = []
+    if recent_stimuli:
+        lines.append("最近的行动回音：")
+        lines.extend(_action_echo_lines(recent_stimuli, conversation_labels))
+    if current_stimuli:
+        if lines:
+            lines.append("")
+        lines.append("刚刚收到的行动回音：")
+        lines.extend(_action_echo_lines(current_stimuli, conversation_labels))
     return _render_section("行动有了回音", lines)
+
+
+def _action_echo_lines(stimuli: list[Stimulus], conversation_labels: dict[str, str]) -> list[str]:
+    return [
+        f"- {_action_echo_label(stimulus)} {_action_echo_text(stimulus, conversation_labels)}"
+        for stimulus in stimuli
+    ]
 
 
 def _format_thought_history(thoughts: list[Thought]) -> str:
