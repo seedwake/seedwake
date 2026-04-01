@@ -12,6 +12,7 @@ from telegram.ext import Application, ContextTypes
 from bot.main import (
     _dispatch_event,
     _ensure_redis_client,
+    _handle_action_callback,
     _handle_actions,
     _handle_approve,
     _handle_text_message,
@@ -21,6 +22,7 @@ from bot.helpers import (
     format_action_event,
     load_admin_user_ids,
     load_allowed_user_ids,
+    load_notification_chat_ids,
 )
 from core.action import ACTION_CONTROL_KEY
 from core.stimulus import CONVERSATION_HISTORY_KEY, REDIS_KEY as STIMULUS_REDIS_KEY
@@ -127,16 +129,18 @@ def _make_context(
     *,
     allowed_user_ids=None,
     admin_user_ids=None,
+    notification_chat_ids=None,
     args=None,
 ) -> ContextTypes.DEFAULT_TYPE:
     allowed = set(allowed_user_ids or {1})
     admins = set(admin_user_ids or set())
+    notifications = list(notification_chat_ids or sorted(admins))
     application = FakeTelegramApplication(
         bot_data={
             "redis": redis_client,
             "allowed_user_ids": allowed,
             "admin_user_ids": admins,
-            "notification_user_ids": sorted(admins),
+            "notification_chat_ids": notifications,
         },
         bot=FakeTelegramBot(send_message=AsyncMock()),
     )
@@ -195,6 +199,14 @@ class TelegramBotHelpersTests(unittest.TestCase):
     def test_load_admin_user_ids(self) -> None:
         config = {"telegram": {"admin_user_ids": [123, "456", "bad", 123]}}
         self.assertEqual(load_admin_user_ids(config), [123, 456])
+
+    def test_load_notification_chat_ids_uses_channel_when_configured(self) -> None:
+        config = {"telegram": {"notification_channel_id": "-1001234567890"}}
+        self.assertEqual(load_notification_chat_ids(config, [123, 456]), [-1001234567890])
+
+    def test_load_notification_chat_ids_falls_back_to_admins(self) -> None:
+        config = {"telegram": {"notification_channel_id": "bad"}}
+        self.assertEqual(load_notification_chat_ids(config, [123, 456]), [123, 456])
 
     def test_extract_telegram_chat_id(self) -> None:
         self.assertEqual(extract_telegram_chat_id("telegram:12345"), 12345)
@@ -326,6 +338,22 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_kwargs["chat_id"], 2)
         self.assertIsNotNone(first_kwargs["reply_markup"])
 
+    async def test_dispatch_action_event_broadcasts_to_notification_channel(self) -> None:
+        context = _make_context(
+            FakeRedis(),
+            allowed_user_ids={1, 2},
+            admin_user_ids={2},
+            notification_chat_ids=[-1001234567890],
+        )
+
+        await _dispatch_event(context.application, _action_envelope())
+
+        send_mock = _send_message_mock(context)
+        self.assertEqual(send_mock.await_count, 1)
+        first_kwargs = send_mock.await_args_list[0].kwargs
+        self.assertEqual(first_kwargs["chat_id"], -1001234567890)
+        self.assertIsNotNone(first_kwargs["reply_markup"])
+
     async def test_dispatch_action_event_continues_after_send_failure(self) -> None:
         context = _make_context(FakeRedis(), allowed_user_ids={1, 2}, admin_user_ids={1, 2})
         context.application.bot.send_message = AsyncMock(side_effect=[TelegramError("boom"), None])
@@ -344,6 +372,33 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         stored = redis_client.lists[ACTION_CONTROL_KEY][0]
         self.assertIn('"action_id": "act_1"', stored)
         _reply_text_mock(update).assert_awaited_once()
+
+    async def test_handle_action_callback_accepts_admin_click_in_channel(self) -> None:
+        redis_client = FakeRedis()
+        query = SimpleNamespace(
+            data="approve:act_1",
+            answer=AsyncMock(),
+            edit_message_reply_markup=AsyncMock(),
+        )
+        update = _as_update(SimpleNamespace(
+            effective_user=SimpleNamespace(id=1, username="alice", full_name="alice"),
+            effective_chat=SimpleNamespace(id=-1001234567890, type="channel"),
+            effective_message=SimpleNamespace(reply_text=AsyncMock()),
+            callback_query=query,
+        ))
+        context = _make_context(
+            redis_client,
+            allowed_user_ids={1},
+            admin_user_ids={1},
+            notification_chat_ids=[-1001234567890],
+        )
+
+        await _handle_action_callback(update, context)
+
+        stored = redis_client.lists[ACTION_CONTROL_KEY][0]
+        self.assertIn('"action_id": "act_1"', stored)
+        query.answer.assert_awaited_once_with("已提交")
+        query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
 
     async def test_handle_approve_rejects_non_admin_user(self) -> None:
         redis_client = FakeRedis()

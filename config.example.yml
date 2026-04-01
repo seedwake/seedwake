@@ -77,6 +77,7 @@ perception:
 telegram:
   allowed_user_ids: [123456789]    # Telegram users allowed to chat in private
   admin_user_ids: [123456789]      # Telegram users allowed to receive action/status updates and approve actions
+  notification_channel_id: -1001234567890  # Optional: send action/status updates to this channel instead of admin DMs
 
 admins:
   - username: alice                # admin / audit identity

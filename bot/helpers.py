@@ -9,6 +9,16 @@ def load_admin_user_ids(config: dict) -> list[int]:
     return _load_numeric_user_ids(config, "admin_user_ids")
 
 
+def load_notification_chat_ids(config: dict, default_chat_ids: list[int]) -> list[int]:
+    raw_chat_id = config.get("telegram", {}).get("notification_channel_id")
+    if raw_chat_id in (None, ""):
+        return list(default_chat_ids)
+    try:
+        return [int(raw_chat_id)]
+    except (TypeError, ValueError):
+        return list(default_chat_ids)
+
+
 def extract_telegram_chat_id(source: str) -> int | None:
     prefix = "telegram:"
     if not source.startswith(prefix):

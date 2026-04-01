@@ -25,6 +25,7 @@ from bot.helpers import (
     format_status_event,
     load_admin_user_ids,
     load_allowed_user_ids,
+    load_notification_chat_ids,
 )
 from core.action import ActionRedisLike, load_action_items, push_action_control
 from core.logging import setup_logging
@@ -89,6 +90,7 @@ def create_application(
     if not allowed_user_ids:
         raise RuntimeError("config.yml 缺少 telegram.allowed_user_ids")
     admin_user_ids = load_admin_user_ids(cfg)
+    notification_chat_ids = load_notification_chat_ids(cfg, admin_user_ids)
 
     async def post_init(app: Application) -> None:
         await _start_event_forwarder(app)
@@ -113,7 +115,7 @@ def create_application(
         "redis": redis_client if redis_client is not None else connect_redis_from_env(),
         "allowed_user_ids": set(allowed_user_ids),
         "admin_user_ids": set(admin_user_ids),
-        "notification_user_ids": admin_user_ids,
+        "notification_chat_ids": notification_chat_ids,
     })
     application.add_handler(CommandHandler("start", _handle_start))
     application.add_handler(CommandHandler("status", _handle_status))
@@ -230,11 +232,12 @@ async def _handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def _handle_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = await _ensure_admin_user(update, context)
-    if not user:
-        return
     query = update.callback_query
     if query is None:
+        return
+    effective_user = update.effective_user
+    if effective_user is None or not _is_admin_user(context.application, effective_user.id):
+        await query.answer("无管理权限。", show_alert=True)
         return
     action, _, action_id = str(query.data or "").partition(":")
     approved = action == "approve"
@@ -243,7 +246,7 @@ async def _handle_action_callback(update: Update, context: ContextTypes.DEFAULT_
         _as_action_redis(redis_client),
         action_id,
         approved=approved,
-        actor=f"telegram:{user['user_id']}",
+        actor=f"telegram:{effective_user.id}",
     )
     if pushed:
         await query.answer("已提交")
@@ -357,12 +360,12 @@ async def _broadcast_action_event(application: Application, payload: ActionEvent
                 InlineKeyboardButton("批准", callback_data=f"approve:{action_id}"),
                 InlineKeyboardButton("拒绝", callback_data=f"reject:{action_id}"),
             ]])
-    for chat_id in application.bot_data["notification_user_ids"]:
+    for chat_id in application.bot_data["notification_chat_ids"]:
         await _safe_send_message(application, chat_id=chat_id, text=text, reply_markup=reply_markup)
 
 
 async def _broadcast_text(application: Application, text: str) -> None:
-    for chat_id in application.bot_data["notification_user_ids"]:
+    for chat_id in application.bot_data["notification_chat_ids"]:
         await _safe_send_message(application, chat_id=chat_id, text=text)
 
 
