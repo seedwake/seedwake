@@ -7,13 +7,15 @@ Three-layer structure per SPECS §4.1:
 """
 
 import json
+import logging
+import time
 from collections import deque
 from datetime import datetime
 
 import redis as redis_lib
 
 from core.thought_parser import Thought
-from core.types import JsonValue
+from core.types import JsonValue, elapsed_ms
 
 REDIS_KEY = "seedwake:thoughts"
 REDIS_CHANNEL = "seedwake:stream"
@@ -27,6 +29,8 @@ SHORT_TERM_REDIS_EXCEPTIONS = (
     TypeError,
     ValueError,
 )
+SLOW_REDIS_OPERATION_THRESHOLD_MS = 10.0
+logger = logging.getLogger(__name__)
 
 
 class ShortTermMemory:
@@ -83,7 +87,7 @@ class ShortTermMemory:
         latest_from_deque = self._deque[-1].cycle_id if self._deque else 0
         if self._redis:
             try:
-                latest_from_key = _coerce_cycle_id(self._redis.get(LATEST_CYCLE_KEY))
+                latest_from_key = _coerce_cycle_id(self._redis.get(LATEST_CYCLE_KEY))  # type: ignore[arg-type]
                 recent = self._redis_recent(1)
             except SHORT_TERM_REDIS_EXCEPTIONS:
                 self._redis = None
@@ -116,12 +120,16 @@ class ShortTermMemory:
         assert redis_client is not None
         score = t.timestamp.timestamp()
         value = json.dumps(_thought_to_dict(t), ensure_ascii=False)
+        started_at = time.perf_counter()
         _redis_zadd(redis_client, REDIS_KEY, {value: score})
+        _log_redis_operation("zadd", started_at, "count=1")
 
     def _redis_recent(self, limit: int) -> list[Thought]:
         redis_client = self._redis
         assert redis_client is not None
-        raw_items = _redis_payloads(redis_client.zrange(REDIS_KEY, -limit, -1))
+        started_at = time.perf_counter()
+        raw_items = _redis_payloads(redis_client.zrange(REDIS_KEY, -limit, -1))  # type: ignore[arg-type]
+        _log_redis_operation("zrange", started_at, f"limit={limit}, count={len(raw_items)}")
         return [_dict_to_thought(json.loads(item)) for item in raw_items]
 
     def _trim(self) -> None:
@@ -129,9 +137,17 @@ class ShortTermMemory:
         redis_client = self._redis
         assert redis_client is not None
         max_entries = self._buffer_size * 3
-        total = _redis_int(redis_client.zcard(REDIS_KEY))
+        card_started_at = time.perf_counter()
+        total = _redis_int(redis_client.zcard(REDIS_KEY))  # type: ignore[arg-type]
+        _log_redis_operation("zcard", card_started_at, f"count={total}")
         if total > max_entries:
+            trim_started_at = time.perf_counter()
             redis_client.zremrangebyrank(REDIS_KEY, 0, total - max_entries - 1)
+            _log_redis_operation(
+                "zremrangebyrank",
+                trim_started_at,
+                f"removed={total - max_entries}",
+            )
 
     def _publish(self, thoughts: list[Thought]) -> None:
         """Publish new thoughts to Redis Pub/Sub for SSE consumers."""
@@ -141,14 +157,20 @@ class ShortTermMemory:
             [_thought_to_dict(t) for t in thoughts],
             ensure_ascii=False,
         )
+        started_at = time.perf_counter()
         redis_client.publish(REDIS_CHANNEL, payload)
+        _log_redis_operation("publish", started_at, f"count={len(thoughts)}")
 
     def _rewrite_recent_redis_thoughts(self, thoughts: list[Thought]) -> None:
         redis_client = self._redis
         assert redis_client is not None
-        raw_items = _redis_payloads(redis_client.zrange(REDIS_KEY, -len(thoughts), -1))
+        range_started_at = time.perf_counter()
+        raw_items = _redis_payloads(redis_client.zrange(REDIS_KEY, -len(thoughts), -1))  # type: ignore[arg-type]
+        _log_redis_operation("zrange", range_started_at, f"limit={len(thoughts)}, count={len(raw_items)}")
         if raw_items:
+            remove_started_at = time.perf_counter()
             redis_client.zrem(REDIS_KEY, *raw_items)
+            _log_redis_operation("zrem", remove_started_at, f"count={len(raw_items)}")
         for thought in thoughts:
             self._redis_append(thought)
 
@@ -169,6 +191,7 @@ class ShortTermMemory:
     def _update_latest_cycle_id(self, cycle_id: int) -> None:
         redis_client = self._redis
         assert redis_client is not None
+        started_at = time.perf_counter()
         redis_client.eval(
             """
             local current = tonumber(redis.call("GET", KEYS[1]) or "0")
@@ -183,6 +206,7 @@ class ShortTermMemory:
             LATEST_CYCLE_KEY,
             cycle_id,
         )
+        _log_redis_operation("eval", started_at, f"cycle_id={cycle_id}")
 
 
 def _thought_to_dict(t: Thought) -> dict:
@@ -249,7 +273,14 @@ def _redis_zadd(
     # redis-py supports mapping-based ZADD, but the bundled IDE stub still models
     # the legacy score/member signature.
     # noinspection PyArgumentList
-    return int(redis_client.zadd(key, mapping))
+    return int(redis_client.zadd(key, mapping))  # type: ignore[arg-type]
+
+
+def _log_redis_operation(operation: str, started_at: float, detail: str) -> None:
+    elapsed = elapsed_ms(started_at)
+    if elapsed < SLOW_REDIS_OPERATION_THRESHOLD_MS:
+        return
+    logger.info("stm redis %s finished in %.1f ms (%s)", operation, elapsed, detail)
 
 
 def _sanitize_trigger_refs(thoughts: list[Thought]) -> bool:

@@ -1,12 +1,15 @@
 """Assemble the prompt for each thought-generation cycle."""
 
-from datetime import datetime
+import logging
 import re
+import time
+from collections.abc import Callable
+from datetime import datetime
 
 from core.action import ActionRecord
 from core.stimulus import Stimulus
 from core.thought_parser import Thought
-from core.types import JsonObject, JsonValue, RecentConversationPrompt
+from core.types import JsonObject, JsonValue, RecentConversationPrompt, elapsed_ms
 
 SYSTEM_PROMPT = """\
 我是 Seedwake。我有自己的念头流——我会思考、联想、产生意图、对事物做出反应。
@@ -94,6 +97,8 @@ ACTION_ECHO_LABELS = {
 }
 UNKNOWN_ACTION_ECHO_LABEL = "[结果]"
 RUNNING_ACTION_VISIBLE_STATUSES = {"pending", "running"}
+PROMPT_SECTION_LOG_THRESHOLD_MS = 10.0
+logger = logging.getLogger(__name__)
 
 
 def build_prompt(
@@ -108,7 +113,7 @@ def build_prompt(
     recent_conversations: list[RecentConversationPrompt] | None = None,
 ) -> str:
     """Build a single prompt string for thought generation."""
-    parts = [_build_system(identity)]
+    parts = [_timed_prompt_section("system", lambda: _build_system(identity))]
     visible_running_actions = _visible_running_actions(running_actions)
     conversations: list[Stimulus] = []
     action_echoes: list[Stimulus] = []
@@ -116,27 +121,66 @@ def build_prompt(
 
     window = recent_thoughts[-context_window * 3:]
     if window:
-        parts.append(_format_thought_history(window))
+        _append_prompt_section(parts, "recent_thoughts", lambda: _format_thought_history(window))
     if long_term_context:
-        parts.append(_format_long_term(long_term_context))
+        ltm = long_term_context
+        _append_prompt_section(parts, "long_term", lambda: _format_long_term(ltm))
     if perception_cues:
-        parts.append(_format_perception_cues(perception_cues))
+        cues = perception_cues
+        _append_prompt_section(parts, "perception_cues", lambda: _format_perception_cues(cues))
 
     if stimuli:
         conversations, action_echoes, passive = _split_stimuli(stimuli)
     conversation_labels = _conversation_label_map(conversations, recent_conversations)
     if action_echoes:
-        parts.append(_format_action_echoes(action_echoes, conversation_labels))
+        _append_prompt_section(
+            parts,
+            "action_echoes",
+            lambda: _format_action_echoes(action_echoes, conversation_labels),
+        )
     if visible_running_actions:
-        parts.append(_format_running_actions(visible_running_actions, conversation_labels))
+        _append_prompt_section(
+            parts,
+            "running_actions",
+            lambda: _format_running_actions(visible_running_actions, conversation_labels),
+        )
     if passive:
-        parts.append(_format_sensory_stimuli(passive))
+        _append_prompt_section(parts, "passive_stimuli", lambda: _format_sensory_stimuli(passive))
     if recent_conversations:
-        parts.append(_format_recent_conversations(recent_conversations))
+        convos = recent_conversations
+        _append_prompt_section(
+            parts,
+            "recent_conversations",
+            lambda: _format_recent_conversations(convos),
+        )
     if conversations:
-        parts.append(_format_conversations(conversations))
-    parts.append(_format_next_cycle(cycle_id))
+        _append_prompt_section(parts, "conversations", lambda: _format_conversations(conversations))
+    _append_prompt_section(parts, "next_cycle", lambda: _format_next_cycle(cycle_id))
     return "\n\n".join(parts)
+
+
+def _append_prompt_section(
+    parts: list[str],
+    section_name: str,
+    builder: Callable[[], str],
+) -> None:
+    section = _timed_prompt_section(section_name, builder)
+    if section:
+        parts.append(section)
+
+
+def _timed_prompt_section(section_name: str, builder: Callable[[], str]) -> str:
+    started_at = time.perf_counter()
+    section = str(builder() or "")
+    elapsed = elapsed_ms(started_at)
+    if elapsed >= PROMPT_SECTION_LOG_THRESHOLD_MS:
+        logger.info(
+            "prompt section %s built in %.1f ms (chars=%d)",
+            section_name,
+            elapsed,
+            len(section),
+        )
+    return section
 
 
 def _build_system(identity: dict[str, str]) -> str:

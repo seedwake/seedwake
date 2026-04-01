@@ -1000,7 +1000,9 @@ class ActionPlanner:
         *,
         conversation_source: str | None = None,
     ) -> ActionPlan | tuple[None, str | None] | None:
+        started_at = time.perf_counter()
         action_request = thought.action_request or {}
+        raw_action_type = str(action_request.get("type") or "")
         if self._client.supports_tool_calls:
             response = self._client.chat(
                 model=self._model_name,
@@ -1014,9 +1016,7 @@ class ActionPlanner:
                 tool_calls = []
             if tool_calls:
                 tool_name = tool_calls[0]["function"]["name"]
-                logger.info("planner tool call: %s for %s (raw_type=%s)",
-                            tool_name, thought.thought_id, action_request.get("type"))
-                return _plan_from_tool_call(
+                plan = _plan_from_tool_call(
                     tool_calls[0]["function"]["name"],
                     tool_calls[0]["function"]["arguments"],
                     thought,
@@ -1027,9 +1027,15 @@ class ActionPlanner:
                     self._ops_worker_agent_id,
                     conversation_source,
                 )
-            logger.info("planner returned no tool call for %s (raw_type=%s), using fallback",
-                        thought.thought_id, action_request.get("type"))
-            return _fallback_plan(
+                logger.info(
+                    "planner decision finished in %.1f ms (thought_id=%s, mode=tool, raw_type=%s, tool=%s)",
+                    elapsed_ms(started_at),
+                    thought.thought_id,
+                    raw_action_type,
+                    tool_name,
+                )
+                return plan
+            plan = _fallback_plan(
                 raw_action_type=str(action_request.get("type") or "custom"),
                 thought=thought,
                 default_timeout_seconds=self._default_timeout_seconds,
@@ -1039,6 +1045,13 @@ class ActionPlanner:
                 ops_worker_agent_id=self._ops_worker_agent_id,
                 conversation_source=conversation_source,
             )
+            logger.info(
+                "planner decision finished in %.1f ms (thought_id=%s, mode=fallback, raw_type=%s)",
+                elapsed_ms(started_at),
+                thought.thought_id,
+                raw_action_type,
+            )
+            return plan
 
         response = self._client.chat(
             model=self._model_name,
@@ -1046,9 +1059,7 @@ class ActionPlanner:
             options={**self._options, "max_tokens": 512},
         )
         message = response.get("message")
-        logger.info("planner json decision for %s (raw_type=%s)",
-                    thought.thought_id, action_request.get("type"))
-        return _plan_from_json_reply(
+        plan = _plan_from_json_reply(
             raw_content=str(message.get("content") or "") if isinstance(message, dict) else "",
             thought=thought,
             default_timeout_seconds=self._default_timeout_seconds,
@@ -1058,6 +1069,13 @@ class ActionPlanner:
             ops_worker_agent_id=self._ops_worker_agent_id,
             conversation_source=conversation_source,
         )
+        logger.info(
+            "planner decision finished in %.1f ms (thought_id=%s, mode=json, raw_type=%s)",
+            elapsed_ms(started_at),
+            thought.thought_id,
+            raw_action_type,
+        )
+        return plan
 
 
 def create_action_manager(

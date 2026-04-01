@@ -2,8 +2,9 @@
 
 import json
 import logging
-from collections.abc import Callable
+import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from threading import RLock
@@ -18,6 +19,7 @@ from core.types import (
     RecentConversationMessage,
     RecentConversationPrompt,
     StimulusRecord,
+    elapsed_ms,
 )
 
 REDIS_KEY = "seedwake:stimuli"
@@ -51,6 +53,7 @@ STIMULUS_REDIS_EXCEPTIONS = (
     TypeError,
     ValueError,
 )
+SLOW_REDIS_OPERATION_THRESHOLD_MS = 10.0
 logger = logging.getLogger(__name__)
 
 
@@ -108,7 +111,9 @@ class StimulusQueue:
             redis_client = self._redis
         if redis_client:
             try:
+                queue_started_at = time.perf_counter()
                 redis_client.rpush(REDIS_KEY, _stimulus_to_json(stimulus))
+                _log_redis_operation("rpush", queue_started_at, f"key={REDIS_KEY}, count=1")
                 if stimulus_type == "conversation":
                     append_conversation_history(
                         redis_client,
@@ -179,18 +184,7 @@ class StimulusQueue:
         return self.redis_available
 
     def _redis_pop_many(self, redis_client: ConversationRedisLike, limit: int) -> list[Stimulus]:
-        raw_items = redis_client.lrange(REDIS_KEY, 0, -1)
-        if not raw_items:
-            return []
-        parsed = [_stimulus_from_dict(json.loads(item)) for item in raw_items]
-        chosen_pairs = _select_ranked(parsed, limit)
-        chosen_items = [parsed[index] for index, _ in chosen_pairs]
-
-        for index, _ in chosen_pairs:
-            redis_client.lrem(REDIS_KEY, 1, raw_items[index])
-
-        self._drop_shadow_items([stimulus.stimulus_id for stimulus in chosen_items])
-        return chosen_items
+        return self._redis_select_and_remove(redis_client, limit)
 
     def _shadow_pop_many(self, limit: int) -> list[Stimulus]:
         with self._lock:
@@ -201,14 +195,26 @@ class StimulusQueue:
         return chosen_items
 
     def _redis_pop_all(self, redis_client: ConversationRedisLike) -> list[Stimulus]:
+        return self._redis_select_and_remove(redis_client, limit=None)
+
+    def _redis_select_and_remove(
+        self,
+        redis_client: ConversationRedisLike,
+        limit: int | None,
+    ) -> list[Stimulus]:
+        range_started_at = time.perf_counter()
         raw_items = redis_client.lrange(REDIS_KEY, 0, -1)
+        _log_redis_operation("lrange", range_started_at, f"key={REDIS_KEY}, count={len(raw_items)}")
         if not raw_items:
             return []
         parsed = [_stimulus_from_dict(json.loads(item)) for item in raw_items]
-        chosen_pairs = _select_ranked(parsed, len(parsed))
+        chosen_pairs = _select_ranked(parsed, limit if limit is not None else len(parsed))
         chosen_items = [parsed[index] for index, _ in chosen_pairs]
-        for raw_item in raw_items:
-            redis_client.lrem(REDIS_KEY, 1, raw_item)
+        chosen_indices = {index for index, _ in chosen_pairs}
+        for index in sorted(chosen_indices, reverse=True):
+            remove_started_at = time.perf_counter()
+            redis_client.lrem(REDIS_KEY, 1, raw_items[index])
+            _log_redis_operation("lrem", remove_started_at, f"key={REDIS_KEY}, count=1")
         self._drop_shadow_items([stimulus.stimulus_id for stimulus in chosen_items])
         return chosen_items
 
@@ -236,7 +242,9 @@ class StimulusQueue:
             shadow_items = list(self._deque)
         if redis_client is None:
             return
+        range_started_at = time.perf_counter()
         existing = redis_client.lrange(REDIS_KEY, 0, -1)
+        _log_redis_operation("lrange", range_started_at, f"key={REDIS_KEY}, count={len(existing)}")
         existing_ids = {
             json.loads(item)["stimulus_id"]
             for item in existing
@@ -245,7 +253,9 @@ class StimulusQueue:
         for stimulus in shadow_items:
             if stimulus.stimulus_id in existing_ids:
                 continue
+            push_started_at = time.perf_counter()
             redis_client.rpush(REDIS_KEY, _stimulus_to_json(stimulus))
+            _log_redis_operation("rpush", push_started_at, f"key={REDIS_KEY}, count=1")
             if stimulus.type == "conversation":
                 _sync_conversation_history(redis_client, stimulus, history_ids)
 
@@ -270,8 +280,16 @@ def append_conversation_history(
         "metadata": metadata or {},
     }
     if redis_client is not None:
+        push_started_at = time.perf_counter()
         redis_client.rpush(CONVERSATION_HISTORY_KEY, json.dumps(entry, ensure_ascii=False))
+        _log_redis_operation("rpush", push_started_at, f"key={CONVERSATION_HISTORY_KEY}, count=1")
+        trim_started_at = time.perf_counter()
         redis_client.ltrim(CONVERSATION_HISTORY_KEY, -CONVERSATION_HISTORY_LIMIT, -1)
+        _log_redis_operation(
+            "ltrim",
+            trim_started_at,
+            f"key={CONVERSATION_HISTORY_KEY}, limit={CONVERSATION_HISTORY_LIMIT}",
+        )
     return entry
 
 
@@ -415,7 +433,9 @@ def load_conversation_history(
 ) -> list[ConversationEntry]:
     if redis_client is None or limit <= 0:
         return []
+    range_started_at = time.perf_counter()
     raw_items = redis_client.lrange(CONVERSATION_HISTORY_KEY, -limit, -1)
+    _log_redis_operation("lrange", range_started_at, f"key={CONVERSATION_HISTORY_KEY}, count={len(raw_items)}")
     items = []
     for raw in raw_items:
         try:
@@ -523,7 +543,9 @@ def _build_recent_conversation_prompt(
 
 def _load_conversation_summaries(redis_client: ConversationRedisLike) -> dict[str, tuple[str, str, bool]]:
     try:
+        started_at = time.perf_counter()
         raw_map = redis_client.hgetall(CONVERSATION_SUMMARY_KEY)
+        _log_redis_operation("hgetall", started_at, f"key={CONVERSATION_SUMMARY_KEY}, count={len(raw_map)}")
     except STIMULUS_REDIS_EXCEPTIONS:
         return {}
     summaries: dict[str, tuple[str, str, bool]] = {}
@@ -633,6 +655,7 @@ def _store_conversation_summary(
     summary: str,
     absorbed_until: str,
 ) -> None:
+    started_at = time.perf_counter()
     redis_client.hset(
         CONVERSATION_SUMMARY_KEY,
         source,
@@ -642,6 +665,7 @@ def _store_conversation_summary(
             "absorbed_until": absorbed_until,
         }, ensure_ascii=False),
     )
+    _log_redis_operation("hset", started_at, f"key={CONVERSATION_SUMMARY_KEY}, source={source}")
 
 
 def _recent_conversation_message(
@@ -705,6 +729,13 @@ def _conversation_entry_is_newer(entry: ConversationEntry, absorbed_until: str) 
     except ValueError:
         return True
     return entry_timestamp > absorbed_timestamp
+
+
+def _log_redis_operation(operation: str, started_at: float, detail: str) -> None:
+    elapsed = elapsed_ms(started_at)
+    if elapsed < SLOW_REDIS_OPERATION_THRESHOLD_MS:
+        return
+    logger.info("stimulus redis %s finished in %.1f ms (%s)", operation, elapsed, detail)
 
 
 def _latest_named_metadata(entries: list[ConversationEntry]) -> JsonObject:

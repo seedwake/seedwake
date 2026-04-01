@@ -448,6 +448,7 @@ class CycleTimingLogTests(unittest.TestCase):
                 )
 
         output = "\n".join(logs.output)
+        self.assertIn("cycle C42 stm get_context finished", output)
         self.assertIn("cycle C42 total execution finished", output)
         self.assertIn("status=failed", output)
 
@@ -616,21 +617,25 @@ class CycleCounterTests(unittest.TestCase):
             _ = (log_file, cycle_id, current_stimuli, thoughts)
             raise KeyboardInterrupt
 
-        with (
-            patch("core.main._next_cycle_id", return_value=294) as next_cycle_id,
-            patch("core.main._prepare_cycle", side_effect=prepare_cycle),
-            patch("core.main._execute_cycle", side_effect=execute_cycle),
-            patch("core.main._handle_cycle_failure", return_value=2.0) as handle_failure,
-            patch("core.main._finish_cycle", side_effect=finish_cycle) as finish_cycle_mock,
-        ):
-            with self.assertRaises(KeyboardInterrupt):
-                _run_engine_loop(log_file=None, prompt_log_file=None, runtime=_as_runtime(runtime), identity={})
+        with self.assertLogs("core.main", level="INFO") as logs:
+            with (
+                patch("core.main._next_cycle_id", return_value=294) as next_cycle_id,
+                patch("core.main._prepare_cycle", side_effect=prepare_cycle),
+                patch("core.main._execute_cycle", side_effect=execute_cycle),
+                patch("core.main._handle_cycle_failure", return_value=2.0) as handle_failure,
+                patch("core.main._finish_cycle", side_effect=finish_cycle) as finish_cycle_mock,
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    _run_engine_loop(log_file=None, prompt_log_file=None, runtime=_as_runtime(runtime), identity={})
 
         next_cycle_id.assert_called_once_with(runtime.stm, 0)
         handle_failure.assert_called_once()
         finish_cycle_mock.assert_called_once()
         self.assertEqual(prepare_calls, [294, 294])
         self.assertEqual(execute_calls, [294, 294])
+        output = "\n".join(logs.output)
+        self.assertIn("cycle C294 loop finished", output)
+        self.assertIn("retry_sleep_ms=1000.0", output)
 
 
 if __name__ == "__main__":

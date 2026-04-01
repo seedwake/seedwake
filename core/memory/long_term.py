@@ -6,10 +6,16 @@ Gracefully degrades when PostgreSQL is unavailable.
 
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 import re
+import time
 
 import psycopg
 from psycopg import sql
+
+from core.types import elapsed_ms
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -58,6 +64,9 @@ class LongTermMemory:
             return None
         tags = entity_tags or []
         vec_literal = _format_vector(embedding)
+        started_at = time.perf_counter()
+        status = "failed"
+        duplicate_hit = False
         try:
             entry_id: int | None = None
             with conn.cursor() as cur:
@@ -73,6 +82,7 @@ class LongTermMemory:
                 existing = cur.fetchone()
                 if existing is not None:
                     entry_id = _row_first_int(existing)
+                    duplicate_hit = True
                 else:
                     cur.execute(
                         """
@@ -88,10 +98,19 @@ class LongTermMemory:
                     row = cur.fetchone()
                     entry_id = _row_first_int(row)
             conn.commit()
+            status = "ok"
             return entry_id
         except psycopg.Error:
             conn.rollback()
             raise
+        finally:
+            logger.info(
+                "ltm store finished in %.1f ms (status=%s, duplicate=%s, chars=%d)",
+                elapsed_ms(started_at),
+                status,
+                duplicate_hit,
+                len(normalized_content),
+            )
 
     # NOTE: SPECS §4.2 requires ranking by similarity × importance × time_decay.
     # Current implementation uses pure vector distance. Weighted sorting deferred
@@ -130,13 +149,27 @@ class LongTermMemory:
             LIMIT %s
         """).format(filters=sql.SQL(" AND ").join(filters))
 
+        started_at = time.perf_counter()
+        status = "failed"
+        rows: list[tuple] = []
         try:
             with conn.cursor() as cur:
                 cur.execute(query, params)
                 rows = cur.fetchall()
+            status = "ok"
         except psycopg.Error:
             conn.rollback()
             raise
+        finally:
+            logger.info(
+                "ltm search finished in %.1f ms (status=%s, top_k=%d, results=%d, entity_filter=%s, exclude_cycles=%d)",
+                elapsed_ms(started_at),
+                status,
+                k,
+                len(rows) if status == "ok" else 0,
+                bool(entity_filter),
+                len(exclude_cycle_ids or []),
+            )
 
         return [
             LongTermEntry(
@@ -154,6 +187,8 @@ class LongTermMemory:
         conn = self._conn
         if conn is None:
             return
+        started_at = time.perf_counter()
+        status = "failed"
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -166,9 +201,17 @@ class LongTermMemory:
                     (memory_ids,),
                 )
             conn.commit()
+            status = "ok"
         except psycopg.Error:
             conn.rollback()
             raise
+        finally:
+            logger.info(
+                "ltm mark_accessed finished in %.1f ms (status=%s, count=%d)",
+                elapsed_ms(started_at),
+                status,
+                len(memory_ids),
+            )
 
     def resolve_telegram_target_for_entity(self, entity_tag: str) -> str | None:
         """Resolve a Telegram chat target from semantic/impression entity memories."""

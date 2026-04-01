@@ -3297,6 +3297,27 @@ class PlannerProviderTests(unittest.TestCase):
 
         self.assertEqual(plan, (None, "暂时不需要"))
 
+    def test_json_planner_logs_decision_timing(self) -> None:
+        planner = ActionPlanner(
+            _JsonPlannerClient('{"tool":"ignore_action","arguments":{"reason":"暂时不需要"}}'),
+            {"name": "openclaw/main", "provider": "openclaw"},
+            30,
+            "Tallinn",
+            [],
+            "seedwake-worker",
+            "seedwake-ops",
+        )
+
+        with self.assertLogs("core.action", level="INFO") as logs:
+            planner.plan(
+                _make_thought(action_request={"type": "news", "params": ""}),
+                conversation_source=None,
+            )
+
+        output = "\n".join(logs.output)
+        self.assertIn("planner decision finished in", output)
+        self.assertIn("mode=json", output)
+
 
 class OpenClawHttpFallbackTests(unittest.TestCase):
     def test_http_fallback_adds_scopes_header(self) -> None:

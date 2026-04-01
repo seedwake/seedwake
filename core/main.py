@@ -285,6 +285,8 @@ def _run_engine_loop(
     last_pg_reconnect = 0.0
 
     while True:
+        loop_started_at = time.perf_counter()
+        retry_sleep_ms = 0.0
         if pending_cycle_id is None:
             pending_cycle_id = _next_cycle_id(runtime.stm, last_completed_cycle_id)
         assert pending_cycle_id is not None
@@ -319,6 +321,7 @@ def _run_engine_loop(
         except KeyboardInterrupt:
             raise
         except MAIN_LOOP_EXCEPTIONS as exc:
+            retry_sleep_ms = current_retry_delay * 1000.0
             current_retry_delay = _handle_cycle_failure(
                 log_file,
                 cycle_id,
@@ -328,10 +331,19 @@ def _run_engine_loop(
                 current_retry_delay,
                 runtime.max_retry_delay,
             )
+            _log_cycle_loop_finished(
+                cycle_id,
+                started_at=loop_started_at,
+                status="failed",
+                stimuli_count=len(stimuli),
+                thought_count=0,
+                retry_sleep_ms=retry_sleep_ms,
+            )
             continue
         # noinspection PyBroadException
         except Exception as exc:
             logger.exception("unexpected main loop failure at cycle %s: %s", cycle_id, exc)
+            retry_sleep_ms = current_retry_delay * 1000.0
             current_retry_delay = _handle_cycle_failure(
                 log_file,
                 cycle_id,
@@ -340,6 +352,14 @@ def _run_engine_loop(
                 exc,
                 current_retry_delay,
                 runtime.max_retry_delay,
+            )
+            _log_cycle_loop_finished(
+                cycle_id,
+                started_at=loop_started_at,
+                status="failed",
+                stimuli_count=len(stimuli),
+                thought_count=0,
+                retry_sleep_ms=retry_sleep_ms,
             )
             continue
 
@@ -347,6 +367,34 @@ def _run_engine_loop(
         last_completed_cycle_id = cycle_id
         pending_cycle_id = None
         current_retry_delay = runtime.retry_delay
+        _log_cycle_loop_finished(
+            cycle_id,
+            started_at=loop_started_at,
+            status="ok",
+            stimuli_count=len(stimuli),
+            thought_count=len(new_thoughts),
+            retry_sleep_ms=retry_sleep_ms,
+        )
+
+
+def _log_cycle_loop_finished(
+    cycle_id: int,
+    *,
+    started_at: float,
+    status: str,
+    stimuli_count: int,
+    thought_count: int,
+    retry_sleep_ms: float,
+) -> None:
+    logger.info(
+        "cycle C%s loop finished in %.1f ms (status=%s, stimuli=%d, thoughts=%d, retry_sleep_ms=%.1f)",
+        cycle_id,
+        elapsed_ms(started_at),
+        status,
+        stimuli_count,
+        thought_count,
+        retry_sleep_ms,
+    )
 
 
 def _prepare_cycle(
@@ -359,7 +407,9 @@ def _prepare_cycle(
     last_redis_reconnect: float,
     last_pg_reconnect: float,
 ) -> tuple[dict[str, str], float, float, list[Stimulus], list[ActionRecord], list[str]]:
+    prepare_started_at = time.perf_counter()
     now = time.monotonic()
+    recovery_started_at = time.perf_counter()
     identity, last_redis_reconnect, last_pg_reconnect = _recover_runtime_services(
         log_file,
         runtime,
@@ -370,15 +420,56 @@ def _prepare_cycle(
         last_redis_reconnect,
         last_pg_reconnect,
     )
-    _push_passive_stimuli(runtime.stimulus_queue, runtime.perception.collect_passive_stimuli(cycle_id))
+    logger.info(
+        "cycle C%s runtime recovery finished in %.1f ms",
+        cycle_id,
+        elapsed_ms(recovery_started_at),
+    )
+    passive_started_at = time.perf_counter()
+    passive_stimuli = runtime.perception.collect_passive_stimuli(cycle_id)
+    _push_passive_stimuli(runtime.stimulus_queue, passive_stimuli)
+    logger.info(
+        "cycle C%s passive stimuli finished in %.1f ms (count=%d)",
+        cycle_id,
+        elapsed_ms(passive_started_at),
+        len(passive_stimuli),
+    )
+    controls_started_at = time.perf_counter()
     controls = pop_action_controls(_as_action_redis(runtime.stm.redis_client))
     runtime.action_manager.apply_controls(controls)
     runtime.action_manager.retry_deferred_actions()
+    logger.info(
+        "cycle C%s action controls finished in %.1f ms (count=%d)",
+        cycle_id,
+        elapsed_ms(controls_started_at),
+        len(controls),
+    )
+    selection_started_at = time.perf_counter()
     stimuli = _select_cycle_stimuli(runtime.stimulus_queue)
+    logger.info(
+        "cycle C%s stimulus selection finished in %.1f ms (count=%d)",
+        cycle_id,
+        elapsed_ms(selection_started_at),
+        len(stimuli),
+    )
+    perception_started_at = time.perf_counter()
     runtime.perception.observe_stimuli(cycle_id, stimuli)
     runtime.perception.observe_types(cycle_id, runtime.action_manager.pop_perception_observations())
     running_actions = runtime.action_manager.running_actions()
     perception_cues = runtime.perception.build_prompt_cues(cycle_id, running_actions)
+    logger.info(
+        "cycle C%s perception update finished in %.1f ms (running=%d, cues=%d)",
+        cycle_id,
+        elapsed_ms(perception_started_at),
+        len(running_actions),
+        len(perception_cues),
+    )
+    logger.info(
+        "cycle C%s prepare finished in %.1f ms (stimuli=%d)",
+        cycle_id,
+        elapsed_ms(prepare_started_at),
+        len(stimuli),
+    )
     return identity, last_redis_reconnect, last_pg_reconnect, stimuli, running_actions, perception_cues
 
 
@@ -627,7 +718,14 @@ def _execute_cycle(
 ) -> list[Thought]:
     cycle_started_at = time.perf_counter()
     cycle_status = "failed"
+    context_started_at = time.perf_counter()
     recent_thoughts = runtime.stm.get_context()
+    logger.info(
+        "cycle C%s stm get_context finished in %.1f ms (count=%d)",
+        cycle_id,
+        elapsed_ms(context_started_at),
+        len(recent_thoughts),
+    )
     try:
         ltm_started_at = time.perf_counter()
         ltm_context = _retrieve_associations(
@@ -671,7 +769,14 @@ def _execute_cycle(
             elapsed_ms(thought_cycle_started_at),
             len(thoughts),
         )
+        sanitize_started_at = time.perf_counter()
         _sanitize_cycle_trigger_refs(thoughts, recent_thoughts)
+        logger.info(
+            "cycle C%s trigger_ref sanitize finished in %.1f ms (count=%d)",
+            cycle_id,
+            elapsed_ms(sanitize_started_at),
+            len(thoughts),
+        )
         stm_started_at = time.perf_counter()
         runtime.stm.append(thoughts)
         logger.info("cycle C%s stm append finished in %.1f ms", cycle_id, elapsed_ms(stm_started_at))
