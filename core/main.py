@@ -84,13 +84,14 @@ EMBEDDING_EXCEPTIONS = (
     ValueError,
     TypeError,
 )
+RECENT_CONVERSATION_SUMMARY_TARGET_CHARS = 280
 RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT = (
     "你在为 Seedwake 压缩更早的对话历史。"
     "根据已有摘要和补充消息，写一段新的中文自然语言摘要，替换旧摘要。"
     "只概括不会直接展示的更早消息，不要把最近会直接展示的消息再写进去。"
     "不要逐条复读，不要项目符号，不要时间戳，不要消息编号。"
     "对方用名字称呼，assistant 用“我”。"
-    f"控制在 {RECENT_CONVERSATION_SUMMARY_MAX_CHARS} 字以内，只输出摘要正文。"
+    f"控制在 {RECENT_CONVERSATION_SUMMARY_TARGET_CHARS} 字以内，只输出摘要正文。"
 )
 RECENT_CONVERSATION_SUMMARY_BATCH_MAX_CHARS = 2400
 LTM_EXCEPTIONS = (
