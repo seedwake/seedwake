@@ -64,6 +64,9 @@ SEARCH_STIMULUS_TITLE_MAX_CHARS = 120
 SEARCH_STIMULUS_URL_MAX_CHARS = 160
 SEARCH_STIMULUS_SNIPPET_MAX_CHARS = 200
 SEND_MESSAGE_SUMMARY_MAX_CHARS = 120
+TELEGRAM_SEND_RETRY_DELAY_SECONDS = 30.0
+TELEGRAM_SEND_RETRY_ATTEMPTS = 10
+TELEGRAM_SEND_REQUEST_TIMEOUT_SECONDS = 10
 PLANNER_TIMEOUT_FIELD_DESCRIPTION = "本次动作的超时时间；不写则使用默认值。"
 SEARCH_RESULT_DATA_SHAPE = '{"results":[{"title":"","url":"","snippet":""}]}'
 SEARCH_RESULT_REQUIREMENTS = [
@@ -2458,11 +2461,12 @@ def _send_telegram_message(
     if chat_id is None:
         _log_telegram_send_finished(started_at, target_source, "invalid_telegram_target")
         return "invalid_telegram_target", reply_to_message_id
-    send_error = _send_telegram_message_once(
+    send_error = _send_telegram_message_with_retry_policy(
         token,
         chat_id,
         message_text,
-        timeout_seconds=timeout_seconds,
+        timeout_seconds=_telegram_request_timeout_seconds(timeout_seconds),
+        target_source=target_source,
         reply_to_message_id=reply_to_message_id,
     )
     delivered_reply_to = reply_to_message_id
@@ -2472,16 +2476,46 @@ def _send_telegram_message(
             target_source,
             reply_to_message_id,
         )
-        send_error = _send_telegram_message_once(
+        send_error = _send_telegram_message_with_retry_policy(
             token,
             chat_id,
             message_text,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=_telegram_request_timeout_seconds(timeout_seconds),
+            target_source=target_source,
             reply_to_message_id="",
         )
         delivered_reply_to = ""
     _log_telegram_send_finished(started_at, target_source, send_error or "ok")
     return send_error, delivered_reply_to
+
+
+def _send_telegram_message_with_retry_policy(
+    token: str,
+    chat_id: str,
+    message_text: str,
+    *,
+    timeout_seconds: int,
+    target_source: str,
+    reply_to_message_id: str,
+) -> str | None:
+    send_error = _send_telegram_message_once(
+        token,
+        chat_id,
+        message_text,
+        timeout_seconds=timeout_seconds,
+        reply_to_message_id=reply_to_message_id,
+    )
+    if send_error and _should_retry_transient_telegram_send_error(send_error):
+        return _retry_transient_telegram_send_error(
+            token,
+            chat_id,
+            message_text,
+            timeout_seconds=timeout_seconds,
+            target_source=target_source,
+            initial_error=send_error,
+            reply_to_message_id=reply_to_message_id,
+        )
+    return send_error
 
 
 def _send_telegram_message_once(
@@ -2558,6 +2592,66 @@ def _telegram_http_error_detail(exc: error.HTTPError) -> str:
 
 def _should_retry_without_reply_to(send_error: str) -> bool:
     return "message to be replied not found" in str(send_error or "").lower()
+
+
+def _should_retry_transient_telegram_send_error(send_error: str) -> bool:
+    lowered = str(send_error or "").lower()
+    if not lowered:
+        return False
+    if lowered.startswith("http_"):
+        return False
+    if lowered in {"telegram_token_missing", "invalid_telegram_target", "telegram_send_failed"}:
+        return False
+    transient_markers = (
+        "temporary failure",
+        "temporarily unavailable",
+        "connection refused",
+        "network is unreachable",
+        "no route to host",
+        "name or service not known",
+        "nodename nor servname provided",
+        "failed to establish a new connection",
+    )
+    return any(marker in lowered for marker in transient_markers)
+
+
+def _telegram_request_timeout_seconds(timeout_seconds: int) -> int:
+    return max(1, min(timeout_seconds, TELEGRAM_SEND_REQUEST_TIMEOUT_SECONDS))
+
+
+def _retry_transient_telegram_send_error(
+    token: str,
+    chat_id: str,
+    message_text: str,
+    *,
+    timeout_seconds: int,
+    target_source: str,
+    initial_error: str,
+    reply_to_message_id: str,
+) -> str | None:
+    send_error = initial_error
+    for attempt in range(1, TELEGRAM_SEND_RETRY_ATTEMPTS + 1):
+        logger.warning(
+            "telegram send transient failure for %s, retrying in %.1f s "
+            "(attempt %d/%d, reply_to=%s, error=%s)",
+            target_source,
+            TELEGRAM_SEND_RETRY_DELAY_SECONDS,
+            attempt,
+            TELEGRAM_SEND_RETRY_ATTEMPTS,
+            reply_to_message_id or "-",
+            send_error,
+        )
+        time.sleep(TELEGRAM_SEND_RETRY_DELAY_SECONDS)
+        send_error = _send_telegram_message_once(
+            token,
+            chat_id,
+            message_text,
+            timeout_seconds=_telegram_request_timeout_seconds(timeout_seconds),
+            reply_to_message_id=reply_to_message_id,
+        )
+        if not send_error or not _should_retry_transient_telegram_send_error(send_error):
+            return send_error
+    return send_error
 
 
 def _log_telegram_send_finished(

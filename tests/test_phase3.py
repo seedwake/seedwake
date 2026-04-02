@@ -27,6 +27,7 @@ from core.action import (
     _plan_delegate_tool_call,
     _planner_json_messages,
     _planner_tools,
+    _send_telegram_message,
     pop_action_controls,
     push_action_control,
 )
@@ -340,6 +341,12 @@ def _telegram_http_error(
             json.dumps({"ok": False, "description": description}, ensure_ascii=False).encode("utf-8")
         ),
     )
+
+
+def _urlopen_success_response() -> MagicMock:
+    response = MagicMock()
+    response.read.return_value = b'{"ok": true}'
+    return MagicMock(__enter__=MagicMock(return_value=response), __exit__=MagicMock(return_value=None))
 
 
 def _submit_send_message_success(
@@ -2853,6 +2860,93 @@ class ActionManagerTests(unittest.TestCase):
         req = mock_urlopen.call_args[0][0]
         body = json.loads(req.data.decode("utf-8"))
         self.assertEqual(body["reply_parameters"]["message_id"], 103)
+
+    def test_send_telegram_message_retries_transient_network_error(self) -> None:
+        transient_error = error.URLError(ConnectionRefusedError(111, "Connection refused"))
+        with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
+            with patch("core.action.request.urlopen", side_effect=[transient_error, _urlopen_success_response()]) as mock_urlopen:
+                with patch("core.action.time.sleep") as mock_sleep:
+                    send_error, delivered_reply_to = _send_telegram_message(
+                        "telegram:1",
+                        "我在。",
+                        timeout_seconds=30,
+                        reply_to_message_id="",
+                    )
+
+        self.assertIsNone(send_error)
+        self.assertEqual(delivered_reply_to, "")
+        self.assertEqual(mock_urlopen.call_count, 2)
+        mock_sleep.assert_called_once_with(30.0)
+        self.assertEqual(mock_urlopen.call_args_list[0].kwargs["timeout"], 10)
+        self.assertEqual(mock_urlopen.call_args_list[1].kwargs["timeout"], 10)
+
+    def test_send_telegram_message_stops_after_max_transient_retries(self) -> None:
+        transient_error = error.URLError(ConnectionRefusedError(111, "Connection refused"))
+        with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
+            with patch("core.action.request.urlopen", side_effect=[transient_error] * 11) as mock_urlopen:
+                with patch("core.action.time.sleep") as mock_sleep:
+                    send_error, delivered_reply_to = _send_telegram_message(
+                        "telegram:1",
+                        "我在。",
+                        timeout_seconds=30,
+                        reply_to_message_id="",
+                    )
+
+        self.assertIn("Connection refused", str(send_error))
+        self.assertEqual(delivered_reply_to, "")
+        self.assertEqual(mock_urlopen.call_count, 11)
+        self.assertEqual(mock_sleep.call_count, 10)
+
+    def test_send_telegram_message_does_not_retry_ambiguous_reset_error(self) -> None:
+        transient_error = error.URLError(ConnectionResetError(104, "Connection reset by peer"))
+        with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
+            with patch("core.action.request.urlopen", side_effect=[transient_error]) as mock_urlopen:
+                with patch("core.action.time.sleep") as mock_sleep:
+                    send_error, delivered_reply_to = _send_telegram_message(
+                        "telegram:1",
+                        "我在。",
+                        timeout_seconds=30,
+                        reply_to_message_id="",
+                    )
+
+        self.assertIn("Connection reset by peer", str(send_error))
+        self.assertEqual(delivered_reply_to, "")
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    def test_send_telegram_message_retries_then_drops_missing_reply_to(self) -> None:
+        transient_error = error.URLError(ConnectionRefusedError(111, "Connection refused"))
+        with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
+            with patch(
+                "core.action.request.urlopen",
+                side_effect=[
+                    transient_error,
+                    _telegram_http_error(
+                        code=400,
+                        msg="bad request",
+                        description="Bad Request: message to be replied not found",
+                    ),
+                    _urlopen_success_response(),
+                ],
+            ) as mock_urlopen:
+                with patch("core.action.time.sleep") as mock_sleep:
+                    send_error, delivered_reply_to = _send_telegram_message(
+                        "telegram:1",
+                        "我在。",
+                        timeout_seconds=30,
+                        reply_to_message_id="103",
+                    )
+
+        self.assertIsNone(send_error)
+        self.assertEqual(delivered_reply_to, "")
+        self.assertEqual(mock_urlopen.call_count, 3)
+        mock_sleep.assert_called_once_with(30.0)
+        first_body = json.loads(mock_urlopen.call_args_list[0][0][0].data.decode("utf-8"))
+        second_body = json.loads(mock_urlopen.call_args_list[1][0][0].data.decode("utf-8"))
+        third_body = json.loads(mock_urlopen.call_args_list[2][0][0].data.decode("utf-8"))
+        self.assertEqual(first_body["reply_parameters"]["message_id"], 103)
+        self.assertEqual(second_body["reply_parameters"]["message_id"], 103)
+        self.assertNotIn("reply_parameters", third_body)
 
     def test_native_send_message_retries_without_reply_to_when_reply_target_missing(self) -> None:
         queue = StimulusQueue(redis_client=None)
