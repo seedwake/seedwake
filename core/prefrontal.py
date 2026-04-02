@@ -5,7 +5,6 @@ Semantic understanding of notes and goals is left to the model itself via prompt
 """
 
 import json
-from dataclasses import replace
 
 import redis as redis_lib
 
@@ -86,7 +85,6 @@ class PrefrontalManager:
         recent_thoughts: list[Thought],
         stimuli: list[Stimulus],
         sleep_state: SleepStateSnapshot,
-        active_habits: list[HabitPromptEntry],
     ) -> tuple[list[Thought], list[str]]:
         if not self._inhibition_enabled:
             return thoughts, []
@@ -184,10 +182,17 @@ def _copy_state(state: PrefrontalPromptState) -> PrefrontalPromptState:
 
 
 def _replace_thought_action_requests(thought: Thought, action_requests: list[RawActionRequest]) -> Thought:
-    return replace(
-        thought,
+    return Thought(
+        thought_id=thought.thought_id,
+        cycle_id=thought.cycle_id,
+        index=thought.index,
+        type=thought.type,
+        content=thought.content,
+        trigger_ref=thought.trigger_ref,
         action_request=action_requests[0] if action_requests else None,
         additional_action_requests=action_requests[1:],
+        attention_weight=thought.attention_weight,
+        timestamp=thought.timestamp,
     )
 
 

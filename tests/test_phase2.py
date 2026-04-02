@@ -733,7 +733,7 @@ class Phase4RuntimeTests(unittest.TestCase):
             "updated_at": "2026-01-01T00:00:00+00:00",
         }
 
-        _post_cycle_phase4(_as_runtime(runtime), 12, [], [_make_thought(12, 1, "now")], False)
+        _post_cycle_phase4(_as_runtime(runtime), 12, [], False)
 
         sleep.consume_cycle.assert_called_once()
         sleep.run_light_sleep.assert_called_once()
@@ -1002,7 +1002,6 @@ class Phase4RuntimeTests(unittest.TestCase):
                 _as_runtime(runtime),
                 12,
                 [],
-                [_make_thought(12, 1, "now")],
                 False,
             )
 

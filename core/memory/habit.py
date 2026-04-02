@@ -565,21 +565,33 @@ def _activation_patterns_from_thoughts(thoughts: list[Thought]) -> list[tuple[st
 
 
 def _habit_patterns_from_thought(thought: Thought) -> list[tuple[str, str]]:
-    action_requests = thought_action_requests(thought)
-    if action_requests:
-        seen_action_types: set[str] = set()
-        patterns: list[tuple[str, str]] = []
-        for action_request in action_requests:
-            action_type = str(action_request.get("type") or "").strip()
-            if not action_type or action_type in seen_action_types:
-                continue
-            seen_action_types.add(action_type)
-            patterns.append((f"经常会冒出 {action_type} 行动冲动", "behavioral"))
-        if patterns:
-            return patterns
+    action_patterns = _action_habit_patterns(thought)
+    if action_patterns:
+        return action_patterns
     normalized = _normalize_habit_text(thought.content)
     if len(normalized) < HABIT_MIN_PATTERN_LENGTH:
         return []
+    text_pattern = _text_habit_pattern(normalized, thought)
+    return [text_pattern] if text_pattern is not None else []
+
+
+def _normalize_habit_text(text: str) -> str:
+    return " ".join(str(text).replace("\n", " ").split())
+
+
+def _action_habit_patterns(thought: Thought) -> list[tuple[str, str]]:
+    seen_action_types: set[str] = set()
+    patterns: list[tuple[str, str]] = []
+    for action_request in thought_action_requests(thought):
+        action_type = str(action_request.get("type") or "").strip()
+        if not action_type or action_type in seen_action_types:
+            continue
+        seen_action_types.add(action_type)
+        patterns.append((f"经常会冒出 {action_type} 行动冲动", "behavioral"))
+    return patterns
+
+
+def _text_habit_pattern(normalized: str, thought: Thought) -> tuple[str, str] | None:
     clauses = re.split(r"[，。！？；,.!?;]+", normalized)
     for clause in clauses:
         compact = clause.strip()
@@ -587,12 +599,8 @@ def _habit_patterns_from_thought(thought: Thought) -> list[tuple[str, str]]:
             continue
         if compact in HABIT_TEXT_STOPWORDS:
             continue
-        return [(compact[:48], _habit_category(thought))]
-    return []
-
-
-def _normalize_habit_text(text: str) -> str:
-    return " ".join(str(text).replace("\n", " ").split())
+        return compact[:48], _habit_category(thought)
+    return None
 
 
 def _habit_category(thought: Thought) -> str:

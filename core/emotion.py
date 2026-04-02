@@ -91,7 +91,7 @@ class EmotionManager:
         # Adaptive fusion: LLM weight depends on inference quality
         llm_weight = _llm_fusion_weight(llm_inferred, self._dimensions)
         struct_weight = 1.0 - llm_weight
-        inferred = {dimension: 0.0 for dimension in self._dimensions}
+        inferred = dict.fromkeys(self._dimensions, 0.0)
         for dimension in self._dimensions:
             llm_value = llm_inferred.get(dimension, 0.0)
             struct_value = structural.get(dimension, 0.0)
@@ -160,7 +160,7 @@ class EmotionManager:
             self._redis = None
 
     def _default_snapshot(self) -> EmotionSnapshot:
-        dimensions = {dimension: 0.0 for dimension in self._dimensions}
+        dimensions = dict.fromkeys(self._dimensions, 0.0)
         dominant = self._dimensions[0]
         return {
             "dimensions": dimensions,

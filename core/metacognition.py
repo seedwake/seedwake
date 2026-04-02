@@ -60,7 +60,7 @@ class MetacognitionManager:
         for raw_item in raw_items:
             try:
                 payload = json.loads(_decode_redis_value(raw_item))
-            except (json.JSONDecodeError, TypeError, ValueError):
+            except (TypeError, ValueError):
                 continue
             if not isinstance(payload, dict):
                 continue

@@ -1972,16 +1972,6 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 "last_deep_sleep_at": "",
                 "summary": "",
             },
-            active_habits=[
-                {
-                    "id": 1,
-                    "pattern": "一遇到不确定就先去多看资料",
-                    "category": "cognitive",
-                    "strength": 0.66,
-                    "activation_score": 0.84,
-                    "manifested": True,
-                }
-            ],
         )
 
         self.assertEqual(notes, [])

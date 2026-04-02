@@ -320,7 +320,7 @@ def _build_runtime_components(
         reconnect_interval=reconnect_interval,
         bootstrap_identity=bootstrap_identity,
         bootstrap_habits=[
-            item for item in list(config.get("bootstrap", {}).get("habits", []) or [])
+            item for item in (config.get("bootstrap", {}).get("habits", []) or [])
             if isinstance(item, dict)
         ],
     )
@@ -453,7 +453,7 @@ def _run_engine_loop(
             continue
 
         _finish_cycle(log_file, cycle_id, stimuli, new_thoughts)
-        if _safe_post_cycle_phase4(runtime, cycle_id, stimuli, new_thoughts, degeneration_alert):
+        if _safe_post_cycle_phase4(runtime, cycle_id, stimuli, degeneration_alert):
             _graceful_restart_core(log_file, prompt_log_file, runtime.action_manager)
         last_completed_cycle_id = cycle_id
         pending_cycle_id = None
@@ -492,7 +492,6 @@ def _post_cycle_phase4(
     runtime: EngineRuntime,
     cycle_id: int,
     stimuli: list[Stimulus],
-    thoughts: list[Thought],
     degeneration_alert: bool,
 ) -> bool:
     failure_count = _failed_action_echo_count(stimuli)
@@ -574,11 +573,10 @@ def _safe_post_cycle_phase4(
     runtime: EngineRuntime,
     cycle_id: int,
     stimuli: list[Stimulus],
-    thoughts: list[Thought],
     degeneration_alert: bool,
 ) -> bool:
     try:
-        return _post_cycle_phase4(runtime, cycle_id, stimuli, thoughts, degeneration_alert)
+        return _post_cycle_phase4(runtime, cycle_id, stimuli, degeneration_alert)
     except MAIN_LOOP_EXCEPTIONS as exc:
         logger.exception("phase4 post-cycle processing failed at cycle %s: %s", cycle_id, exc)
         return False
@@ -1082,7 +1080,6 @@ def _execute_cycle(
             recent_thoughts,
             stimuli,
             current_sleep_state,
-            active_habits,
         )
         logger.info(
             "cycle C%s prefrontal review finished in %.1f ms (inhibited=%d)",

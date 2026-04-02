@@ -444,6 +444,9 @@ def _extract_payload_text(result_payload: dict) -> str:
     return "\n\n".join(texts).strip()
 
 
+OPENCLAW_COMPLETION_SUMMARY = "OpenClaw 完成任务"
+
+
 def _optional_text(value: JsonValue) -> str | None:
     if not isinstance(value, str):
         return None
@@ -470,7 +473,7 @@ def _normalize_worker_text(text: str) -> ActionResultEnvelope:
         data = parsed.get("data")
         return _build_gateway_result(
             ok=bool(parsed.get("ok", True)),
-            summary=str(parsed.get("summary") or text or "OpenClaw 完成任务"),
+            summary=str(parsed.get("summary") or text or OPENCLAW_COMPLETION_SUMMARY),
             data=dict(data) if isinstance(data, dict) else {},
             error_detail=parsed.get("error"),
             run_id=None,
@@ -485,7 +488,7 @@ def _normalize_worker_text(text: str) -> ActionResultEnvelope:
     if summary is not None or ok is not None or salvaged_data or salvaged_error is not None:
         return _build_gateway_result(
             ok=True if ok is None else ok,
-            summary=summary or text or "OpenClaw 完成任务",
+            summary=summary or text or OPENCLAW_COMPLETION_SUMMARY,
             data=salvaged_data,
             error_detail=salvaged_error,
             run_id=None,
@@ -495,7 +498,7 @@ def _normalize_worker_text(text: str) -> ActionResultEnvelope:
         )
     return _build_gateway_result(
         ok=True,
-        summary=text or "OpenClaw 完成任务",
+        summary=text or OPENCLAW_COMPLETION_SUMMARY,
         data={},
         error_detail=None,
         run_id=None,
