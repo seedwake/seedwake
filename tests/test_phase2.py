@@ -904,6 +904,77 @@ class Phase4RuntimeTests(unittest.TestCase):
         self.assertTrue(ltm.store.called)
         self.assertEqual(ltm.store.call_args_list[0].kwargs["memory_type"], "episodic")
 
+    @patch("core.sleep._update_impression_memories", return_value=0)
+    @patch("core.sleep._store_light_sleep_semantic_memories", return_value=0)
+    @patch("core.sleep.embed_text", return_value=[0.1, 0.2])
+    def test_run_light_sleep_skips_batch_duplicate_episodic_embeddings(
+        self,
+        mock_embed: MagicMock,
+        _mock_semantic: MagicMock,
+        _mock_impressions: MagicMock,
+    ) -> None:
+        sleep = SleepManager(
+            None,
+            energy_per_cycle=0.2,
+            drowsy_threshold=30,
+            light_sleep_recovery=70,
+            deep_sleep_trigger_hours=24,
+            archive_importance_threshold=0.1,
+            deep_sleep_failure_threshold=3,
+            deep_sleep_active_memory_threshold=5000,
+            inactive_purge_days=30,
+            restart_after_deep_sleep=False,
+        )
+        stm = ShortTermMemory(redis_client=None, context_window=1)
+        duplicate_1 = Thought(
+            thought_id="C12-1",
+            cycle_id=12,
+            index=1,
+            type="反思",
+            content="我在这里重复看同一件事。",
+        )
+        duplicate_1.attention_weight = 0.9
+        duplicate_2 = Thought(
+            thought_id="C12-2",
+            cycle_id=12,
+            index=2,
+            type="反思",
+            content="我在这里重复看同一件事。",
+        )
+        duplicate_2.attention_weight = 0.8
+        filler_1 = _make_thought(12, 3, "当前轮一")
+        filler_2 = _make_thought(12, 4, "当前轮二")
+        filler_3 = _make_thought(12, 5, "当前轮三")
+        stm.append([duplicate_1, duplicate_2, filler_1, filler_2, filler_3])
+        ltm = MagicMock()
+        ltm.existing_contents.return_value = set()
+        ltm.store.return_value = 1
+        ltm.cool_inactive_memories.return_value = 0
+        habit_memory = MagicMock()
+        habit_memory.strengthen_from_sleep.return_value = []
+        emotion = {
+            "dimensions": {"curiosity": 0.2},
+            "dominant": "curiosity",
+            "summary": "好奇 0.20",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        }
+
+        sleep.run_light_sleep(
+            cycle_id=12,
+            stm=stm,
+            ltm=ltm,
+            habit_memory=habit_memory,
+            embedding_client=MagicMock(),
+            embedding_model="embed-model",
+            auxiliary_client=MagicMock(),
+            auxiliary_model_config={"name": "aux"},
+            emotion=emotion,
+        )
+
+        self.assertEqual(mock_embed.call_count, 1)
+        ltm.store.assert_called_once()
+        self.assertEqual(stm.buffer_thoughts(), [])
+
     def test_light_sleep_trace_line_strips_action_markers(self) -> None:
         thought = Thought(
             thought_id="C12-4",

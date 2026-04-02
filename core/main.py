@@ -494,6 +494,7 @@ def _post_cycle_phase4(
     stimuli: list[Stimulus],
     degeneration_alert: bool,
 ) -> bool:
+    phase4_started_at = time.perf_counter()
     failure_count = _failed_action_echo_count(stimuli)
     sleep_state = runtime.sleep.consume_cycle(
         cycle_id,
@@ -515,6 +516,8 @@ def _post_cycle_phase4(
         degeneration_alert=degeneration_alert,
         active_memory_count=active_memory_count,
     ):
+        logger.info("cycle C%s entering deep sleep (buffer=%d, active_ltm=%d)", cycle_id, len(buffer_thoughts), active_memory_count)
+        sleep_started_at = time.perf_counter()
         result = runtime.sleep.run_deep_sleep(
             cycle_id=cycle_id,
             stm=runtime.stm,
@@ -527,8 +530,9 @@ def _post_cycle_phase4(
             emotion=runtime.emotion.current(),
         )
         logger.info(
-            "cycle C%s deep sleep finished (archived=%d, semantic=%d, impressions=%d, action_results=%d, habits=%d, cooled=%d, maintenance=%d, expired=%d, summary=%s, review=%s, restart=%s)",
+            "cycle C%s deep sleep finished in %.1f ms (archived=%d, semantic=%d, impressions=%d, action_results=%d, habits=%d, cooled=%d, maintenance=%d, expired=%d, summary=%s, review=%s, restart=%s)",
             cycle_id,
+            elapsed_ms(sleep_started_at),
             result.archived_count,
             result.semantic_count,
             result.impression_updates,
@@ -542,8 +546,11 @@ def _post_cycle_phase4(
             result.restart_requested,
         )
         runtime.manas.note_sleep_transition(result.deep_summary or result.state["summary"])
+        logger.info("cycle C%s post-cycle phase4 finished in %.1f ms", cycle_id, elapsed_ms(phase4_started_at))
         return result.restart_requested
     if runtime.sleep.should_light_sleep(degeneration_alert=degeneration_alert, buffer_thoughts=buffer_thoughts):
+        logger.info("cycle C%s entering light sleep (buffer=%d)", cycle_id, len(buffer_thoughts))
+        sleep_started_at = time.perf_counter()
         result = runtime.sleep.run_light_sleep(
             cycle_id=cycle_id,
             stm=runtime.stm,
@@ -556,8 +563,9 @@ def _post_cycle_phase4(
             emotion=runtime.emotion.current(),
         )
         logger.info(
-            "cycle C%s light sleep finished (archived=%d, semantic=%d, impressions=%d, action_results=%d, habits=%d, cooled=%d)",
+            "cycle C%s light sleep finished in %.1f ms (archived=%d, semantic=%d, impressions=%d, action_results=%d, habits=%d, cooled=%d)",
             cycle_id,
+            elapsed_ms(sleep_started_at),
             result.archived_count,
             result.semantic_count,
             result.impression_updates,
@@ -566,6 +574,7 @@ def _post_cycle_phase4(
             result.cooled_memories,
         )
         runtime.manas.note_sleep_transition(result.state["summary"])
+    logger.info("cycle C%s post-cycle phase4 finished in %.1f ms", cycle_id, elapsed_ms(phase4_started_at))
     return False
 
 

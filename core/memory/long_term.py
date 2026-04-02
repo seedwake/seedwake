@@ -142,6 +142,45 @@ class LongTermMemory:
                 len(normalized_content),
             )
 
+    def existing_contents(self, contents: list[str], memory_type: str) -> set[str]:
+        """Return the subset of *contents* that already exist in active LTM for the given type."""
+        if not self.available or not contents:
+            return set()
+        conn = self._conn
+        if conn is None:
+            return set()
+        unique = list({c.strip() for c in contents if c.strip()})
+        if not unique:
+            return set()
+        started_at = time.perf_counter()
+        found: set[str] = set()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT content
+                    FROM long_term_memory
+                    WHERE is_active = TRUE
+                      AND memory_type = %s
+                      AND content = ANY(%s)
+                    """,
+                    (memory_type, unique),
+                )
+                for row in cur.fetchall():
+                    found.add(str(row[0]))
+            return found
+        except psycopg.Error:
+            conn.rollback()
+            raise
+        finally:
+            logger.info(
+                "ltm existing_contents finished in %.1f ms (checked=%d, found=%d, type=%s)",
+                elapsed_ms(started_at),
+                len(unique),
+                len(found),
+                memory_type,
+            )
+
     def search(
         self,
         query_embedding: list[float],

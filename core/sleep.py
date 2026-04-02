@@ -1,6 +1,7 @@
 """Sleep and energy management for Phase 4."""
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
@@ -20,7 +21,7 @@ from core.stimulus import (
     load_conversation_history,
 )
 from core.thought_parser import Thought, strip_action_markers
-from core.types import ConversationEntry, EmotionSnapshot, JsonObject, SleepStateSnapshot
+from core.types import ConversationEntry, EmotionSnapshot, JsonObject, SleepStateSnapshot, elapsed_ms
 
 SLEEP_STATE_KEY = "seedwake:sleep_state"
 LIGHT_SLEEP_SEMANTIC_BATCH_MAX_CHARS = 1800
@@ -165,12 +166,42 @@ class SleepManager:
         auxiliary_model_config: dict,
         emotion: EmotionSnapshot,
     ) -> SleepRunResult:
+        # -- 1. episodic archive --
+        archive_started_at = time.perf_counter()
         buffer_thoughts = stm.buffer_thoughts()
         archived = _archive_candidates(buffer_thoughts, self._archive_importance_threshold)
+        already_stored = ltm.existing_contents(
+            [thought.content for thought in archived],
+            memory_type="episodic",
+        )
+        grouped_new_candidates: dict[str, list[Thought]] = {}
+        new_candidates: list[Thought] = []
+        already_stored_thought_count = 0
+        for thought in archived:
+            normalized_content = thought.content.strip()
+            if normalized_content in already_stored:
+                already_stored_thought_count += 1
+                continue
+            grouped_new_candidates.setdefault(normalized_content, []).append(thought)
+            if len(grouped_new_candidates[normalized_content]) == 1:
+                new_candidates.append(thought)
+        duplicate_candidates = sum(len(group) - 1 for group in grouped_new_candidates.values())
+        logger.info(
+            "light sleep archive pre-filter: candidates=%d, already_stored=%d, new=%d, batch_duplicates=%d",
+            len(archived),
+            already_stored_thought_count,
+            len(new_candidates),
+            duplicate_candidates,
+        )
         archived_count = 0
         archived_ids: list[str] = []
         archived_texts: list[str] = []
+        # Mark already-stored thoughts for STM cleanup only (no semantic re-processing)
         for thought in archived:
+            if thought.content.strip() in already_stored:
+                archived_ids.append(thought.thought_id)
+        for thought in new_candidates:
+            content_group = grouped_new_candidates.get(thought.content.strip(), [thought])
             try:
                 embedding = embed_text(embedding_client, thought.content, embedding_model)
             except MODEL_CLIENT_EXCEPTIONS:
@@ -186,10 +217,22 @@ class SleepManager:
             if entry_id is None:
                 continue
             archived_count += 1
-            archived_ids.append(thought.thought_id)
-            archived_texts.append(_light_sleep_trace_line(thought))
+            for grouped_thought in content_group:
+                archived_ids.append(grouped_thought.thought_id)
+                archived_texts.append(_light_sleep_trace_line(grouped_thought))
         if archived_ids:
             stm.forget_thought_ids(archived_ids)
+        logger.info(
+            "light sleep episodic archive finished in %.1f ms (buffer=%d, archived=%d, skipped=%d, deduplicated=%d)",
+            elapsed_ms(archive_started_at),
+            len(buffer_thoughts),
+            archived_count,
+            already_stored_thought_count,
+            duplicate_candidates,
+        )
+
+        # -- 2. action result archive --
+        action_result_started_at = time.perf_counter()
         action_result_stimuli = load_action_result_history(self._redis, limit=LIGHT_SLEEP_ACTION_RESULT_LIMIT)
         archived_action_result_ids = _archive_action_result_memories(
             ltm,
@@ -206,6 +249,15 @@ class SleepManager:
                 for stimulus in action_result_stimuli
                 if stimulus.stimulus_id in archived_action_result_id_set
             )
+        logger.info(
+            "light sleep action result archive finished in %.1f ms (loaded=%d, archived=%d)",
+            elapsed_ms(action_result_started_at),
+            len(action_result_stimuli),
+            len(archived_action_result_ids),
+        )
+
+        # -- 3. semantic memory extraction --
+        semantic_started_at = time.perf_counter()
         semantic_count = _store_light_sleep_semantic_memories(
             ltm,
             embedding_client,
@@ -216,6 +268,14 @@ class SleepManager:
             emotion=emotion,
             trace_lines=archived_texts,
         )
+        logger.info(
+            "light sleep semantic extraction finished in %.1f ms (stored=%d)",
+            elapsed_ms(semantic_started_at),
+            semantic_count,
+        )
+
+        # -- 4. impression updates --
+        impression_started_at = time.perf_counter()
         impression_updates = _update_impression_memories(
             self._redis,
             ltm,
@@ -226,6 +286,14 @@ class SleepManager:
             cycle_id=cycle_id,
             emotion=emotion,
         )
+        logger.info(
+            "light sleep impression updates finished in %.1f ms (updated=%d)",
+            elapsed_ms(impression_started_at),
+            impression_updates,
+        )
+
+        # -- 5. habit strengthening --
+        habit_started_at = time.perf_counter()
         created_habits = len(
             habit_memory.strengthen_from_sleep(
                 archived,
@@ -234,7 +302,21 @@ class SleepManager:
             )
         )
         habit_memory.decay_inactive()
+        logger.info(
+            "light sleep habit processing finished in %.1f ms (strengthened=%d)",
+            elapsed_ms(habit_started_at),
+            created_habits,
+        )
+
+        # -- 6. memory cooling --
+        cool_started_at = time.perf_counter()
         cooled = ltm.cool_inactive_memories()
+        logger.info(
+            "light sleep memory cooling finished in %.1f ms (cooled=%d)",
+            elapsed_ms(cool_started_at),
+            cooled,
+        )
+
         self._shadow["energy"] = min(100.0, self._light_sleep_recovery)
         self._shadow["mode"] = "awake"
         self._shadow["last_light_sleep_cycle"] = cycle_id
@@ -279,10 +361,24 @@ class SleepManager:
             auxiliary_model_config=auxiliary_model_config,
             emotion=emotion,
         )
+
+        merge_started_at = time.perf_counter()
         merged = ltm.merge_exact_duplicates()
+        logger.info("deep sleep merge duplicates finished in %.1f ms (merged=%d)", elapsed_ms(merge_started_at), merged)
+
+        prune_started_at = time.perf_counter()
         pruned = ltm.prune_low_importance()
+        logger.info("deep sleep prune low importance finished in %.1f ms (pruned=%d)", elapsed_ms(prune_started_at), pruned)
+
+        maintenance_started_at = time.perf_counter()
         maintenance_operations = ltm.run_deep_sleep_maintenance()
+        logger.info("deep sleep maintenance finished in %.1f ms (ops=%d)", elapsed_ms(maintenance_started_at), maintenance_operations)
+
+        purge_started_at = time.perf_counter()
         expired_count = ltm.purge_inactive_memories(older_than_days=self._inactive_purge_days)
+        logger.info("deep sleep purge inactive finished in %.1f ms (expired=%d)", elapsed_ms(purge_started_at), expired_count)
+
+        summary_started_at = time.perf_counter()
         deep_summary = _generate_deep_sleep_summary(
             auxiliary_client,
             auxiliary_model_config,
@@ -294,6 +390,9 @@ class SleepManager:
             maintenance_count=maintenance_operations,
             expired_count=expired_count,
         )
+        logger.info("deep sleep summary generation finished in %.1f ms", elapsed_ms(summary_started_at))
+
+        review_started_at = time.perf_counter()
         self_review = _generate_deep_sleep_review(
             auxiliary_client,
             auxiliary_model_config,
@@ -308,6 +407,8 @@ class SleepManager:
             pruned_count=pruned,
             expired_count=expired_count,
         )
+        logger.info("deep sleep self-review generation finished in %.1f ms", elapsed_ms(review_started_at))
+
         now = datetime.now(timezone.utc).isoformat()
         self._shadow["energy"] = 100.0
         self._shadow["mode"] = "awake"
@@ -430,12 +531,18 @@ def _archive_action_result_memories(
 ) -> list[str]:
     archived_ids: list[str] = []
     seen_contents: set[str] = set()
-    for stimulus in stimuli:
-        content = " ".join(stimulus.content.split()).strip()
+    unique_contents = [" ".join(s.content.split()).strip() for s in stimuli]
+    already_stored = ltm.existing_contents(
+        [c for c in unique_contents if c],
+        memory_type="action_result",
+    )
+    for stimulus, content in zip(stimuli, unique_contents):
         if not content:
             continue
-        if content in seen_contents:
+        if content in seen_contents or content in already_stored:
             archived_ids.append(stimulus.stimulus_id)
+            if content not in seen_contents:
+                seen_contents.add(content)
             continue
         seen_contents.add(content)
         try:
