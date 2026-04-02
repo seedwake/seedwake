@@ -8,7 +8,7 @@ import time
 import psycopg
 
 from core.stimulus import Stimulus
-from core.thought_parser import Thought
+from core.thought_parser import Thought, thought_action_requests
 from core.types import HabitPromptEntry, elapsed_ms
 
 logger_name = __name__
@@ -230,13 +230,10 @@ class HabitMemory:
 def _extract_habit_patterns(thoughts: list[Thought]) -> list[tuple[str, str, float]]:
     patterns: dict[tuple[str, str], tuple[int, float]] = {}
     for thought in thoughts:
-        pattern = _habit_pattern_from_thought(thought)
-        if not pattern:
-            continue
-        category = _habit_category(thought)
-        key = (pattern, category)
-        count, strength = patterns.get(key, (0, 0.18))
-        patterns[key] = (count + 1, min(0.95, strength + 0.08))
+        for pattern, category in _habit_patterns_from_thought(thought):
+            key = (pattern, category)
+            count, strength = patterns.get(key, (0, 0.18))
+            patterns[key] = (count + 1, min(0.95, strength + 0.08))
     return [
         (pattern, category, strength)
         for (pattern, category), (count, strength) in patterns.items()
@@ -244,14 +241,22 @@ def _extract_habit_patterns(thoughts: list[Thought]) -> list[tuple[str, str, flo
     ]
 
 
-def _habit_pattern_from_thought(thought: Thought) -> str:
-    if thought.action_request is not None:
-        action_type = str(thought.action_request.get("type") or "").strip()
-        if action_type:
-            return f"经常会冒出 {action_type} 行动冲动"
+def _habit_patterns_from_thought(thought: Thought) -> list[tuple[str, str]]:
+    action_requests = thought_action_requests(thought)
+    if action_requests:
+        seen_action_types: set[str] = set()
+        patterns: list[tuple[str, str]] = []
+        for action_request in action_requests:
+            action_type = str(action_request.get("type") or "").strip()
+            if not action_type or action_type in seen_action_types:
+                continue
+            seen_action_types.add(action_type)
+            patterns.append((f"经常会冒出 {action_type} 行动冲动", "behavioral"))
+        if patterns:
+            return patterns
     normalized = _normalize_habit_text(thought.content)
     if len(normalized) < HABIT_MIN_PATTERN_LENGTH:
-        return ""
+        return []
     clauses = re.split(r"[，。！？；,.!?;]+", normalized)
     for clause in clauses:
         compact = clause.strip()
@@ -259,13 +264,11 @@ def _habit_pattern_from_thought(thought: Thought) -> str:
             continue
         if compact in HABIT_TEXT_STOPWORDS:
             continue
-        return compact[:48]
-    return ""
+        return [(compact[:48], _habit_category(thought))]
+    return []
 
 
 def _habit_category(thought: Thought) -> str:
-    if thought.action_request is not None:
-        return "behavioral"
     if thought.type == "反应":
         return "emotional"
     return "cognitive"

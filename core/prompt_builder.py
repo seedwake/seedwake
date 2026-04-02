@@ -90,6 +90,7 @@ SYSTEM_PROMPT = """\
 - 回复别人时，如果想针对某条具体消息，用 reply_to 带上对方的 msg id；不带则发普通消息
 """
 
+ACTION_MARKER_PATTERN = re.compile(r"\s*\{action:[^}]+\}", re.DOTALL)
 ACTION_MARKER_SUFFIX_PATTERN = re.compile(r"\s*\{action:[^}]+\}\s*$")
 ACTION_ECHO_ORIGIN = "action"
 PASSIVE_STIMULUS_LABELS = {
@@ -513,7 +514,8 @@ def _format_thought_history(thoughts: list[Thought]) -> str:
             current_cycle = t.cycle_id
             lines.append(f"--- 第 {t.cycle_id} 轮 ---")
         trigger = f" (← {t.trigger_ref})" if t.trigger_ref else ""
-        lines.append(f"[{t.type}-{t.thought_id}] {t.content}{trigger}")
+        content = _strip_action_markers(t.content) or t.content
+        lines.append(f"[{t.type}-{t.thought_id}] {content}{trigger}")
     return _render_section("最近的念头", lines)
 
 
@@ -586,7 +588,7 @@ def _stagnation_sources(
 
 
 def _normalize_stagnation_text(text: str) -> str:
-    stripped = _strip_action_marker(text)
+    stripped = _strip_action_markers(text)
     normalized = re.sub(r"[^\w\u4e00-\u9fff]+", " ", stripped)
     return _compact_prompt_text(normalized)
 
@@ -851,6 +853,10 @@ def _running_message_excerpt(message: str) -> str:
 
 def _strip_action_marker(content: str) -> str:
     return ACTION_MARKER_SUFFIX_PATTERN.sub("", content).strip()
+
+
+def _strip_action_markers(content: str) -> str:
+    return ACTION_MARKER_PATTERN.sub("", content).strip()
 
 
 def _compact_prompt_text(text: str) -> str:

@@ -40,6 +40,7 @@ from core.main import (
     _select_cycle_stimuli,
     _summarize_recent_conversation,
 )
+from core.memory.habit import _extract_habit_patterns
 from core.model_client import ModelClient
 from core.openclaw_gateway import (
     OpenClawGatewayExecutor,
@@ -75,6 +76,7 @@ def _make_thought(
     thought_type: str = "意图",
     content: str = "我想查一下时间",
     action_request: RawActionRequest | JsonObject | None = None,
+    additional_action_requests: list[RawActionRequest | JsonObject] | None = None,
 ) -> Thought:
     return Thought(
         thought_id=f"C{cycle_id}-{index}",
@@ -83,6 +85,7 @@ def _make_thought(
         type=thought_type,
         content=content,
         action_request=_as_raw_action_request(action_request),
+        additional_action_requests=_as_raw_action_requests(additional_action_requests),
     )
 
 
@@ -182,6 +185,14 @@ def _as_raw_action_request(value: RawActionRequest | JsonObject | None) -> RawAc
     if value is None:
         return None
     return cast(RawActionRequest, value)
+
+
+def _as_raw_action_requests(
+    values: list[RawActionRequest | JsonObject] | None,
+) -> list[RawActionRequest]:
+    if values is None:
+        return []
+    return [cast(RawActionRequest, value) for value in values]
 
 
 class _JsonPlannerClient(ModelClient):
@@ -1070,6 +1081,24 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         self.assertNotIn("## 我的笔记", prompt)
 
+    def test_prompt_thought_history_strips_all_action_markers(self) -> None:
+        prompt = build_prompt(
+            3,
+            {"self_description": "我是 Seedwake。"},
+            [
+                _make_thought(
+                    cycle_id=2,
+                    index=1,
+                    thought_type="意图",
+                    content='先记下来 {action:note_rewrite, content:"记一下"} 再回一句 {action:send_message, message:"我在。"}',
+                )
+            ],
+            30,
+        )
+
+        self.assertIn("[意图-C2-1] 先记下来 再回一句", prompt)
+        self.assertNotIn("[意图-C2-1] 先记下来 {action:note_rewrite", prompt)
+
     def test_action_echo_section_lists_recent_before_current(self) -> None:
         recent_echo = Stimulus(
             stimulus_id="stim_recent_search",
@@ -1324,6 +1353,26 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         self.assertIn("在场和靠近", terms)
         self.assertNotIn("场和靠近", terms)
+
+    def test_extract_habit_patterns_includes_additional_action_requests(self) -> None:
+        patterns = _extract_habit_patterns([
+            _make_thought(
+                cycle_id=1,
+                index=1,
+                action_request={"type": "note_rewrite", "params": 'content:"记一下"'},
+                additional_action_requests=[{"type": "send_message", "params": 'message:"我在。"'}],
+            ),
+            _make_thought(
+                cycle_id=2,
+                index=1,
+                action_request={"type": "note_rewrite", "params": 'content:"再记一下"'},
+                additional_action_requests=[{"type": "send_message", "params": 'message:"我还在。"'}],
+            ),
+        ])
+
+        extracted = {(pattern, category) for pattern, category, _ in patterns}
+        self.assertIn(("经常会冒出 note_rewrite 行动冲动", "behavioral"), extracted)
+        self.assertIn(("经常会冒出 send_message 行动冲动", "behavioral"), extracted)
 
     def test_load_recent_conversations_builds_summary_and_keeps_recent_raw_lines(self) -> None:
         redis_client = ListRedisStub()
@@ -2157,6 +2206,66 @@ class PerceptionManagerTests(unittest.TestCase):
 
 
 class ActionManagerTests(unittest.TestCase):
+    def test_submit_from_thoughts_submits_additional_action_requests(self) -> None:
+        class _ThoughtActionPlanner(PlannerLike):
+            def __init__(self) -> None:
+                self.action_types: list[str] = []
+                self.thought_contents: list[str] = []
+
+            def plan(
+                self,
+                thought: Thought,
+                *,
+                conversation_source: str | None = None,
+            ) -> ActionPlan | tuple[None, str | None] | None:
+                _ = conversation_source
+                assert thought.action_request is not None
+                action_type = str(thought.action_request.get("type") or "")
+                self.action_types.append(action_type)
+                self.thought_contents.append(thought.content)
+                if action_type == "note_rewrite":
+                    return ActionPlan(
+                        "note_rewrite",
+                        "native",
+                        "覆写我的笔记",
+                        30,
+                        "测试",
+                        message_text="把这句记下",
+                    )
+                if action_type == "send_message":
+                    return ActionPlan(
+                        "send_message",
+                        "native",
+                        "给对方发消息",
+                        30,
+                        "测试",
+                        message_text="我在。",
+                    )
+                return None
+
+        queue = StimulusQueue(redis_client=None)
+        planner = _ThoughtActionPlanner()
+        manager = _build_action_manager(queue, planner, redis_client=None)
+
+        try:
+            created = manager.submit_from_thoughts([
+                _make_thought(
+                    content='我想先记下来 {action:note_rewrite, content:"把这句记下"}，再回一句。 {action:send_message, message:"我在。"}',
+                    action_request={"type": "note_rewrite", "params": 'content:"把这句记下"'},
+                    additional_action_requests=[
+                        {"type": "send_message", "params": 'message:"我在。"'},
+                    ],
+                )
+            ])
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(planner.action_types, ["note_rewrite", "send_message"])
+        self.assertEqual(planner.thought_contents, ["我想先记下来，再回一句。", "我想先记下来，再回一句。"])
+        self.assertEqual([action.type for action in created], ["note_rewrite", "send_message"])
+        self.assertEqual([action.action_id for action in created], ["act_C1-1", "act_C1-1-2"])
+        self.assertTrue(all(action.source_thought_id == "C1-1" for action in created))
+
     def test_note_rewrite_native_action_overwrites_note_and_persists_to_redis(self) -> None:
         queue = StimulusQueue(redis_client=None)
         redis_stub = ListRedisStub()

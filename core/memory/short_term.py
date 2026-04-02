@@ -257,6 +257,7 @@ def _thought_to_dict(t: Thought) -> dict:
         "content": t.content,
         "trigger_ref": t.trigger_ref,
         "action_request": t.action_request,
+        "additional_action_requests": t.additional_action_requests,
         "attention_weight": t.attention_weight,
         "timestamp": t.timestamp.isoformat(),
     }
@@ -271,6 +272,7 @@ def _dict_to_thought(d: dict) -> Thought:
         content=d["content"],
         trigger_ref=d.get("trigger_ref"),
         action_request=d.get("action_request"),
+        additional_action_requests=list(d.get("additional_action_requests") or []),
         attention_weight=d.get("attention_weight", 0.0),
         timestamp=datetime.fromisoformat(d["timestamp"]),
     )

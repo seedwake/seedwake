@@ -25,6 +25,7 @@ class Thought:
     content: str
     trigger_ref: str | None = None
     action_request: RawActionRequest | None = None
+    additional_action_requests: list[RawActionRequest] = field(default_factory=list)
     attention_weight: float = 0.0
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -69,13 +70,20 @@ def fallback_thought(raw_output: str, cycle_id: int) -> Thought:
     return _make_thought(cycle_id, 1, "思考", _clip_text(raw_output))
 
 
-def _parse_action(content: str) -> RawActionRequest | None:
+def thought_action_requests(thought: Thought) -> list[RawActionRequest]:
+    action_requests: list[RawActionRequest] = []
+    if thought.action_request is not None:
+        action_requests.append(thought.action_request)
+    action_requests.extend(thought.additional_action_requests)
+    return action_requests
+
+
+def _parse_actions(content: str) -> list[RawActionRequest]:
     sanitized = INLINE_CODE_SPAN_PATTERN.sub("", content)
-    m = ACTION_PATTERN.search(sanitized)
-    if not m:
-        return None
-    action_request: RawActionRequest = {"type": m.group(1), "params": m.group(2) or ""}
-    return action_request
+    return [
+        {"type": match.group(1), "params": match.group(2) or ""}
+        for match in ACTION_PATTERN.finditer(sanitized)
+    ]
 
 
 def _build_thought(
@@ -95,6 +103,7 @@ def _make_thought(
     content: str,
     trigger_ref: str | None = None,
 ) -> Thought:
+    action_requests = _parse_actions(content)
     return Thought(
         thought_id=f"C{cycle_id}-{index}",
         cycle_id=cycle_id,
@@ -102,7 +111,8 @@ def _make_thought(
         type=thought_type,
         content=content,
         trigger_ref=trigger_ref,
-        action_request=_parse_action(content),
+        action_request=action_requests[0] if action_requests else None,
+        additional_action_requests=action_requests[1:],
     )
 
 

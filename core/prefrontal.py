@@ -1,12 +1,13 @@
 """Prefrontal executive control for Phase 4."""
 
 import json
+from dataclasses import replace
 
 import redis as redis_lib
 
 from core.stimulus import Stimulus
-from core.thought_parser import Thought
-from core.types import HabitPromptEntry, PrefrontalPromptState, SleepStateSnapshot
+from core.thought_parser import Thought, thought_action_requests
+from core.types import HabitPromptEntry, PrefrontalPromptState, RawActionRequest, SleepStateSnapshot
 
 PREFRONTAL_STATE_KEY = "seedwake:prefrontal_state"
 PREFRONTAL_REDIS_EXCEPTIONS = (
@@ -84,37 +85,31 @@ class PrefrontalManager:
             return thoughts, []
         conversation_foreground = any(stimulus.type == "conversation" for stimulus in stimuli)
         recent_action_types = [
-            str(thought.action_request.get("type") or "").strip()
+            str(action_request.get("type") or "").strip()
             for thought in recent_thoughts[-9:]
-            if thought.action_request is not None
+            for action_request in thought_action_requests(thought)
+            if str(action_request.get("type") or "").strip()
         ]
         notes: list[str] = []
+        reviewed_thoughts: list[Thought] = []
         for thought in thoughts:
-            action_request = thought.action_request
-            if action_request is None:
-                continue
-            action_type = str(action_request.get("type") or "").strip()
-            if not action_type:
-                continue
-            if conversation_foreground and action_type in {"reading", "search", "web_fetch", "news"}:
-                thought.action_request = None
-                notes.append(f"当前有人在说话，抑制 {action_type}，优先回应前景对话。")
-                continue
-            if sleep_state["mode"] != "awake" and action_type in HEAVY_ACTION_TYPES:
-                thought.action_request = None
-                notes.append(f"当前精力偏低，抑制高负荷行动 {action_type}。")
-                continue
-            if action_type in recent_action_types[-2:] and action_type in {"reading", "search"}:
-                thought.action_request = None
-                notes.append(f"最近连续重复 {action_type}，先压住这类冲动。")
-                continue
-            if "别 reading" in note_text or "不要 reading" in note_text:
-                if action_type == "reading":
-                    thought.action_request = None
-                    notes.append("笔记里明确要求停止 reading，已抑制本轮 reading 冲动。")
+            kept_requests: list[RawActionRequest] = []
+            for action_request in thought_action_requests(thought):
+                inhibition_note = _inhibition_note(
+                    action_request,
+                    conversation_foreground=conversation_foreground,
+                    sleep_mode=str(sleep_state["mode"]),
+                    recent_action_types=recent_action_types,
+                    note_text=note_text,
+                )
+                if inhibition_note is not None:
+                    notes.append(inhibition_note)
+                    continue
+                kept_requests.append(action_request)
+            reviewed_thoughts.append(_replace_thought_action_requests(thought, kept_requests))
         self._last_state["inhibition_notes"] = notes[:3]
         self._sync_to_redis()
-        return thoughts, notes
+        return reviewed_thoughts, notes
 
     def _restore_from_redis(self) -> None:
         redis_client = self._redis
@@ -185,3 +180,33 @@ def _copy_state(state: PrefrontalPromptState) -> PrefrontalPromptState:
         "inhibition_notes": list(state["inhibition_notes"]),
         "plan_mode": state["plan_mode"],
     }
+
+
+def _replace_thought_action_requests(thought: Thought, action_requests: list[RawActionRequest]) -> Thought:
+    return replace(
+        thought,
+        action_request=action_requests[0] if action_requests else None,
+        additional_action_requests=action_requests[1:],
+    )
+
+
+def _inhibition_note(
+    action_request: RawActionRequest,
+    *,
+    conversation_foreground: bool,
+    sleep_mode: str,
+    recent_action_types: list[str],
+    note_text: str,
+) -> str | None:
+    action_type = str(action_request.get("type") or "").strip()
+    if not action_type:
+        return None
+    if conversation_foreground and action_type in {"reading", "search", "web_fetch", "news"}:
+        return f"当前有人在说话，抑制 {action_type}，优先回应前景对话。"
+    if sleep_mode != "awake" and action_type in HEAVY_ACTION_TYPES:
+        return f"当前精力偏低，抑制高负荷行动 {action_type}。"
+    if action_type in recent_action_types[-2:] and action_type in {"reading", "search"}:
+        return f"最近连续重复 {action_type}，先压住这类冲动。"
+    if ("别 reading" in note_text or "不要 reading" in note_text) and action_type == "reading":
+        return "笔记里明确要求停止 reading，已抑制本轮 reading 冲动。"
+    return None

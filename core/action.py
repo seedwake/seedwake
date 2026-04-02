@@ -8,7 +8,7 @@ import re
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 from urllib import error, request
@@ -20,7 +20,7 @@ from core.openclaw_gateway import OpenClawGatewayExecutor, OpenClawUnavailableEr
 from core.perception import collect_system_status_snapshot
 from core.rss import RSS_READ_EXCEPTIONS, read_news_result, summarize_news_items
 from core.stimulus import Stimulus, StimulusQueue, append_conversation_history
-from core.thought_parser import Thought
+from core.thought_parser import Thought, thought_action_requests
 from core.types import (
     ActionControl,
     ActionRequestPayload,
@@ -129,7 +129,7 @@ TELEGRAM_SEND_EXCEPTIONS = (
     json.JSONDecodeError,
 )
 logger = logging.getLogger(__name__)
-ACTION_MARKER_PATTERN = re.compile(r"\s*\{action:[^}]+}\s*$")
+ACTION_MARKER_PATTERN = re.compile(r"\s*\{action:[^}]+\}", re.DOTALL)
 type ActionUpdateValue = JsonValue | datetime | ActionResultEnvelope | None
 
 
@@ -264,16 +264,18 @@ class ActionManager:
         conversation_source = _latest_conversation_source(stimuli or [])
         conversation_reply_to_message_id = _latest_conversation_message_id(stimuli or [])
         for thought in thoughts:
-            action = self._plan_submitted_action(
-                thought,
-                conversation_source=conversation_source,
-                conversation_reply_to_message_id=conversation_reply_to_message_id,
-            )
-            if action is None:
-                continue
-            self._upsert_action(action)
-            created.append(action)
-            self._dispatch_submitted_action(action)
+            for action_index, action_thought in enumerate(self._submitted_action_thoughts(thought)):
+                action = self._plan_submitted_action(
+                    action_thought,
+                    conversation_source=conversation_source,
+                    conversation_reply_to_message_id=conversation_reply_to_message_id,
+                )
+                if action is None:
+                    continue
+                action.action_id = self._submitted_action_id(thought.thought_id, action_index)
+                self._upsert_action(action)
+                created.append(action)
+                self._dispatch_submitted_action(action)
 
         return created
 
@@ -304,6 +306,26 @@ class ActionManager:
             conversation_source=conversation_source,
             conversation_reply_to_message_id=conversation_reply_to_message_id,
         )
+
+    def _submitted_action_thoughts(self, thought: Thought) -> list[Thought]:
+        action_requests = thought_action_requests(thought)
+        if not action_requests:
+            return [thought]
+        stripped_content = _strip_action_marker(thought.content) or thought.content
+        return [
+            replace(
+                thought,
+                content=stripped_content,
+                action_request=action_request,
+                additional_action_requests=[],
+            )
+            for action_request in action_requests
+        ]
+
+    def _submitted_action_id(self, thought_id: str, action_index: int) -> str:
+        if action_index == 0:
+            return f"act_{thought_id}"
+        return f"act_{thought_id}-{action_index + 1}"
 
     def apply_controls(self, controls: list[ActionControl]) -> None:
         for control in controls:

@@ -94,6 +94,21 @@ class ThoughtParserTests(unittest.TestCase):
 
         self.assertEqual(thoughts[0].action_request, {"type": "news", "params": ""})
 
+    def test_parse_action_keeps_additional_action_requests(self) -> None:
+        thoughts = parse_thoughts(
+            '[意图] 先记下来 {action:note_rewrite, content:"记一下"} 再发出去 {action:send_message, message:"我在。"}\n',
+            1,
+        )
+
+        self.assertEqual(
+            thoughts[0].action_request,
+            {"type": "note_rewrite", "params": 'content:"记一下"'},
+        )
+        self.assertEqual(
+            thoughts[0].additional_action_requests,
+            [{"type": "send_message", "params": 'message:"我在。"'}],
+        )
+
 
 class CycleTests(unittest.TestCase):
     @patch("core.cycle._call_ollama", return_value="[思考] a\n[意图] b\n[反应] c\n")
