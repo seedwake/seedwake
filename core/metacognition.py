@@ -8,7 +8,7 @@ import redis as redis_lib
 
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient
 from core.thought_parser import Thought
-from core.types import EmotionSnapshot, HabitPromptEntry, PrefrontalPromptState, ReflectionPromptEntry
+from core.types import EmotionSnapshot, HabitPromptEntry, ManasPromptState, PrefrontalPromptState, ReflectionPromptEntry
 
 REFLECTIONS_KEY = "seedwake:reflections"
 REFLECTION_STATE_KEY = "seedwake:reflection_state"
@@ -82,7 +82,14 @@ class MetacognitionManager:
         degeneration_alert: bool,
         failure_count: int,
         stimuli_changed: bool,
+        manas_reflection_requested: bool = False,
     ) -> bool:
+        if manas_reflection_requested and _manas_reflection_due(
+            cycle_id,
+            self._last_reflection_cycle,
+            self._reflection_interval,
+        ):
+            return True
         if cycle_id - self._last_reflection_cycle >= self._reflection_interval:
             return True
         dominant_strength = emotion["dimensions"].get(emotion["dominant"], 0.0)
@@ -107,6 +114,7 @@ class MetacognitionManager:
         prefrontal_state: PrefrontalPromptState,
         failure_count: int,
         degeneration_alert: bool,
+        manas_state: ManasPromptState | None = None,
     ) -> Thought | None:
         prompt = _reflection_request(
             recent_thoughts=recent_thoughts,
@@ -116,6 +124,7 @@ class MetacognitionManager:
             prefrontal_state=prefrontal_state,
             failure_count=failure_count,
             degeneration_alert=degeneration_alert,
+            manas_state=manas_state,
         )
         try:
             response = client.chat(
@@ -198,6 +207,7 @@ def _reflection_request(
     prefrontal_state: PrefrontalPromptState,
     failure_count: int,
     degeneration_alert: bool,
+    manas_state: ManasPromptState | None,
 ) -> str:
     recent_lines = "\n".join(
         f"[{thought.type}] {thought.content}"
@@ -207,11 +217,23 @@ def _reflection_request(
     goals_text = "；".join(goals) if goals else "（无）"
     habits_text = "；".join(habit["pattern"] for habit in habits[:3]) if habits else "（无）"
     guidance_text = "；".join(prefrontal_state["guidance"]) if prefrontal_state["guidance"] else "（无）"
+    manas_text = "（无）"
+    if manas_state is not None:
+        pieces = []
+        if manas_state["warning"]:
+            pieces.append(manas_state["warning"])
+        if manas_state["session_context"]:
+            pieces.append(f"过渡语境：{manas_state['session_context']}")
+        if manas_state["identity_notice"]:
+            pieces.append(manas_state["identity_notice"])
+        if pieces:
+            manas_text = "；".join(pieces)
     return (
         f"最近的念头：\n{recent_lines or '（无）'}\n\n"
         f"当前情绪：{emotion['summary']}\n"
         f"当前目标：{goals_text}\n"
         f"活跃习气：{habits_text}\n"
+        f"自我连续性：{manas_text}\n"
         f"前额叶提醒：{guidance_text}\n"
         f"最近失败次数：{failure_count}\n"
         f"是否检测到退化：{'是' if degeneration_alert else '否'}\n"
@@ -226,6 +248,15 @@ def _extract_reflection_content(raw_text: str) -> str:
     if compact.startswith("反思："):
         compact = compact.removeprefix("反思：").strip()
     return compact[:240]
+
+
+def _manas_reflection_due(
+    cycle_id: int,
+    last_reflection_cycle: int,
+    reflection_interval: int,
+) -> bool:
+    minimum_gap = max(2, reflection_interval // 2)
+    return cycle_id - last_reflection_cycle >= minimum_gap
 
 
 def _decode_redis_value(value: bytes | str) -> str:

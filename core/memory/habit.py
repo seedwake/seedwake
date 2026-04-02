@@ -2,18 +2,22 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 import re
 import time
 
 import psycopg
 
+from core.embedding import embed_text
+from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient
 from core.stimulus import Stimulus
 from core.thought_parser import Thought, thought_action_requests
 from core.types import HabitPromptEntry, elapsed_ms
 
-logger_name = __name__
+logger = logging.getLogger(__name__)
 HABIT_MIN_PATTERN_LENGTH = 4
 HABIT_TEXT_STOPWORDS = {"刚才", "现在", "继续", "已经", "不是", "只是", "一个", "没有"}
+HABIT_EMBEDDING_DIMENSIONS = 4096
 
 
 @dataclass(frozen=True)
@@ -24,6 +28,8 @@ class HabitSeed:
     strength: float
     activation_count: int
     last_activated: datetime | None
+    embedding: list[float] | None = None
+    semantic_similarity: float = 0.0
 
 
 class HabitMemory:
@@ -33,10 +39,14 @@ class HabitMemory:
         *,
         max_active_in_prompt: int,
         decay_rate: float,
+        activation_similarity_threshold: float = 0.35,
+        activation_candidate_limit: int = 12,
     ) -> None:
         self._conn = pg_conn
         self._max_active_in_prompt = max_active_in_prompt
         self._decay_rate = decay_rate
+        self._activation_similarity_threshold = activation_similarity_threshold
+        self._activation_candidate_limit = max(1, activation_candidate_limit)
 
     @property
     def available(self) -> bool:
@@ -45,19 +55,152 @@ class HabitMemory:
     def attach_connection(self, pg_conn: psycopg.Connection | None) -> None:
         self._conn = pg_conn
 
+    def ensure_schema(self) -> None:
+        conn = self._conn
+        if conn is None:
+            return
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE habit_seeds
+                    SET category = 'cognitive'
+                    WHERE category IS NULL OR category = ''
+                    """
+                )
+                cur.execute(
+                    f"""
+                    ALTER TABLE habit_seeds
+                    ADD COLUMN IF NOT EXISTS embedding vector({HABIT_EMBEDDING_DIMENSIONS})
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE habit_seeds
+                    ALTER COLUMN category SET DEFAULT 'cognitive'
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE habit_seeds
+                    ALTER COLUMN category SET NOT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    WITH ranked AS (
+                        SELECT id,
+                               pattern,
+                               category,
+                               strength,
+                               activation_count,
+                               last_activated,
+                               created_at,
+                               updated_at,
+                               source_memories,
+                               FIRST_VALUE(id) OVER (
+                                   PARTITION BY pattern, category
+                                   ORDER BY id
+                               ) AS keep_id,
+                               COUNT(*) OVER (
+                                   PARTITION BY pattern, category
+                               ) AS group_count
+                        FROM habit_seeds
+                    ),
+                    grouped AS (
+                        SELECT
+                            keep_id,
+                            MAX(strength) AS merged_strength,
+                            SUM(activation_count) AS merged_activation_count,
+                            MAX(last_activated) AS merged_last_activated,
+                            MIN(created_at) AS merged_created_at,
+                            MAX(updated_at) AS merged_updated_at,
+                            ARRAY(
+                                SELECT DISTINCT source_memory
+                                FROM ranked AS source_rows
+                                CROSS JOIN LATERAL unnest(
+                                    COALESCE(source_rows.source_memories, '{}'::bigint[])
+                                ) AS source_memory
+                                WHERE source_rows.keep_id = ranked.keep_id
+                                ORDER BY source_memory
+                            ) AS merged_source_memories,
+                            (
+                                SELECT embedded.embedding
+                                FROM habit_seeds AS embedded
+                                JOIN ranked AS embedded_ranked ON embedded_ranked.id = embedded.id
+                                WHERE embedded_ranked.keep_id = ranked.keep_id
+                                  AND embedded.embedding IS NOT NULL
+                                ORDER BY embedded.id
+                                LIMIT 1
+                            ) AS merged_embedding
+                        FROM ranked
+                        GROUP BY keep_id
+                    )
+                    UPDATE habit_seeds AS keeper
+                    SET strength = grouped.merged_strength,
+                        activation_count = grouped.merged_activation_count,
+                        last_activated = grouped.merged_last_activated,
+                        created_at = grouped.merged_created_at,
+                        updated_at = grouped.merged_updated_at,
+                        embedding = COALESCE(keeper.embedding, grouped.merged_embedding),
+                        source_memories = grouped.merged_source_memories
+                    FROM grouped
+                    WHERE keeper.id = grouped.keep_id
+                    """
+                )
+                cur.execute(
+                    """
+                    WITH ranked AS (
+                        SELECT id,
+                               pattern,
+                               category,
+                               FIRST_VALUE(id) OVER (
+                                   PARTITION BY pattern, category
+                                   ORDER BY id
+                               ) AS keep_id,
+                               COUNT(*) OVER (
+                                   PARTITION BY pattern, category
+                               ) AS group_count
+                        FROM habit_seeds
+                    )
+                    DELETE FROM habit_seeds AS duplicate
+                    USING ranked
+                    WHERE duplicate.id = ranked.id
+                      AND ranked.group_count > 1
+                      AND ranked.id <> ranked.keep_id
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_habit_seeds_pattern_category
+                    ON habit_seeds (pattern, category)
+                    """
+                )
+            conn.commit()
+        except psycopg.Error:
+            conn.rollback()
+            raise
+
     def top_active(self) -> list[HabitPromptEntry]:
         seeds = self._fetch_active_seeds(limit=self._max_active_in_prompt * 4)
-        entries = [_habit_entry(seed) for seed in seeds]
+        entries = [_habit_entry(seed, self._activation_similarity_threshold) for seed in seeds]
         return _diverse_selection(entries, self._max_active_in_prompt)
 
-    def ensure_bootstrap_seeds(self, items: list[dict]) -> None:
+    def ensure_bootstrap_seeds(
+        self,
+        items: list[dict],
+        *,
+        embedding_client: ModelClient | None = None,
+        embedding_model: str = "",
+    ) -> None:
         for item in items:
             pattern = str(item.get("pattern") or "").strip()
             if not pattern:
                 continue
             category = str(item.get("category") or "cognitive").strip() or "cognitive"
             strength = float(item.get("strength") or 0.1)
-            self._upsert_seed(pattern, category, strength)
+            embedding = _embed_habit_pattern(embedding_client, embedding_model, pattern)
+            self._ensure_seed(pattern, category, strength, embedding=embedding)
 
     def activate_for_cycle(
         self,
@@ -66,18 +209,27 @@ class HabitMemory:
         note_text: str,
         stimuli: list[Stimulus],
         emotion_summary: str,
+        embedding_client: ModelClient | None = None,
+        embedding_model: str = "",
     ) -> list[HabitPromptEntry]:
         """Return habits most relevant to the current context for prompt display."""
-        seeds = self._fetch_active_seeds(limit=None)
+        seeds = self._prompt_candidates(
+            goals=goals,
+            note_text=note_text,
+            stimuli=stimuli,
+            emotion_summary=emotion_summary,
+            embedding_client=embedding_client,
+            embedding_model=embedding_model,
+        )
         if not seeds:
             return []
         context_text = _habit_context_text(goals, note_text, stimuli, emotion_summary)
-        ranked = sorted(
-            seeds,
-            key=lambda seed: _habit_prompt_score(seed, context_text),
+        entries = [_habit_entry(seed, self._activation_similarity_threshold) for seed in seeds]
+        entries = sorted(
+            entries,
+            key=lambda entry: _habit_entry_score(entry, context_text),
             reverse=True,
         )
-        entries = [_habit_entry(seed) for seed in ranked]
         return _diverse_selection(entries, self._max_active_in_prompt)
 
     def observe_cycle(self, thoughts: list[Thought]) -> int:
@@ -126,7 +278,7 @@ class HabitMemory:
                 if limit is None:
                     cur.execute(
                         """
-                        SELECT id, pattern, category, strength, activation_count, last_activated
+                        SELECT id, pattern, category, strength, activation_count, last_activated, embedding
                         FROM habit_seeds
                         WHERE strength > 0.01
                         ORDER BY updated_at DESC, activation_count DESC, strength DESC
@@ -135,7 +287,7 @@ class HabitMemory:
                 else:
                     cur.execute(
                         """
-                        SELECT id, pattern, category, strength, activation_count, last_activated
+                        SELECT id, pattern, category, strength, activation_count, last_activated, embedding
                         FROM habit_seeds
                         WHERE strength > 0.01
                         ORDER BY strength DESC, activation_count DESC, updated_at DESC
@@ -149,9 +301,7 @@ class HabitMemory:
             conn.rollback()
             raise
         finally:
-            import logging
-
-            logging.getLogger(logger_name).info(
+            logger.info(
                 "habit fetch_active_seeds finished in %.1f ms (status=%s, count=%d)",
                 elapsed_ms(started_at),
                 status,
@@ -165,11 +315,18 @@ class HabitMemory:
                 strength=float(row[3]),
                 activation_count=int(row[4] or 0),
                 last_activated=row[5],
+                embedding=_coerce_vector(row[6]) if len(row) >= 7 else None,
             )
             for row in rows
         ]
 
-    def strengthen_from_sleep(self, thoughts: list[Thought]) -> list[HabitPromptEntry]:
+    def strengthen_from_sleep(
+        self,
+        thoughts: list[Thought],
+        *,
+        embedding_client: ModelClient | None = None,
+        embedding_model: str = "",
+    ) -> list[HabitPromptEntry]:
         conn = self._conn
         if conn is None:
             return []
@@ -178,7 +335,8 @@ class HabitMemory:
             return []
         created: list[HabitPromptEntry] = []
         for pattern, category, strength in extracted:
-            habit_id = self._upsert_seed(pattern, category, strength)
+            embedding = _embed_habit_pattern(embedding_client, embedding_model, pattern)
+            habit_id = self._upsert_seed(pattern, category, strength, embedding=embedding)
             if habit_id is None:
                 continue
             created.append(
@@ -235,45 +393,143 @@ class HabitMemory:
             conn.rollback()
             raise
 
-    def _upsert_seed(self, pattern: str, category: str, strength: float) -> int | None:
+    def _prompt_candidates(
+        self,
+        *,
+        goals: list[str],
+        note_text: str,
+        stimuli: list[Stimulus],
+        emotion_summary: str,
+        embedding_client: ModelClient | None,
+        embedding_model: str,
+    ) -> list[HabitSeed]:
+        active_seeds = self._fetch_active_seeds(limit=None)
+        if not active_seeds:
+            return []
+        context_text = _habit_context_text(goals, note_text, stimuli, emotion_summary)
+        query_embedding = _embed_habit_pattern(embedding_client, embedding_model, context_text)
+        semantic_candidates = self._semantic_candidates(query_embedding) if query_embedding is not None else []
+        merged_by_id: dict[int, HabitSeed] = {}
+        for seed in [*semantic_candidates, *active_seeds]:
+            existing = merged_by_id.get(seed.id)
+            if existing is None or seed.semantic_similarity > existing.semantic_similarity:
+                merged_by_id[seed.id] = seed
+        return list(merged_by_id.values())
+
+    def _semantic_candidates(self, query_embedding: list[float]) -> list[HabitSeed]:
         conn = self._conn
         if conn is None:
-            return None
+            return []
+        vec_literal = _format_vector(query_embedding)
         try:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, strength
+                    SELECT id,
+                           pattern,
+                           category,
+                           strength,
+                           activation_count,
+                           last_activated,
+                           embedding,
+                           1 - (embedding <=> %s::vector) AS similarity
                     FROM habit_seeds
-                    WHERE pattern = %s
-                    LIMIT 1
+                    WHERE strength > 0.01
+                      AND embedding IS NOT NULL
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s
                     """,
-                    (pattern,),
+                    (
+                        vec_literal,
+                        vec_literal,
+                        self._activation_candidate_limit,
+                    ),
                 )
-                row = cur.fetchone()
-                if row is not None:
-                    cur.execute(
-                        """
-                        UPDATE habit_seeds
-                        SET category = %s,
-                            strength = LEAST(1.0, GREATEST(strength, %s) + 0.05),
-                            updated_at = NOW()
-                        WHERE id = %s
-                        """,
-                        (category, strength, int(row[0])),
-                    )
-                    habit_id = int(row[0])
-                else:
-                    cur.execute(
-                        """
-                        INSERT INTO habit_seeds (pattern, category, strength)
-                        VALUES (%s, %s, %s)
-                        RETURNING id
-                        """,
-                        (pattern, category, strength),
-                    )
-                    inserted = cur.fetchone()
-                    habit_id = int(inserted[0]) if inserted is not None else None
+                rows = cur.fetchall()
+        except psycopg.Error:
+            conn.rollback()
+            raise
+        return [
+            HabitSeed(
+                id=int(row[0]),
+                pattern=str(row[1]),
+                category=str(row[2] or "cognitive"),
+                strength=float(row[3]),
+                activation_count=int(row[4] or 0),
+                last_activated=row[5],
+                embedding=_coerce_vector(row[6]),
+                semantic_similarity=float(row[7] or 0.0),
+            )
+            for row in rows
+        ]
+
+    def _upsert_seed(
+        self,
+        pattern: str,
+        category: str,
+        strength: float,
+        *,
+        embedding: list[float] | None = None,
+    ) -> int | None:
+        conn = self._conn
+        if conn is None:
+            return None
+        vec_literal = _format_vector(embedding) if embedding is not None else None
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO habit_seeds (pattern, category, strength, embedding)
+                    VALUES (%s, %s, %s, %s::vector)
+                    ON CONFLICT (pattern, category)
+                    DO UPDATE SET
+                        strength = LEAST(1.0, GREATEST(habit_seeds.strength, EXCLUDED.strength) + 0.05),
+                        embedding = COALESCE(habit_seeds.embedding, EXCLUDED.embedding),
+                        updated_at = NOW()
+                    RETURNING id
+                    """,
+                    (pattern, category, strength, vec_literal),
+                )
+                inserted = cur.fetchone()
+                habit_id = int(inserted[0]) if inserted is not None else None
+            conn.commit()
+            return habit_id
+        except psycopg.Error:
+            conn.rollback()
+            raise
+
+    def _ensure_seed(
+        self,
+        pattern: str,
+        category: str,
+        strength: float,
+        *,
+        embedding: list[float] | None = None,
+    ) -> int | None:
+        conn = self._conn
+        if conn is None:
+            return None
+        vec_literal = _format_vector(embedding) if embedding is not None else None
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO habit_seeds (pattern, category, strength, embedding)
+                    VALUES (%s, %s, %s, %s::vector)
+                    ON CONFLICT (pattern, category)
+                    DO UPDATE SET
+                        embedding = COALESCE(habit_seeds.embedding, EXCLUDED.embedding),
+                        updated_at = CASE
+                            WHEN habit_seeds.embedding IS NULL AND EXCLUDED.embedding IS NOT NULL
+                                THEN NOW()
+                            ELSE habit_seeds.updated_at
+                        END
+                    RETURNING id
+                    """,
+                    (pattern, category, strength, vec_literal),
+                )
+                inserted = cur.fetchone()
+                habit_id = int(inserted[0]) if inserted is not None else None
             conn.commit()
             return habit_id
         except psycopg.Error:
@@ -372,13 +628,17 @@ def _diverse_selection(entries: list[HabitPromptEntry], limit: int) -> list[Habi
     return selected
 
 
-def _habit_entry(seed: HabitSeed) -> HabitPromptEntry:
-    return {
+def _habit_entry(seed: HabitSeed, threshold: float) -> HabitPromptEntry:
+    entry: HabitPromptEntry = {
         "id": seed.id,
         "pattern": seed.pattern,
         "category": seed.category,
         "strength": seed.strength,
     }
+    if seed.semantic_similarity > 0.0:
+        entry["activation_score"] = round(seed.semantic_similarity, 4)
+        entry["manifested"] = seed.semantic_similarity >= threshold
+    return entry
 
 
 def _habit_context_text(
@@ -405,10 +665,12 @@ def _habit_stimulus_text(stimulus: Stimulus) -> str:
     return f"{stimulus.type} {content[:120]}"
 
 
-def _habit_prompt_score(seed: HabitSeed, context_text: str) -> float:
-    relevance = _habit_context_similarity(seed.pattern, context_text)
-    recency = _habit_recency_bonus(seed.last_activated)
-    return round(seed.strength * 0.42 + relevance * 0.48 + recency * 0.10, 6)
+def _habit_entry_score(entry: HabitPromptEntry, context_text: str) -> float:
+    relevance = float(entry.get("activation_score") or 0.0)
+    if relevance <= 0.0:
+        relevance = _habit_context_similarity(entry["pattern"], context_text)
+    manifested_bonus = 0.18 if entry.get("manifested") else 0.0
+    return round(float(entry["strength"]) * 0.30 + relevance * 0.52 + manifested_bonus * 0.18, 6)
 
 
 def _habit_context_similarity(pattern: str, context_text: str) -> float:
@@ -436,3 +698,32 @@ def _text_similarity(a: str, b: str) -> float:
     if union == 0:
         return 0.0
     return len(grams_a & grams_b) / union
+
+
+def _embed_habit_pattern(
+    client: ModelClient | None,
+    model: str,
+    text: str,
+) -> list[float] | None:
+    compact = " ".join(text.split()).strip()
+    if client is None or not model or not compact:
+        return None
+    try:
+        return embed_text(client, compact, model)
+    except MODEL_CLIENT_EXCEPTIONS:
+        logger.warning("habit embedding unavailable for pattern/context")
+        return None
+
+
+def _format_vector(vec: list[float]) -> str:
+    return "[" + ",".join(f"{value:.8f}" for value in vec) + "]"
+
+
+def _coerce_vector(value: object) -> list[float] | None:
+    if value is None:
+        return None
+    if isinstance(value, list) and all(isinstance(item, (int, float)) for item in value):
+        return [float(item) for item in value]
+    if isinstance(value, tuple) and all(isinstance(item, (int, float)) for item in value):
+        return [float(item) for item in value]
+    return None

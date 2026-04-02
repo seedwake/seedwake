@@ -32,7 +32,7 @@ from core.action import (
     pop_action_controls,
     push_action_control,
 )
-from core.attention import evaluate_attention
+from core.attention import _habit_resonance_score, evaluate_attention
 from core.emotion import _llm_fusion_weight
 # noinspection PyProtectedMember
 from core.main import (
@@ -50,14 +50,16 @@ from core.memory.habit import (
     _activation_patterns_from_thoughts,
     _extract_habit_patterns,
 )
+from core.metacognition import MetacognitionManager
 from core.model_client import ModelClient
+from core.manas import MANAS_STATE_KEY, ManasManager
 from core.openclaw_gateway import (
     OpenClawGatewayExecutor,
     OpenClawUnavailableError,
     _normalize_worker_text,
 )
 from core.perception import PerceptionManager
-from core.prefrontal import _canonical_params
+from core.prefrontal import PrefrontalManager, _canonical_params
 from core.prompt_builder import PromptBuildContext, _stagnation_terms, build_prompt
 from core.rss import read_news_result, summarize_news_items
 from core.sleep import _ensure_impression_contact, _impression_needs_refresh
@@ -1243,6 +1245,14 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             30,
             prompt_context=PromptBuildContext(
                 goal_stack=["保持清醒。", "回应眼前的人。"],
+                manas_state={
+                    "self_coherence_score": 0.78,
+                    "consecutive_disruptions": 2,
+                    "session_context": "刚从浅睡整理里回来，我继续沿着上一刻往下走。",
+                    "warning": "",
+                    "identity_notice": "",
+                    "reflection_requested": False,
+                },
                 emotion={
                     "dimensions": {
                         "curiosity": 0.61,
@@ -1285,11 +1295,14 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         )
 
         self.assertIn("## 当前目标栈", prompt)
+        self.assertIn("## 自我连续性", prompt)
         self.assertIn("## 当前情绪基调", prompt)
         self.assertIn("## 清醒与困意", prompt)
         self.assertIn("## 相关习气/倾向性", prompt)
         self.assertIn("## 最近的反思", prompt)
         self.assertLess(prompt.index("## 当前目标栈"), prompt.index("## 当前情绪基调"))
+        self.assertLess(prompt.index("## 当前目标栈"), prompt.index("## 自我连续性"))
+        self.assertLess(prompt.index("## 自我连续性"), prompt.index("## 当前情绪基调"))
         self.assertLess(prompt.index("## 当前情绪基调"), prompt.index("## 清醒与困意"))
         self.assertLess(prompt.index("## 清醒与困意"), prompt.index("## 相关习气/倾向性"))
         self.assertLess(prompt.index("## 相关习气/倾向性"), prompt.index("## 最近的反思"))
@@ -1476,6 +1489,86 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn(("经常会冒出 send_message 行动冲动", "behavioral"), executed_params)
         self.assertIn(("我总会在这里先把自己铺垫得太长", "cognitive"), executed_params)
 
+    def test_ensure_bootstrap_seeds_does_not_strengthen_existing_seed(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.side_effect = [
+            (7,),
+        ]
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        memory = HabitMemory(conn, max_active_in_prompt=3, decay_rate=0.05)
+
+        with patch("core.memory.habit._embed_habit_pattern", return_value=[0.3, 0.4]):
+            memory.ensure_bootstrap_seeds([
+                {"pattern": "先回应眼前的人", "category": "behavioral", "strength": 0.4}
+            ])
+
+        executed_sql = [call.args[0] for call in cursor.execute.call_args_list]
+        self.assertIn("ON CONFLICT (pattern, category)", executed_sql[0])
+        self.assertIn("embedding = COALESCE(habit_seeds.embedding, EXCLUDED.embedding)", executed_sql[0])
+        self.assertNotIn("strength = LEAST", executed_sql[0])
+        self.assertEqual(len(executed_sql), 1)
+        conn.commit.assert_called_once()
+
+    def test_ensure_bootstrap_seeds_updates_missing_embedding_without_strengthening(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.side_effect = [
+            (7,),
+        ]
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        memory = HabitMemory(conn, max_active_in_prompt=3, decay_rate=0.05)
+
+        with patch("core.memory.habit._embed_habit_pattern", return_value=[0.3, 0.4]):
+            memory.ensure_bootstrap_seeds([
+                {"pattern": "先回应眼前的人", "category": "behavioral", "strength": 0.4}
+            ])
+
+        executed_sql = [call.args[0] for call in cursor.execute.call_args_list]
+        self.assertIn("ON CONFLICT (pattern, category)", executed_sql[0])
+        self.assertNotIn("strength = LEAST", executed_sql[0])
+        self.assertEqual(
+            cursor.execute.call_args_list[0].args[1],
+            ("先回应眼前的人", "behavioral", 0.4, "[0.30000000,0.40000000]"),
+        )
+        conn.commit.assert_called_once()
+
+    def test_ensure_bootstrap_seeds_inserts_same_pattern_when_category_differs(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.side_effect = [
+            (9,),
+        ]
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        memory = HabitMemory(conn, max_active_in_prompt=3, decay_rate=0.05)
+
+        with patch("core.memory.habit._embed_habit_pattern", return_value=[0.3, 0.4]):
+            memory.ensure_bootstrap_seeds([
+                {"pattern": "先回应眼前的人", "category": "behavioral", "strength": 0.4}
+            ])
+
+        sql = cursor.execute.call_args_list[0].args[0]
+        params = cursor.execute.call_args_list[0].args[1]
+        self.assertIn("ON CONFLICT (pattern, category)", sql)
+        self.assertEqual(params, ("先回应眼前的人", "behavioral", 0.4, "[0.30000000,0.40000000]"))
+        conn.commit.assert_called_once()
+
+    def test_ensure_schema_adds_unique_pattern_category_index(self) -> None:
+        cursor = MagicMock()
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        memory = HabitMemory(conn, max_active_in_prompt=3, decay_rate=0.05)
+
+        memory.ensure_schema()
+
+        sqls = [call.args[0] for call in cursor.execute.call_args_list]
+        self.assertTrue(any("ALTER COLUMN category SET NOT NULL" in sql for sql in sqls))
+        self.assertTrue(any("CREATE UNIQUE INDEX IF NOT EXISTS idx_habit_seeds_pattern_category" in sql for sql in sqls))
+        self.assertTrue(any("SUM(activation_count) AS merged_activation_count" in sql for sql in sqls))
+        self.assertTrue(any("source_memories = grouped.merged_source_memories" in sql for sql in sqls))
+        self.assertTrue(any("DELETE FROM habit_seeds AS duplicate" in sql for sql in sqls))
+        conn.commit.assert_called_once()
+
     def test_activate_for_cycle_prefers_context_relevant_habit(self) -> None:
         memory = HabitMemory(None, max_active_in_prompt=2, decay_rate=0.05)
         memory._fetch_active_seeds = MagicMock(return_value=[  # type: ignore[method-assign]
@@ -1518,6 +1611,57 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         )
 
         memory._fetch_active_seeds.assert_called_once_with(limit=None)  # type: ignore[attr-defined]
+
+    def test_activate_for_cycle_marks_semantically_relevant_seed_as_manifested(self) -> None:
+        memory = HabitMemory(
+            None,
+            max_active_in_prompt=2,
+            decay_rate=0.05,
+            activation_similarity_threshold=0.35,
+        )
+        low_strength = HabitSeed(
+            id=2,
+            pattern="在眼前有人等待时先把话递出去",
+            category="behavioral",
+            strength=0.18,
+            activation_count=1,
+            last_activated=None,
+        )
+        memory._fetch_active_seeds = MagicMock(return_value=[  # type: ignore[method-assign]
+            HabitSeed(
+                id=1,
+                pattern="先去搜索更多背景资料",
+                category="cognitive",
+                strength=0.62,
+                activation_count=4,
+                last_activated=None,
+            ),
+            low_strength,
+        ])
+        memory._semantic_candidates = MagicMock(return_value=[  # type: ignore[method-assign]
+            HabitSeed(
+                id=2,
+                pattern=low_strength.pattern,
+                category=low_strength.category,
+                strength=low_strength.strength,
+                activation_count=low_strength.activation_count,
+                last_activated=None,
+                semantic_similarity=0.82,
+            )
+        ])
+
+        selected = memory.activate_for_cycle(
+            goals=["先回应眼前的人"],
+            note_text="",
+            stimuli=[_conversation_stimulus(content="你在吗？", message_id=101)],
+            emotion_summary="牵挂 0.60",
+            embedding_client=MagicMock(),
+            embedding_model="embed-model",
+        )
+
+        self.assertEqual(selected[0]["pattern"], "在眼前有人等待时先把话递出去")
+        self.assertTrue(selected[0]["manifested"])
+        self.assertGreater(float(selected[0]["activation_score"]), 0.8)
 
     def test_llm_fusion_weight_drops_to_zero_for_flat_empty_signal(self) -> None:
         weight = _llm_fusion_weight(
@@ -1566,6 +1710,90 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         self.assertEqual(result.anchor_thought_id, "C12-1")
 
+    def test_attention_adds_bonus_for_manifested_habit_alignment(self) -> None:
+        thoughts = [
+            _make_thought(cycle_id=15, index=1, thought_type="意图", content="我想先把这句话直接递给对方。"),
+            _make_thought(cycle_id=15, index=2, thought_type="思考", content="我再去多看一点别的资料。"),
+        ]
+
+        result = evaluate_attention(
+            thoughts,
+            recent_thoughts=[],
+            stimuli=[_conversation_stimulus(content="你还在吗？", message_id=201)],
+            active_habits=[
+                {
+                    "id": 1,
+                    "pattern": "先把话递给眼前的人",
+                    "category": "behavioral",
+                    "strength": 0.42,
+                    "activation_score": 0.77,
+                    "manifested": True,
+                }
+            ],
+        )
+
+        self.assertEqual(result.anchor_thought_id, "C15-1")
+
+    def test_habit_resonance_ignores_action_marker_shell(self) -> None:
+        thought = _make_thought(
+            cycle_id=16,
+            index=1,
+            thought_type="意图",
+            content='先去看一下。 {action:reading, query:"The Waves"}',
+            action_request={"type": "reading", "params": 'query:"The Waves"'},
+        )
+
+        score = _habit_resonance_score(
+            thought,
+            [{
+                "id": 1,
+                "pattern": "经常会冒出 reading 行动冲动",
+                "category": "behavioral",
+                "strength": 0.42,
+                "activation_score": 0.88,
+                "manifested": True,
+            }],
+        )
+
+        self.assertEqual(score, 0.0)
+
+    def test_manas_reflection_request_is_throttled_between_cycles(self) -> None:
+        manager = MetacognitionManager(redis_client=None, reflection_interval=10)
+        manager._last_reflection_cycle = 10
+        emotion = {
+            "dimensions": {
+                "curiosity": 0.1,
+                "calm": 0.1,
+                "frustration": 0.1,
+                "satisfaction": 0.1,
+                "concern": 0.1,
+            },
+            "dominant": "curiosity",
+            "summary": "平稳 0.10",
+            "updated_at": "2026-04-02T00:00:00+00:00",
+        }
+
+        self.assertFalse(
+            manager.should_reflect(
+                12,
+                emotion,
+                degeneration_alert=False,
+                failure_count=0,
+                stimuli_changed=False,
+                manas_reflection_requested=True,
+            )
+        )
+        self.assertTrue(
+            manager.should_reflect(
+                15,
+                emotion,
+                degeneration_alert=False,
+                failure_count=0,
+                stimuli_changed=False,
+                manas_reflection_requested=True,
+            )
+        )
+
     def test_impression_contact_is_preserved_for_entity_resolution(self) -> None:
         summary = _ensure_impression_contact("关系: Alice。印象: 直接。", "telegram:1")
 
@@ -1608,6 +1836,156 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         right = _canonical_params('message:"我在。"\n target:"telegram:1"')
 
         self.assertEqual(left, right)
+
+    def test_attach_redis_keeps_local_manas_state_written_while_disconnected(self) -> None:
+        redis_stub = ListRedisStub()
+        redis_stub.set(
+            MANAS_STATE_KEY,
+            json.dumps(
+                {
+                    "self_coherence_score": 0.21,
+                    "last_stable_cycle": 3,
+                    "consecutive_disruptions": 4,
+                    "session_start_cycle": 1,
+                    "session_context": "旧会话上下文",
+                    "identity_hash": "sha256:old",
+                    "session_context_pending": False,
+                    "identity_notice_pending": False,
+                },
+                ensure_ascii=False,
+            ),
+        )
+        manager = ManasManager(
+            redis_client=None,
+            warning_threshold=2,
+            reflection_threshold=3,
+            stable_window=3,
+        )
+
+        manager.note_sleep_transition("断线期间形成的新会话上下文")
+        prompt_state = manager.current_prompt_state(
+            cycle_id=7,
+            identity={"self_description": "我仍在这里。"},
+        )
+        self.assertEqual(prompt_state["session_context"], "断线期间形成的新会话上下文")
+
+        self.assertTrue(manager.attach_redis(redis_stub))
+        raw = redis_stub.get(MANAS_STATE_KEY)
+        self.assertIsNotNone(raw)
+        payload = json.loads(str(raw))
+        self.assertEqual(payload["session_context"], "断线期间形成的新会话上下文")
+        self.assertTrue(payload["session_context_pending"])
+        self.assertEqual(payload["session_start_cycle"], 7)
+
+    def test_attach_redis_keeps_initial_identity_hash_written_while_disconnected(self) -> None:
+        redis_stub = ListRedisStub()
+        redis_stub.set(
+            MANAS_STATE_KEY,
+            json.dumps(
+                {
+                    "self_coherence_score": 0.61,
+                    "last_stable_cycle": 2,
+                    "consecutive_disruptions": 0,
+                    "session_start_cycle": 5,
+                    "session_context": "旧上下文",
+                    "identity_hash": "",
+                    "session_context_pending": False,
+                    "identity_notice_pending": False,
+                },
+                ensure_ascii=False,
+            ),
+        )
+        manager = ManasManager(
+            redis_client=None,
+            warning_threshold=2,
+            reflection_threshold=3,
+            stable_window=3,
+        )
+
+        manager.current_prompt_state(
+            cycle_id=8,
+            identity={"self_description": "我仍在这里。", "core_goals": "继续回应。"},
+        )
+
+        self.assertTrue(manager.attach_redis(redis_stub))
+        raw = redis_stub.get(MANAS_STATE_KEY)
+        self.assertIsNotNone(raw)
+        payload = json.loads(str(raw))
+        self.assertTrue(str(payload["identity_hash"]).startswith("sha256:"))
+
+    def test_restore_state_restart_context_only_mentions_redis_when_only_redis_is_known(self) -> None:
+        redis_stub = ListRedisStub()
+        redis_stub.set(
+            MANAS_STATE_KEY,
+            json.dumps(
+                {
+                    "self_coherence_score": 0.72,
+                    "last_stable_cycle": 4,
+                    "consecutive_disruptions": 0,
+                    "session_start_cycle": 4,
+                    "session_context": "",
+                    "identity_hash": "sha256:ready",
+                    "session_context_pending": False,
+                    "identity_notice_pending": False,
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        manager = ManasManager(
+            redis_client=redis_stub,
+            warning_threshold=2,
+            reflection_threshold=3,
+            stable_window=3,
+        )
+
+        prompt_state = manager.current_prompt_state(
+            cycle_id=9,
+            identity={"self_description": "我仍在这里。"},
+        )
+
+        self.assertIn("短期记忆从 Redis 恢复", prompt_state["session_context"])
+        self.assertNotIn("长期记忆从 PostgreSQL 恢复", prompt_state["session_context"])
+
+    def test_prefrontal_does_not_suppress_heavy_action_only_due_to_manifested_habit(self) -> None:
+        manager = PrefrontalManager(
+            redis_client=None,
+            check_interval=3,
+            inhibition_enabled=True,
+        )
+
+        reviewed, notes = manager.review_thoughts(
+            thoughts=[
+                _make_thought(
+                    thought_type="意图",
+                    content='我去读一下这段材料。 {action:reading, query:"The Waves"}',
+                    action_request={"type": "reading", "params": 'query:"The Waves"'},
+                )
+            ],
+            recent_thoughts=[],
+            stimuli=[],
+            sleep_state={
+                "energy": 0.82,
+                "mode": "awake",
+                "last_light_sleep_cycle": 0,
+                "last_deep_sleep_cycle": 0,
+                "last_deep_sleep_at": "",
+                "summary": "",
+            },
+            active_habits=[
+                {
+                    "id": 1,
+                    "pattern": "一遇到不确定就先去多看资料",
+                    "category": "cognitive",
+                    "strength": 0.66,
+                    "activation_score": 0.84,
+                    "manifested": True,
+                }
+            ],
+        )
+
+        self.assertEqual(notes, [])
+        self.assertIsNotNone(reviewed[0].action_request)
 
     def test_load_recent_conversations_builds_summary_and_keeps_recent_raw_lines(self) -> None:
         redis_client = ListRedisStub()

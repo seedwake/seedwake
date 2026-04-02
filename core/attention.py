@@ -7,8 +7,8 @@ Avoids brittle keyword rules by relying on text similarity plus structural cues.
 from dataclasses import dataclass
 
 from core.stimulus import Stimulus
-from core.thought_parser import Thought, thought_action_requests
-from core.types import AttentionPromptEntry, EmotionSnapshot
+from core.thought_parser import Thought, strip_action_markers, thought_action_requests
+from core.types import AttentionPromptEntry, EmotionSnapshot, HabitPromptEntry
 
 NOVELTY_WINDOW = 12
 
@@ -28,6 +28,7 @@ def evaluate_attention(
     *,
     goal_stack: list[str] | None = None,
     emotion: EmotionSnapshot | None = None,
+    active_habits: list[HabitPromptEntry] | None = None,
 ) -> AttentionResult:
     recent_texts = [
         thought.content
@@ -42,6 +43,7 @@ def evaluate_attention(
             stimuli,
             goal_stack or [],
             emotion,
+            active_habits or [],
         )
         thought.attention_weight = score
         entries.append((score, reason, thought))
@@ -81,6 +83,7 @@ def _attention_score(
     stimuli: list[Stimulus],
     goal_stack: list[str],
     emotion: EmotionSnapshot | None,
+    active_habits: list[HabitPromptEntry],
 ) -> tuple[float, str]:
     score = 0.15
     reasons: list[str] = []
@@ -100,6 +103,11 @@ def _attention_score(
     score += emotion_resonance * 0.18
     if emotion_resonance >= 0.2:
         reasons.append("契合情绪")
+
+    habit_resonance = _habit_resonance_score(thought, active_habits)
+    score += habit_resonance * 0.14
+    if habit_resonance >= 0.2:
+        reasons.append("触发现行习气")
 
     # Structural bonuses
     if thought.trigger_ref:
@@ -182,6 +190,28 @@ def _external_priority_bonus(thought: Thought, stimuli: list[Stimulus]) -> tuple
     if thought.type == "反应":
         return 0.10, "承接外界刺激"
     return 0.0, ""
+
+
+def _habit_resonance_score(
+    thought: Thought,
+    active_habits: list[HabitPromptEntry],
+) -> float:
+    manifested = [habit for habit in active_habits if habit.get("manifested")]
+    if not manifested:
+        return 0.0
+    thought_text = _normalize_text(strip_action_markers(thought.content))
+    if not thought_text:
+        return 0.0
+    similarities = [
+        _text_similarity(
+            thought_text,
+            _normalize_text(str(habit["pattern"])),
+        )
+        * max(0.3, float(habit.get("activation_score") or 0.0))
+        for habit in manifested
+        if _normalize_text(str(habit["pattern"]))
+    ]
+    return min(1.0, max(similarities) if similarities else 0.0)
 
 
 def _normalize_text(text: str) -> str:

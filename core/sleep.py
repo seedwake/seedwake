@@ -226,7 +226,13 @@ class SleepManager:
             cycle_id=cycle_id,
             emotion=emotion,
         )
-        created_habits = len(habit_memory.strengthen_from_sleep(archived))
+        created_habits = len(
+            habit_memory.strengthen_from_sleep(
+                archived,
+                embedding_client=embedding_client,
+                embedding_model=embedding_model,
+            )
+        )
         habit_memory.decay_inactive()
         cooled = ltm.cool_inactive_memories()
         self._shadow["energy"] = min(100.0, self._light_sleep_recovery)

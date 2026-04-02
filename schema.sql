@@ -44,14 +44,16 @@ CREATE TABLE identity (
 CREATE TABLE habit_seeds (
     id               BIGSERIAL PRIMARY KEY,
     pattern          TEXT NOT NULL,
-    category         TEXT,              -- cognitive / behavioral / emotional
+    category         TEXT NOT NULL DEFAULT 'cognitive',  -- cognitive / behavioral / emotional
     strength         FLOAT DEFAULT 0.1,
+    embedding        vector(4096),
     activation_count INTEGER DEFAULT 0,
     last_activated   TIMESTAMPTZ,
     source_memories  BIGINT[] DEFAULT '{}',
     created_at       TIMESTAMPTZ DEFAULT NOW(),
     updated_at       TIMESTAMPTZ DEFAULT NOW()
 );
+CREATE UNIQUE INDEX idx_habit_seeds_pattern_category ON habit_seeds (pattern, category);
 
 -- Audit log (append-only)
 CREATE TABLE audit_log (

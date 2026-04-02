@@ -16,6 +16,7 @@ from core.types import (
     HabitPromptEntry,
     JsonObject,
     JsonValue,
+    ManasPromptState,
     PrefrontalPromptState,
     RecentConversationPrompt,
     ReflectionPromptEntry,
@@ -151,6 +152,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class PromptBuildContext:
     goal_stack: list[str] | None = None
+    manas_state: ManasPromptState | None = None
     emotion: EmotionSnapshot | None = None
     sleep_state: SleepStateSnapshot | None = None
     active_habits: list[HabitPromptEntry] | None = None
@@ -182,6 +184,7 @@ def build_prompt(
     _append_prompt_context_sections(
         parts,
         resolved_context.goal_stack or [],
+        resolved_context.manas_state,
         resolved_context.emotion,
         resolved_context.sleep_state,
         resolved_context.active_habits or [],
@@ -228,6 +231,7 @@ def build_prompt(
 def _append_prompt_context_sections(
     parts: list[str],
     goal_stack: list[str],
+    manas_state: ManasPromptState | None,
     emotion: EmotionSnapshot | None,
     sleep_state: SleepStateSnapshot | None,
     active_habits: list[HabitPromptEntry],
@@ -243,6 +247,9 @@ def _append_prompt_context_sections(
         goals = goal_stack
         executive = prefrontal_state
         _append_prompt_section(parts, "goal_stack", lambda: _format_goal_stack(goals, executive))
+    if manas_state:
+        current_manas = manas_state
+        _append_prompt_section(parts, "manas", lambda: _format_manas(current_manas))
     if emotion:
         emotion_state = emotion
         _append_prompt_section(parts, "emotion", lambda: _format_emotion(emotion_state))
@@ -410,6 +417,23 @@ def _format_emotion(emotion: EmotionSnapshot) -> str:
     return _render_section("当前情绪基调", lines, keep_blank_lines=True)
 
 
+def _format_manas(manas_state: ManasPromptState) -> str:
+    lines = [f"- 连续性评分: {manas_state['self_coherence_score']:.2f}"]
+    lines.append(f"- 连续中断计数: {manas_state['consecutive_disruptions']}")
+    session_context = str(manas_state.get("session_context") or "").strip()
+    if session_context:
+        lines.append(f"- 过渡语境: {session_context}")
+    identity_notice = str(manas_state.get("identity_notice") or "").strip()
+    if identity_notice:
+        lines.append(f"- 身份提醒: {identity_notice}")
+    warning = str(manas_state.get("warning") or "").strip()
+    if warning:
+        lines.append(f"- 当前警示: {warning}")
+    if manas_state.get("reflection_requested"):
+        lines.append("- 我需要做一次更认真地回身自照。")
+    return _render_section("自我连续性", lines)
+
+
 def _format_sleep_state(sleep_state: SleepStateSnapshot) -> str:
     lines = [sleep_state["summary"]]
     lines.append("")
@@ -423,10 +447,17 @@ def _format_sleep_state(sleep_state: SleepStateSnapshot) -> str:
 
 
 def _format_habits(habits: list[HabitPromptEntry]) -> str:
-    lines = [
-        f"- {habit['pattern']} [{habit['category']}, strength={habit['strength']:.2f}]"
-        for habit in habits
-    ]
+    lines: list[str] = []
+    for habit in habits:
+        category = str(habit["category"])
+        strength = float(habit["strength"])
+        activation_score = float(habit.get("activation_score") or 0.0)
+        if habit.get("manifested"):
+            lines.append(
+                f"- 现行：{habit['pattern']}（{category}，相应度 {activation_score:.2f}，种子强度 {strength:.2f}）"
+            )
+            continue
+        lines.append(f"- 倾向：{habit['pattern']}（{category}，强度 {strength:.2f}）")
     return _render_section("相关习气/倾向性", lines)
 
 

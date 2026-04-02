@@ -59,13 +59,16 @@ class PrefrontalManager:
     ) -> PrefrontalPromptState:
         goal_stack = build_goal_stack(identity, note_text)
         guidance: list[str] = []
+        manifested_habits = [habit for habit in active_habits if habit.get("manifested")]
         if sleep_state["mode"] != "awake":
             guidance.append(f"我现在偏{sleep_state['mode']}，需要把行动收得更谨慎。")
         if active_habits:
             guidance.append(f"我的惯性倾向：{', '.join(habit['pattern'] for habit in active_habits[:2])}。")
+        if manifested_habits:
+            guidance.append(f"此刻有旧种子正在现行：{', '.join(habit['pattern'] for habit in manifested_habits[:2])}。")
         if emotion_summary:
             guidance.append(f"情绪底色是：{emotion_summary}")
-        plan_mode = cycle_id % self._check_interval == 0
+        plan_mode = cycle_id % self._check_interval == 0 or bool(manifested_habits)
         if plan_mode:
             guidance.append("这一轮前额叶检查已开启：先看是否偏题、是否重复、是否该抑制冲动。")
         self._last_state = {
@@ -83,6 +86,7 @@ class PrefrontalManager:
         recent_thoughts: list[Thought],
         stimuli: list[Stimulus],
         sleep_state: SleepStateSnapshot,
+        active_habits: list[HabitPromptEntry],
     ) -> tuple[list[Thought], list[str]]:
         if not self._inhibition_enabled:
             return thoughts, []

@@ -318,6 +318,7 @@ CREATE TABLE habit_seeds (
     pattern         TEXT NOT NULL,              -- 模式描述（自然语言），如"遇到技术问题时倾向于先搜索文档"
     category        TEXT,                       -- 分类：cognitive（认知倾向）/ behavioral（行为模式）/ emotional（情绪反应模式）
     strength        FLOAT DEFAULT 0.1,          -- 强度（0-1），被强化次数越多越高
+    embedding       vector(4096),               -- 向量表示，用于种子现行（§5.6）时的语义匹配
     activation_count INTEGER DEFAULT 0,         -- 被激活次数
     last_activated  TIMESTAMPTZ,
     source_memories BIGINT[] DEFAULT '{}',      -- 由哪些长期记忆熏习而成
@@ -328,7 +329,7 @@ CREATE TABLE habit_seeds (
 
 习气的生命周期：
 - **形成**：仅在浅睡阶段，由整理流程从近期经历中识别重复行为模式，创建新习气或强化已有习气
-- **激活**：每轮循环时，根据当前情境检索最相关的几条习气，作为"倾向性提示"注入 Prompt
+- **激活**：每轮循环时，使用当前情境的 embedding 检索最相关的几条习气；达到现行阈值的种子标记为"现行"，其余仅作为"倾向性提示"注入 Prompt
 - **衰减**：长期未被激活的习气强度逐渐降低（浅睡阶段执行）
 
 习气不会因"遗忘"而删除，只会强度趋近于零。这符合唯识学中种子"无始以来"的特性。
@@ -417,6 +418,56 @@ CREATE TABLE identity (
 - 可能提议修改身份文档、调整目标栈、或建议参数调整
 
 元认知反思本身也产出念头，写入短期记忆和审计日志，类型标记为"反思"。
+
+### 5.5 末那识（自我连续性）
+
+对应唯识学中的第七识——恒常微细的"我执"。不是 identity.py 中的静态自我描述，而是动态的、每轮运行的自我连续性追踪。
+
+**状态存储**：Redis key `seedwake:manas_state`，JSON 结构：
+
+```json
+{
+  "self_coherence_score": 0.95,
+  "last_stable_cycle": 842,
+  "consecutive_disruptions": 0,
+  "session_start_cycle": 800,
+  "session_context": "从浅睡中醒来，精力恢复到 70",
+  "identity_hash": "sha256:..."
+}
+```
+
+**每轮行为**：
+1. 对当前 3 个念头做**自我连续性评分**，信号至少包括：
+   - 与身份文档（`self_description` / `self_understanding`）的 embedding 相似度
+   - 与近期"稳定自我表述"窗口的 embedding 相似度
+   - 语篇结构信号：是否从"我在经历/我想做"滑向"Seedwake 作为外部对象被描述"的脱嵌表述
+   - session 连续性证据：当前轮是否承接了刚恢复的 STM / LTM / 睡眠过渡语境
+2. 将这些信号融合成 `self_coherence_score`，并记录最近一次稳定连续的 cycle
+3. 如果 `consecutive_disruptions >= 3`，向 prompt 注入修正提示："我注意到自己的表述在滑向旁观者视角，需要重新回到作为当下经历者的连续位置"
+4. 如果 `consecutive_disruptions >= 5`，触发元认知反思
+
+**触发条件**：
+- 重启/浅睡恢复后：用 `session_context` 描述过渡（"我从浅睡中醒来"或"系统重启，我的短期记忆从 Redis 恢复"），注入 prompt 的身份段落之后
+- 身份文档被修改后：比较 `identity_hash`，在下一轮 prompt 中注入"我的自我理解刚刚发生了变化"
+- 如果检测到 STM 丢失、LTM 恢复不完整、或最近稳定窗口与当前念头出现明显语义断裂，也要降低 `self_coherence_score`
+
+**不使用额外 LLM 调用**——自我连续性是底层机制，不应该增加推理延迟。实现依赖 embedding、状态计数器和语篇结构特征，不依赖固定关键词表或纯正则硬判。
+
+### 5.6 种子现行（习气激活）
+
+对应唯识学中"种子遇缘现行"的机制。习气不应该只是被动展示在 prompt 里等模型自己判断，而是在条件具足时主动影响念头生成。
+
+条件匹配：使用 embedding 相似度而非关键词匹配。每轮将当前情境（最近被注意到的念头 + 当前刺激 + 当前情绪状态 + 当前目标）的 embedding 与习气库中种子的 embedding 做相似度比较，超过阈值的种子被标记为"现行"。
+
+现行的种子在 prompt 中的呈现方式不同于普通展示：
+- 普通展示："我的倾向：遇到技术问题时先搜索文档"
+- 种子现行："此刻我感觉到一股强烈的冲动要去搜索——这是我的老习惯在发作"
+
+这需要：
+1. 给 habit_seeds 表增加 embedding 列
+2. 每轮做一次习气向量检索（可与 LTM 检索复用 embedding）
+3. 匹配到的习气用"现行"语气展示，未匹配的用"倾向"语气展示
+4. 现行的种子不仅进入 prompt，还应对注意力排序和前额叶冲动抑制提供轻度加权；这种影响是偏置，不是硬覆盖
 
 ---
 
@@ -880,10 +931,18 @@ long_term_memory:
 habits:
   max_active_in_prompt: 3        # 每轮注入 prompt 的最大习气数
   decay_rate: 0.01               # 每次浅睡的未激活习气衰减量
+  activation_similarity_threshold: 0.35  # 种子现行所需的 embedding 相似度阈值
+  activation_candidate_limit: 12         # 种子现行检索的候选数上限
+
+# 末那识（自我连续性）
+manas:
+  warning_threshold: 3           # 连续失稳达到该值时注入修正提示
+  reflection_threshold: 5        # 连续失稳达到该值时触发元认知反思
+  stable_window: 12              # 近期稳定自我表述窗口长度
 
 # 注意力
 attention:
-  evaluation_method: "rule"      # "rule" 或 "model"
+  evaluation_method: "structural" # 使用结构化信号评分
 
 # 情绪
 emotion:

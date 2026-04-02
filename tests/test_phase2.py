@@ -14,6 +14,7 @@ import redis as redis_lib
 from core.main import (
     EngineRuntime,
     _execute_cycle,
+    _recover_runtime_services,
     _post_cycle_phase4,
     _safe_post_cycle_phase4,
     _run_engine_loop,
@@ -439,6 +440,8 @@ class RecoveryTests(unittest.TestCase):
         mock_conn = MagicMock()
         mock_connect.return_value = mock_conn
         ltm = LongTermMemory(None)
+        habit_memory = MagicMock()
+        embedding_client = MagicMock()
 
         identity, last_attempt = _maybe_reconnect_pg(
             None,
@@ -448,12 +451,55 @@ class RecoveryTests(unittest.TestCase):
             now=10.0,
             last_attempt=0.0,
             interval=5.0,
+            habit_memory=habit_memory,
+            bootstrap_habits=[{"pattern": "先回应眼前的人", "category": "behavioral", "strength": 0.4}],
+            embedding_client=embedding_client,
+            embedding_model="embed-model",
         )
 
         self.assertEqual(identity, {"self_description": "DB版本"})
         self.assertEqual(last_attempt, 10.0)
         self.assertTrue(ltm.available)
+        habit_memory.attach_connection.assert_called_once_with(mock_conn)
+        habit_memory.ensure_schema.assert_called_once_with()
+        habit_memory.ensure_bootstrap_seeds.assert_called_once_with(
+            [{"pattern": "先回应眼前的人", "category": "behavioral", "strength": 0.4}],
+            embedding_client=embedding_client,
+            embedding_model="embed-model",
+        )
         mock_load_identity.assert_called_once_with(mock_conn, {"self_description": "配置版本"})
+
+    @patch("core.main._connect_pg")
+    def test_maybe_reconnect_pg_keeps_ltm_unavailable_when_habit_init_fails(
+        self,
+        mock_connect,
+    ) -> None:
+        mock_conn = MagicMock()
+        mock_connect.return_value = mock_conn
+        ltm = LongTermMemory(None)
+        habit_memory = MagicMock()
+        habit_memory.ensure_schema.side_effect = psycopg.Error("init failed")
+
+        identity, last_attempt = _maybe_reconnect_pg(
+            None,
+            ltm,
+            {"self_description": "配置版本"},
+            {"self_description": "配置版本"},
+            now=10.0,
+            last_attempt=0.0,
+            interval=5.0,
+            habit_memory=habit_memory,
+            bootstrap_habits=[],
+            embedding_client=MagicMock(),
+            embedding_model="embed-model",
+        )
+
+        self.assertEqual(identity, {"self_description": "配置版本"})
+        self.assertEqual(last_attempt, 10.0)
+        self.assertFalse(ltm.available)
+        habit_memory.attach_connection.assert_any_call(mock_conn)
+        habit_memory.attach_connection.assert_any_call(None)
+        mock_conn.close.assert_called_once_with()
 
 
 class CycleTimingLogTests(unittest.TestCase):
@@ -474,6 +520,7 @@ class CycleTimingLogTests(unittest.TestCase):
             emotion=MagicMock(),
             sleep=MagicMock(),
             prefrontal=MagicMock(),
+            manas=MagicMock(),
             metacognition=MagicMock(),
         )
         runtime.stm.get_context.return_value = []
@@ -505,6 +552,15 @@ class CycleTimingLogTests(unittest.TestCase):
             "plan_mode": False,
         }
         runtime.prefrontal.review_thoughts.return_value = ([], [])
+        runtime.manas.current_prompt_state.return_value = {
+            "self_coherence_score": 1.0,
+            "consecutive_disruptions": 0,
+            "session_context": "",
+            "warning": "",
+            "identity_notice": "",
+            "reflection_requested": False,
+        }
+        runtime.manas.evaluate_cycle.return_value = runtime.manas.current_prompt_state.return_value
         runtime.metacognition.recent_reflections.return_value = []
         runtime.metacognition.should_reflect.return_value = False
 
@@ -553,6 +609,7 @@ class CycleTimingLogTests(unittest.TestCase):
             emotion=MagicMock(),
             sleep=MagicMock(),
             prefrontal=MagicMock(),
+            manas=MagicMock(),
             metacognition=MagicMock(),
         )
         runtime.stm.get_context.return_value = []
@@ -583,6 +640,15 @@ class CycleTimingLogTests(unittest.TestCase):
             "plan_mode": False,
         }
         runtime.prefrontal.review_thoughts.return_value = ([], [])
+        runtime.manas.current_prompt_state.return_value = {
+            "self_coherence_score": 1.0,
+            "consecutive_disruptions": 0,
+            "session_context": "",
+            "warning": "",
+            "identity_notice": "",
+            "reflection_requested": False,
+        }
+        runtime.manas.evaluate_cycle.return_value = runtime.manas.current_prompt_state.return_value
         runtime.metacognition.recent_reflections.return_value = []
         runtime.metacognition.should_reflect.return_value = False
 
@@ -632,6 +698,7 @@ class Phase4RuntimeTests(unittest.TestCase):
         sleep.should_deep_sleep.return_value = False
         sleep.should_light_sleep.return_value = True
         sleep.run_light_sleep.return_value = SimpleNamespace(
+            state={"summary": "浅睡整理完成。"},
             archived_count=5,
             semantic_count=2,
             impression_updates=1,
@@ -655,6 +722,7 @@ class Phase4RuntimeTests(unittest.TestCase):
             auxiliary_model_config={"name": "aux"},
             metacognition=MagicMock(),
             emotion=MagicMock(),
+            manas=MagicMock(),
         )
         runtime.stm.get_context.return_value = []
         runtime.stm.buffer_thoughts.return_value = [_make_thought(1, 1, "old")]
@@ -669,6 +737,61 @@ class Phase4RuntimeTests(unittest.TestCase):
 
         sleep.consume_cycle.assert_called_once()
         sleep.run_light_sleep.assert_called_once()
+        runtime.manas.note_sleep_transition.assert_called_once()
+
+    @patch("core.main._publish_event")
+    @patch("core.main._maybe_reconnect_pg")
+    @patch("core.main._maybe_reconnect_redis")
+    @patch("core.main._redis_recovered")
+    def test_recover_runtime_services_notifies_manas_of_runtime_recovery(
+        self,
+        mock_redis_recovered,
+        mock_reconnect_redis,
+        mock_reconnect_pg,
+        _mock_publish_event,
+    ) -> None:
+        runtime = SimpleNamespace(
+            stm=SimpleNamespace(redis_available=False, redis_client=MagicMock()),
+            stimulus_queue=MagicMock(),
+            action_manager=MagicMock(),
+            emotion=MagicMock(),
+            prefrontal=MagicMock(),
+            manas=MagicMock(),
+            metacognition=MagicMock(),
+            sleep=MagicMock(),
+            ltm=SimpleNamespace(available=False),
+            habit_memory=MagicMock(),
+            bootstrap_habits=[],
+            embedding_client=MagicMock(),
+            embedding_model="embed-model",
+        )
+        mock_reconnect_redis.side_effect = lambda *args, **kwargs: 12.0
+        mock_redis_recovered.return_value = True
+
+        def reconnect_pg(*args, **kwargs):
+            runtime.ltm.available = True
+            return {"self_understanding": "restored"}, 34.0
+
+        mock_reconnect_pg.side_effect = reconnect_pg
+
+        identity, redis_at, pg_at = _recover_runtime_services(
+            log_file=None,
+            runtime=_as_runtime(runtime),
+            identity={"self_understanding": "before"},
+            bootstrap_identity={"self_understanding": "boot"},
+            now=100.0,
+            reconnect_interval=30.0,
+            last_redis_reconnect=1.0,
+            last_pg_reconnect=2.0,
+        )
+
+        self.assertEqual(identity, {"self_understanding": "restored"})
+        self.assertEqual(redis_at, 12.0)
+        self.assertEqual(pg_at, 34.0)
+        runtime.manas.note_restart_restoration.assert_called_once_with(
+            redis_restored=True,
+            pg_restored=True,
+        )
 
     @patch("core.main.embed_text", side_effect=OSError("embed offline"))
     def test_retrieve_associations_falls_back_to_recent_by_time_when_embed_fails(self, mock_embed) -> None:

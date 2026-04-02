@@ -124,6 +124,17 @@ class HabitPromptEntry(TypedDict):
     pattern: str
     category: str
     strength: float
+    activation_score: NotRequired[float]
+    manifested: NotRequired[bool]
+
+
+class ManasPromptState(TypedDict):
+    self_coherence_score: float
+    consecutive_disruptions: int
+    session_context: str
+    warning: str
+    identity_notice: str
+    reflection_requested: bool
 
 
 class AttentionPromptEntry(TypedDict):

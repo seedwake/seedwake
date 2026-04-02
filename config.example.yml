@@ -79,9 +79,11 @@ perception:
 habits:
   max_active_in_prompt: 3
   decay_rate: 0.01
+  activation_similarity_threshold: 0.35
+  activation_candidate_limit: 12
 
 attention:
-  evaluation_method: "rule_based"
+  evaluation_method: "structural"
 
 emotion:
   inertia: 0.7
@@ -93,6 +95,11 @@ prefrontal:
 
 metacognition:
   reflection_interval: 50
+
+manas:
+  warning_threshold: 3
+  reflection_threshold: 5
+  stable_window: 12
 
 sleep:
   energy_per_cycle: 0.2

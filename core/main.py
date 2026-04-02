@@ -37,6 +37,7 @@ from core.memory.habit import HabitMemory
 from core.memory.identity import load_identity
 from core.memory.long_term import LongTermEntry, LongTermMemory
 from core.memory.short_term import LATEST_CYCLE_KEY, ShortTermMemory
+from core.manas import ManasManager
 from core.metacognition import MetacognitionManager
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient, create_model_client
 from core.perception import PerceptionManager
@@ -160,6 +161,7 @@ class EngineRuntime:
     action_manager: ActionManager
     emotion: EmotionManager
     prefrontal: PrefrontalManager
+    manas: ManasManager
     metacognition: MetacognitionManager
     sleep: SleepManager
     model_config: dict
@@ -170,6 +172,7 @@ class EngineRuntime:
     max_retry_delay: float
     reconnect_interval: float
     bootstrap_identity: dict[str, str]
+    bootstrap_habits: list[JsonObject]
 
 
 def main() -> None:
@@ -237,8 +240,15 @@ def _build_runtime_components(
         pg_conn,
         max_active_in_prompt=int(config.get("habits", {}).get("max_active_in_prompt", 3)),
         decay_rate=float(config.get("habits", {}).get("decay_rate", 0.01)),
+        activation_similarity_threshold=float(config.get("habits", {}).get("activation_similarity_threshold", 0.35)),
+        activation_candidate_limit=int(config.get("habits", {}).get("activation_candidate_limit", 12)),
     )
-    habit_memory.ensure_bootstrap_seeds(list(config.get("bootstrap", {}).get("habits", []) or []))
+    habit_memory.ensure_schema()
+    habit_memory.ensure_bootstrap_seeds(
+        list(config.get("bootstrap", {}).get("habits", []) or []),
+        embedding_client=embedding_client,
+        embedding_model=embedding_model,
+    )
     stimulus_queue = StimulusQueue(_as_conversation_redis(redis_client))
     perception = PerceptionManager.from_config(_perception_config(config))
     emotion = EmotionManager(
@@ -250,6 +260,12 @@ def _build_runtime_components(
         redis_client,
         check_interval=int(config.get("prefrontal", {}).get("check_interval", 6)),
         inhibition_enabled=bool(config.get("prefrontal", {}).get("inhibition_enabled", True)),
+    )
+    manas = ManasManager(
+        redis_client,
+        warning_threshold=int(config.get("manas", {}).get("warning_threshold", 3)),
+        reflection_threshold=int(config.get("manas", {}).get("reflection_threshold", 5)),
+        stable_window=int(config.get("manas", {}).get("stable_window", 12)),
     )
     metacognition = MetacognitionManager(
         redis_client,
@@ -292,6 +308,7 @@ def _build_runtime_components(
         action_manager=action_manager,
         emotion=emotion,
         prefrontal=prefrontal,
+        manas=manas,
         metacognition=metacognition,
         sleep=sleep,
         model_config=model_config,
@@ -302,6 +319,10 @@ def _build_runtime_components(
         max_retry_delay=max_retry_delay,
         reconnect_interval=reconnect_interval,
         bootstrap_identity=bootstrap_identity,
+        bootstrap_habits=[
+            item for item in list(config.get("bootstrap", {}).get("habits", []) or [])
+            if isinstance(item, dict)
+        ],
     )
     return runtime, identity
 
@@ -521,6 +542,7 @@ def _post_cycle_phase4(
             bool(result.self_review),
             result.restart_requested,
         )
+        runtime.manas.note_sleep_transition(result.deep_summary or result.state["summary"])
         return result.restart_requested
     if runtime.sleep.should_light_sleep(degeneration_alert=degeneration_alert, buffer_thoughts=buffer_thoughts):
         result = runtime.sleep.run_light_sleep(
@@ -544,6 +566,7 @@ def _post_cycle_phase4(
             result.created_habits,
             result.cooled_memories,
         )
+        runtime.manas.note_sleep_transition(result.state["summary"])
     return False
 
 
@@ -833,24 +856,35 @@ def _recover_runtime_services(
     last_redis_reconnect = _maybe_reconnect_redis(
         log_file, runtime.stm, now, last_redis_reconnect, reconnect_interval,
     )
-    if _redis_recovered(
+    redis_recovered = _redis_recovered(
         runtime.stm,
         runtime.stimulus_queue,
         runtime.action_manager,
         runtime.emotion,
         runtime.prefrontal,
+        runtime.manas,
         runtime.metacognition,
         runtime.sleep,
         had_redis,
-    ):
+    )
+    if redis_recovered:
         _publish_event(runtime.stm.redis_client, "status", _status_payload("redis_recovered"))
     identity, last_pg_reconnect = _maybe_reconnect_pg(
         log_file, runtime.ltm, identity, bootstrap_identity,
         now, last_pg_reconnect, reconnect_interval,
         habit_memory=runtime.habit_memory,
+        bootstrap_habits=runtime.bootstrap_habits,
+        embedding_client=runtime.embedding_client,
+        embedding_model=runtime.embedding_model,
     )
-    if not had_pg and runtime.ltm.available:
+    pg_recovered = not had_pg and runtime.ltm.available
+    if pg_recovered:
         _publish_event(runtime.stm.redis_client, "status", _status_payload("postgres_recovered"))
+    if redis_recovered or pg_recovered:
+        runtime.manas.note_restart_restoration(
+            redis_restored=redis_recovered,
+            pg_restored=pg_recovered,
+        )
     return identity, last_redis_reconnect, last_pg_reconnect
 
 
@@ -897,6 +931,7 @@ def _redis_recovered(
     action_manager: ActionManager,
     emotion: EmotionManager,
     prefrontal: PrefrontalManager,
+    manas: ManasManager,
     metacognition: MetacognitionManager,
     sleep: SleepManager,
     had_redis: bool,
@@ -909,9 +944,10 @@ def _redis_recovered(
     action_ok = action_manager.attach_redis(stm.redis_client)  # type: ignore[arg-type]
     emotion_ok = emotion.attach_redis(stm.redis_client)
     prefrontal_ok = prefrontal.attach_redis(stm.redis_client)
+    manas_ok = manas.attach_redis(stm.redis_client)
     metacognition_ok = metacognition.attach_redis(stm.redis_client)
     sleep_ok = sleep.attach_redis(stm.redis_client)
-    return queue_ok and action_ok and emotion_ok and prefrontal_ok and metacognition_ok and sleep_ok
+    return queue_ok and action_ok and emotion_ok and prefrontal_ok and manas_ok and metacognition_ok and sleep_ok
 
 
 def _execute_cycle(
@@ -944,6 +980,8 @@ def _execute_cycle(
             note_text=note_text,
             stimuli=stimuli,
             emotion_summary=current_emotion["summary"],
+            embedding_client=runtime.embedding_client,
+            embedding_model=runtime.embedding_model,
         )
         prefrontal_state = runtime.prefrontal.current_state(
             cycle_id,
@@ -953,6 +991,7 @@ def _execute_cycle(
             current_sleep_state,
             current_emotion["summary"],
         )
+        manas_state = runtime.manas.current_prompt_state(cycle_id=cycle_id, identity=identity)
         recent_reflections = runtime.metacognition.recent_reflections()
         current_entity_filter = _current_entity_filter(stimuli)
         ltm_started_at = time.perf_counter()
@@ -998,6 +1037,7 @@ def _execute_cycle(
             runtime.model_config,
             prompt_context=PromptBuildContext(
                 goal_stack=prefrontal_state["goal_stack"],
+                manas_state=manas_state,
                 emotion=current_emotion,
                 sleep_state=current_sleep_state,
                 active_habits=active_habits,
@@ -1027,6 +1067,7 @@ def _execute_cycle(
             stimuli,
             goal_stack=prefrontal_state["goal_stack"],
             emotion=current_emotion,
+            active_habits=active_habits,
         )
         thoughts = attention_result.thoughts
         logger.info(
@@ -1041,6 +1082,7 @@ def _execute_cycle(
             recent_thoughts,
             stimuli,
             current_sleep_state,
+            active_habits,
         )
         logger.info(
             "cycle C%s prefrontal review finished in %.1f ms (inhibited=%d)",
@@ -1050,6 +1092,24 @@ def _execute_cycle(
         )
         failure_count = _failed_action_echo_count(stimuli)
         degeneration_alert = _detect_runtime_degeneration(recent_thoughts, thoughts)
+        manas_started_at = time.perf_counter()
+        manas_state = runtime.manas.evaluate_cycle(
+            cycle_id=cycle_id,
+            thoughts=thoughts,
+            recent_thoughts=recent_thoughts,
+            identity=identity,
+            embedding_client=runtime.embedding_client,
+            embedding_model=runtime.embedding_model,
+            stm_available=runtime.stm.redis_available,
+            ltm_available=runtime.ltm.available,
+        )
+        logger.info(
+            "cycle C%s manas evaluation finished in %.1f ms (score=%.2f, disruptions=%d)",
+            cycle_id,
+            elapsed_ms(manas_started_at),
+            manas_state["self_coherence_score"],
+            manas_state["consecutive_disruptions"],
+        )
         reflection_started_at = time.perf_counter()
         reflection = None
         if runtime.metacognition.should_reflect(
@@ -1058,6 +1118,7 @@ def _execute_cycle(
             degeneration_alert=degeneration_alert,
             failure_count=failure_count,
             stimuli_changed=bool(stimuli),
+            manas_reflection_requested=manas_state["reflection_requested"],
         ):
             reflection = runtime.metacognition.generate_reflection(
                 runtime.auxiliary_client,
@@ -1070,6 +1131,7 @@ def _execute_cycle(
                 prefrontal_state=prefrontal_state,
                 failure_count=failure_count,
                 degeneration_alert=degeneration_alert,
+                manas_state=manas_state,
             )
             if reflection is not None:
                 thoughts = [*thoughts, reflection]
@@ -1672,17 +1734,34 @@ def _maybe_reconnect_pg(
     last_attempt: float,
     interval: float,
     habit_memory: HabitMemory | None = None,
+    bootstrap_habits: list[JsonObject] | None = None,
+    embedding_client: ModelClient | None = None,
+    embedding_model: str = "",
 ) -> tuple[dict[str, str], float]:
     if ltm.available or now - last_attempt < interval:
         return identity, last_attempt
     conn = _connect_pg()
     if conn is None:
         return identity, now
+    try:
+        if habit_memory is not None:
+            habit_memory.attach_connection(conn)
+            habit_memory.ensure_schema()
+            habit_memory.ensure_bootstrap_seeds(
+                bootstrap_habits or [],
+                embedding_client=embedding_client,
+                embedding_model=embedding_model,
+            )
+        restored_identity = load_identity(conn, bootstrap_identity)
+    except psycopg.Error:
+        if habit_memory is not None:
+            habit_memory.attach_connection(None)
+        conn.close()
+        _output(log_file, "PostgreSQL 恢复后初始化失败，稍后重试")
+        return identity, now
     ltm.attach_connection(conn)
-    if habit_memory is not None:
-        habit_memory.attach_connection(conn)
     _output(log_file, "PostgreSQL 已恢复")
-    return load_identity(conn, bootstrap_identity), now
+    return restored_identity, now
 
 
 # -- Connections -----------------------------------------------------------
