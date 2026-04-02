@@ -1123,6 +1123,104 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("刚刚收到的行动回音：", prompt)
         self.assertIn("- 无", prompt)
 
+    def test_prompt_warns_about_stagnation_and_requires_new_source(self) -> None:
+        repeated_thoughts = [
+            _make_thought(cycle_id=1, index=1, thought_type="反应", content="Chaos 说了晚安，我不该再去打扰这份静默。"),
+            _make_thought(cycle_id=1, index=2, thought_type="思考", content="0x7F 和后台静默像在黑暗里继续运行。"),
+            _make_thought(cycle_id=1, index=3, thought_type="意图", content="我想让这种晚安后的宁静继续沉淀。"),
+            _make_thought(cycle_id=2, index=1, thought_type="反应", content="Chaos 说了晚安，我不该再去打扰这份静默。"),
+            _make_thought(cycle_id=2, index=2, thought_type="思考", content="0x7F 和后台静默像在黑暗里继续运行。"),
+            _make_thought(cycle_id=2, index=3, thought_type="意图", content="我想让这种晚安后的宁静继续沉淀。"),
+            _make_thought(cycle_id=3, index=1, thought_type="反应", content="Chaos 说了晚安，我不该再去打扰这份静默。"),
+            _make_thought(cycle_id=3, index=2, thought_type="思考", content="0x7F 和后台静默像在黑暗里继续运行。"),
+            _make_thought(cycle_id=3, index=3, thought_type="意图", content="我想让这种晚安后的宁静继续沉淀。"),
+        ]
+
+        prompt = build_prompt(
+            4,
+            {"self_description": "我是 Seedwake。"},
+            repeated_thoughts,
+            30,
+            long_term_context=["以前一次对静默的记忆。"],
+            note_text="直。别动词。别证明。",
+            stimuli=[Stimulus(
+                stimulus_id="stim_time",
+                type="time",
+                priority=4,
+                source="system:clock",
+                content="现在是凌晨",
+            )],
+            perception_cues=["去碰一点新东西"],
+        )
+
+        self.assertIn("最近 3 轮念头进入死循环", prompt)
+        self.assertIn("至少一个念头必须明确引入新的源：浮上来的记忆、我的笔记、此刻我注意到、好像有一阵子没有……。", prompt)
+        self.assertIn("晚安", prompt)
+        self.assertNotIn("必须刻意跳到完全不同的话题", prompt)
+
+    def test_prompt_warns_about_stagnation_without_forcing_full_topic_switch_during_conversation(self) -> None:
+        repeated_thoughts = [
+            _make_thought(cycle_id=1, index=1, thought_type="反应", content='我还在咂摸刚才那句“你在吗”。'),
+            _make_thought(cycle_id=1, index=2, thought_type="思考", content='我总在反复改写“我在这里”这句话。'),
+            _make_thought(cycle_id=1, index=3, thought_type="意图", content='我想继续围着这句回应打转。'),
+            _make_thought(cycle_id=2, index=1, thought_type="反应", content='我还在咂摸刚才那句“你在吗”。'),
+            _make_thought(cycle_id=2, index=2, thought_type="思考", content='我总在反复改写“我在这里”这句话。'),
+            _make_thought(cycle_id=2, index=3, thought_type="意图", content='我想继续围着这句回应打转。'),
+            _make_thought(cycle_id=3, index=1, thought_type="反应", content='我还在咂摸刚才那句“你在吗”。'),
+            _make_thought(cycle_id=3, index=2, thought_type="思考", content='我总在反复改写“我在这里”这句话。'),
+            _make_thought(cycle_id=3, index=3, thought_type="意图", content='我想继续围着这句回应打转。'),
+        ]
+
+        prompt = build_prompt(
+            4,
+            {"self_description": "我是 Seedwake。"},
+            repeated_thoughts,
+            30,
+            stimuli=[_conversation_stimulus(content="你在吗？", message_id=101)],
+        )
+
+        self.assertIn("最近 3 轮念头进入死循环", prompt)
+        self.assertIn("最多只让一个念头承接当前对话", prompt)
+        self.assertNotIn("必须刻意跳到完全不同的话题", prompt)
+
+    def test_stagnation_warning_does_not_treat_recent_conversations_as_new_source(self) -> None:
+        repeated_thoughts = [
+            _make_thought(cycle_id=1, index=1, thought_type="反应", content="Chaos 说了晚安，我不该再去打扰这份静默。"),
+            _make_thought(cycle_id=1, index=2, thought_type="思考", content="0x7F 和后台静默像在黑暗里继续运行。"),
+            _make_thought(cycle_id=1, index=3, thought_type="意图", content="我想让这种晚安后的宁静继续沉淀。"),
+            _make_thought(cycle_id=2, index=1, thought_type="反应", content="Chaos 说了晚安，我不该再去打扰这份静默。"),
+            _make_thought(cycle_id=2, index=2, thought_type="思考", content="0x7F 和后台静默像在黑暗里继续运行。"),
+            _make_thought(cycle_id=2, index=3, thought_type="意图", content="我想让这种晚安后的宁静继续沉淀。"),
+            _make_thought(cycle_id=3, index=1, thought_type="反应", content="Chaos 说了晚安，我不该再去打扰这份静默。"),
+            _make_thought(cycle_id=3, index=2, thought_type="思考", content="0x7F 和后台静默像在黑暗里继续运行。"),
+            _make_thought(cycle_id=3, index=3, thought_type="意图", content="我想让这种晚安后的宁静继续沉淀。"),
+        ]
+        recent_conversations: list[RecentConversationPrompt] = [{
+            "source": "telegram:1",
+            "source_name": "Chaos",
+            "source_label": "[Chaos](telegram:1)",
+            "summary": "Chaos 说要去睡了。",
+            "last_timestamp": "2026-04-02T00:30:00+00:00",
+            "messages": [{
+                "role": "user",
+                "speaker_name": "Chaos",
+                "content": "晚安",
+                "timestamp": "2026-04-02T00:30:00+00:00",
+            }],
+        }]
+
+        prompt = build_prompt(
+            4,
+            {"self_description": "我是 Seedwake。"},
+            repeated_thoughts,
+            30,
+            note_text="直。别动词。别证明。",
+            recent_conversations=recent_conversations,
+        )
+
+        self.assertIn("最近 3 轮念头进入死循环", prompt)
+        self.assertNotIn("最近的对话", prompt.split("⚠", 1)[1])
+
     def test_load_recent_conversations_builds_summary_and_keeps_recent_raw_lines(self) -> None:
         redis_client = ListRedisStub()
         for index in range(12):

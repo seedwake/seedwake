@@ -3,6 +3,7 @@
 import logging
 import re
 import time
+from collections import Counter
 from collections.abc import Callable
 from datetime import datetime
 
@@ -67,6 +68,7 @@ SYSTEM_PROMPT = """\
 - 每个念头用标签前缀开头
 - 三个念头是同时浮现的并行想法，不是一个思维链的三个步骤
 - 没有外部刺激时，允许跳跃到完全不同的方向——人的思维本来就是多线程的
+- 不要机械复述最近几轮同样的意象、句式或情绪；如果系统提醒我已经卡住了，就按提醒明确引入新的源
 - 有人对我说话或有行动结果回来时，至少一个念头应该回应它
 - 如果我心里已经是在回应对方、安抚对方、接住对方、回答对方，或者我明确想把一句话递给对方，这种回应必须外化成 {action:send_message, ...}，不能只停留在“我想回应/我想接住/我想靠近”的内在意图
 - 当 conversation 里有人直接提问、催我回复、说自己在等待，或明确要求我和他说话时，“回应它”通常意味着优先发出一条 {action:send_message, ...}，而不是继续只在内部流动
@@ -102,6 +104,35 @@ ACTION_ECHO_LABELS = {
 UNKNOWN_ACTION_ECHO_LABEL = "[结果]"
 RUNNING_ACTION_VISIBLE_STATUSES = {"pending", "running"}
 PROMPT_SECTION_LOG_THRESHOLD_MS = 10.0
+STAGNATION_CHECK_CYCLES = 3
+STAGNATION_SIMILARITY_THRESHOLD = 0.6
+STAGNATION_TERM_PATTERN = re.compile(r"[A-Za-z0-9_:+°%.-]{2,}|[\u4e00-\u9fff]{2,8}")
+STAGNATION_TERM_STOPWORDS = {
+    "刚才",
+    "现在",
+    "这种",
+    "那种",
+    "这样",
+    "已经",
+    "自己",
+    "继续",
+    "不再",
+    "不需要",
+    "需要",
+    "一个",
+    "没有",
+    "不是",
+    "如果",
+    "因为",
+    "只是",
+    "可以",
+    "一样",
+    "一样的",
+    "此刻",
+    "也许",
+    "或许",
+    "就是",
+}
 logger = logging.getLogger(__name__)
 
 
@@ -121,11 +152,51 @@ def build_prompt(
     """Build a single prompt string for thought generation."""
     parts = [_timed_prompt_section("system", lambda: _build_system(identity))]
     visible_running_actions = _visible_running_actions(running_actions)
-    conversations: list[Stimulus] = []
-    action_echoes: list[Stimulus] = []
-    passive: list[Stimulus] = []
-
     window = recent_thoughts[-context_window * 3:]
+    _append_prompt_context_sections(
+        parts,
+        window,
+        long_term_context,
+        note_text,
+        perception_cues or [],
+    )
+    conversations, action_echoes, passive = _split_stimuli(stimuli or [])
+    conversation_labels = _conversation_label_map(conversations, recent_conversations)
+    _append_prompt_stimulus_sections(
+        parts,
+        conversations,
+        action_echoes,
+        recent_action_echoes or [],
+        visible_running_actions,
+        passive,
+        recent_conversations or [],
+        conversation_labels,
+    )
+    stagnation_warning = _stagnation_warning_text(
+        window,
+        long_term_context,
+        note_text,
+        recent_action_echoes or [],
+        action_echoes,
+        visible_running_actions,
+        passive,
+        perception_cues or [],
+        recent_conversations or [],
+        bool(conversations or action_echoes or visible_running_actions),
+    )
+    if stagnation_warning:
+        parts.append(stagnation_warning)
+    _append_prompt_section(parts, "next_cycle", lambda: _format_next_cycle(cycle_id))
+    return "\n\n".join(parts)
+
+
+def _append_prompt_context_sections(
+    parts: list[str],
+    window: list[Thought],
+    long_term_context: list[str] | None,
+    note_text: str,
+    perception_cues: list[str],
+) -> None:
     if window:
         _append_prompt_section(parts, "recent_thoughts", lambda: _format_thought_history(window))
     if long_term_context:
@@ -137,15 +208,23 @@ def build_prompt(
         cues = perception_cues
         _append_prompt_section(parts, "perception_cues", lambda: _format_perception_cues(cues))
 
-    if stimuli:
-        conversations, action_echoes, passive = _split_stimuli(stimuli)
-    conversation_labels = _conversation_label_map(conversations, recent_conversations)
+
+def _append_prompt_stimulus_sections(
+    parts: list[str],
+    conversations: list[Stimulus],
+    action_echoes: list[Stimulus],
+    recent_action_echoes: list[Stimulus],
+    visible_running_actions: list[ActionRecord],
+    passive: list[Stimulus],
+    recent_conversations: list[RecentConversationPrompt],
+    conversation_labels: dict[str, str],
+) -> None:
     if action_echoes or recent_action_echoes:
         _append_prompt_section(
             parts,
             "action_echoes",
             lambda: _format_action_echoes(
-                recent_action_echoes or [],
+                recent_action_echoes,
                 action_echoes,
                 conversation_labels,
             ),
@@ -167,8 +246,36 @@ def build_prompt(
         )
     if conversations:
         _append_prompt_section(parts, "conversations", lambda: _format_conversations(conversations))
-    _append_prompt_section(parts, "next_cycle", lambda: _format_next_cycle(cycle_id))
-    return "\n\n".join(parts)
+
+
+def _stagnation_warning_text(
+    window: list[Thought],
+    long_term_context: list[str] | None,
+    note_text: str,
+    recent_action_echoes: list[Stimulus],
+    action_echoes: list[Stimulus],
+    visible_running_actions: list[ActionRecord],
+    passive: list[Stimulus],
+    perception_cues: list[str],
+    recent_conversations: list[RecentConversationPrompt],
+    has_foreground: bool,
+) -> str:
+    if not window:
+        return ""
+    return _detect_thought_stagnation(
+        window,
+        available_sources=_stagnation_sources(
+            long_term_context,
+            note_text,
+            recent_action_echoes,
+            action_echoes,
+            visible_running_actions,
+            passive,
+            perception_cues,
+            recent_conversations,
+        ),
+        has_foreground=has_foreground,
+    )
 
 
 def _append_prompt_section(
@@ -302,6 +409,136 @@ def _format_thought_history(thoughts: list[Thought]) -> str:
         trigger = f" (← {t.trigger_ref})" if t.trigger_ref else ""
         lines.append(f"[{t.type}-{t.thought_id}] {t.content}{trigger}")
     return _render_section("最近的念头", lines)
+
+
+def _detect_thought_stagnation(
+    thoughts: list[Thought],
+    *,
+    available_sources: list[str],
+    has_foreground: bool,
+) -> str:
+    if len(thoughts) < STAGNATION_CHECK_CYCLES * 3:
+        return ""
+    recent_cycles = _group_recent_cycles(thoughts, STAGNATION_CHECK_CYCLES)
+    if len(recent_cycles) < STAGNATION_CHECK_CYCLES:
+        return ""
+    cycle_texts = [
+        " ".join(
+            normalized
+            for thought in cycle_thoughts
+            if (normalized := _normalize_stagnation_text(thought.content))
+        )
+        for cycle_thoughts in recent_cycles
+    ]
+    if any(not text for text in cycle_texts):
+        return ""
+    similar_pairs = 0
+    total_pairs = 0
+    for i in range(len(cycle_texts)):
+        for j in range(i + 1, len(cycle_texts)):
+            total_pairs += 1
+            if _text_similarity(cycle_texts[i], cycle_texts[j]) >= STAGNATION_SIMILARITY_THRESHOLD:
+                similar_pairs += 1
+    if total_pairs > 0 and similar_pairs == total_pairs:
+        return _stagnation_warning(cycle_texts, available_sources, has_foreground)
+    return ""
+
+
+def _group_recent_cycles(thoughts: list[Thought], n: int) -> list[list[Thought]]:
+    cycles: dict[int, list[Thought]] = {}
+    for t in thoughts:
+        cycles.setdefault(t.cycle_id, []).append(t)
+    sorted_cycle_ids = sorted(cycles.keys())[-n:]
+    return [cycles[cid] for cid in sorted_cycle_ids]
+
+
+def _stagnation_sources(
+    long_term_context: list[str] | None,
+    note_text: str,
+    recent_action_echoes: list[Stimulus],
+    action_echoes: list[Stimulus],
+    running_actions: list[ActionRecord],
+    passive: list[Stimulus],
+    perception_cues: list[str],
+    recent_conversations: list[RecentConversationPrompt],
+) -> list[str]:
+    sources: list[str] = []
+    if long_term_context:
+        sources.append("浮上来的记忆")
+    if note_text.strip():
+        sources.append("我的笔记")
+    if recent_action_echoes or action_echoes:
+        sources.append("行动有了回音")
+    if running_actions:
+        sources.append("我已经发起、正在等回音的事")
+    if passive:
+        sources.append("此刻我注意到")
+    if perception_cues:
+        sources.append("好像有一阵子没有……")
+    _ = recent_conversations
+    return sources
+
+
+def _normalize_stagnation_text(text: str) -> str:
+    stripped = _strip_action_marker(text)
+    normalized = re.sub(r"[^\w\u4e00-\u9fff]+", " ", stripped)
+    return _compact_prompt_text(normalized)
+
+
+def _stagnation_warning(
+    cycle_texts: list[str],
+    available_sources: list[str],
+    has_foreground: bool,
+) -> str:
+    repeated_terms = _stagnation_terms(cycle_texts)
+    if repeated_terms:
+        repeated_text = f"最近反复出现的意象：{', '.join(repeated_terms)}。"
+    else:
+        repeated_text = "最近几轮一直在复述同一组意象和情绪。"
+    if available_sources:
+        source_text = "、".join(available_sources)
+    else:
+        source_text = "一个新的具体问题、记忆、感知或行动"
+    if has_foreground:
+        return (
+            "⚠ 最近 3 轮念头进入死循环。"
+            f"{repeated_text}"
+            "不要再机械改写同一句话或同一组意象。"
+            f"这一轮至少一个念头必须明确引入新的源：{source_text}。"
+            "如果眼前有人在说话，最多只让一个念头承接当前对话，其余念头不要继续复述。"
+        )
+    return (
+        "⚠ 最近 3 轮念头进入死循环。"
+        f"{repeated_text}"
+        f"这一轮至少一个念头必须明确引入新的源：{source_text}。"
+        "不要三个念头继续围着同一组意象改写。"
+    )
+
+
+def _stagnation_terms(cycle_texts: list[str]) -> list[str]:
+    counts: Counter[str] = Counter()
+    for text in cycle_texts:
+        terms = {
+            match.group(0)
+            for match in STAGNATION_TERM_PATTERN.finditer(text)
+            if match.group(0) not in STAGNATION_TERM_STOPWORDS
+        }
+        counts.update(terms)
+    ranked_terms = [
+        term for term, count in counts.most_common()
+        if count >= 2
+    ]
+    return ranked_terms[:5]
+
+
+def _text_similarity(a: str, b: str) -> float:
+    if len(a) < 2 or len(b) < 2:
+        return 0.0
+    bigrams_a = {a[i:i + 2] for i in range(len(a) - 1)}
+    bigrams_b = {b[i:i + 2] for i in range(len(b) - 1)}
+    intersection = len(bigrams_a & bigrams_b)
+    union = len(bigrams_a | bigrams_b)
+    return intersection / union if union > 0 else 0.0
 
 
 def _format_running_actions(actions: list[ActionRecord], conversation_labels: dict[str, str]) -> str:
