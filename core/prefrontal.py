@@ -1,4 +1,8 @@
-"""Prefrontal executive control for Phase 4."""
+"""Prefrontal executive control for Phase 4.
+
+Structural inhibition rules only — no keyword/string matching on note or thought content.
+Semantic understanding of notes and goals is left to the model itself via prompt context.
+"""
 
 import json
 from dataclasses import replace
@@ -58,7 +62,7 @@ class PrefrontalManager:
         if sleep_state["mode"] != "awake":
             guidance.append(f"我现在偏{sleep_state['mode']}，需要把行动收得更谨慎。")
         if active_habits:
-            guidance.append(f"眼下容易被这些倾向带偏：{', '.join(habit['pattern'] for habit in active_habits[:2])}。")
+            guidance.append(f"我的惯性倾向：{', '.join(habit['pattern'] for habit in active_habits[:2])}。")
         if emotion_summary:
             guidance.append(f"情绪底色是：{emotion_summary}")
         plan_mode = cycle_id % self._check_interval == 0
@@ -78,18 +82,12 @@ class PrefrontalManager:
         thoughts: list[Thought],
         recent_thoughts: list[Thought],
         stimuli: list[Stimulus],
-        note_text: str,
         sleep_state: SleepStateSnapshot,
     ) -> tuple[list[Thought], list[str]]:
         if not self._inhibition_enabled:
             return thoughts, []
         conversation_foreground = any(stimulus.type == "conversation" for stimulus in stimuli)
-        recent_action_types = [
-            str(action_request.get("type") or "").strip()
-            for thought in recent_thoughts[-9:]
-            for action_request in thought_action_requests(thought)
-            if str(action_request.get("type") or "").strip()
-        ]
+        recent_action_types_with_params = _recent_action_signatures(recent_thoughts)
         notes: list[str] = []
         reviewed_thoughts: list[Thought] = []
         for thought in thoughts:
@@ -99,8 +97,7 @@ class PrefrontalManager:
                     action_request,
                     conversation_foreground=conversation_foreground,
                     sleep_mode=str(sleep_state["mode"]),
-                    recent_action_types=recent_action_types,
-                    note_text=note_text,
+                    recent_signatures=recent_action_types_with_params,
                 )
                 if inhibition_note is not None:
                     notes.append(inhibition_note)
@@ -190,23 +187,60 @@ def _replace_thought_action_requests(thought: Thought, action_requests: list[Raw
     )
 
 
+def _recent_action_signatures(recent_thoughts: list[Thought]) -> list[str]:
+    """Build canonical action signatures from recent thoughts for dedup."""
+    signatures: list[str] = []
+    for thought in recent_thoughts[-9:]:
+        for action_request in thought_action_requests(thought):
+            sig = _action_signature(action_request)
+            if sig:
+                signatures.append(sig)
+    return signatures
+
+
+def _action_signature(action_request: RawActionRequest) -> str:
+    action_type = str(action_request.get("type") or "").strip()
+    if not action_type:
+        return ""
+    params = str(action_request.get("params") or "").strip()
+    canonical = _canonical_params(params)
+    return f"{action_type}:{canonical}"
+
+
+def _canonical_params(params: str) -> str:
+    """Parse key:"value" pairs from params, sort by key, return canonical form."""
+    import re
+    pairs: dict[str, str] = {}
+    for match in re.finditer(r'(\w+)\s*:\s*"((?:[^"\\]|\\.)*)"', params):
+        key = match.group(1).strip().lower()
+        value = match.group(2).strip()
+        # Normalize whitespace in values
+        value = " ".join(value.split())
+        pairs[key] = value
+    if not pairs:
+        # Fallback: treat entire params as a single normalized value
+        return " ".join(params.split())[:80]
+    return "|".join(f"{key}={value}" for key, value in sorted(pairs.items()))
+
+
 def _inhibition_note(
     action_request: RawActionRequest,
     *,
     conversation_foreground: bool,
     sleep_mode: str,
-    recent_action_types: list[str],
-    note_text: str,
+    recent_signatures: list[str],
 ) -> str | None:
     action_type = str(action_request.get("type") or "").strip()
     if not action_type:
         return None
+    # During conversation, suppress background info-gathering actions
     if conversation_foreground and action_type in {"reading", "search", "web_fetch", "news"}:
         return f"当前有人在说话，抑制 {action_type}，优先回应前景对话。"
+    # Low energy: suppress heavy actions
     if sleep_mode != "awake" and action_type in HEAVY_ACTION_TYPES:
         return f"当前精力偏低，抑制高负荷行动 {action_type}。"
-    if action_type in recent_action_types[-2:] and action_type in {"reading", "search"}:
-        return f"最近连续重复 {action_type}，先压住这类冲动。"
-    if ("别 reading" in note_text or "不要 reading" in note_text) and action_type == "reading":
-        return "笔记里明确要求停止 reading，已抑制本轮 reading 冲动。"
+    # Exact duplicate action (same canonical signature) in last 2 actions
+    signature = _action_signature(action_request)
+    if signature and signature in recent_signatures[-2:]:
+        return f"最近刚发起过相同的 {action_type}（参数一致），先抑制重复冲动。"
     return None

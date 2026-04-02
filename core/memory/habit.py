@@ -7,7 +7,6 @@ import time
 
 import psycopg
 
-from core.stimulus import Stimulus
 from core.thought_parser import Thought, thought_action_requests
 from core.types import HabitPromptEntry, elapsed_ms
 
@@ -54,14 +53,16 @@ class HabitMemory:
         rows: list[tuple] = []
         try:
             with conn.cursor() as cur:
+                # Fetch more than needed for category-diverse selection
                 cur.execute(
                     """
                     SELECT id, pattern, category, strength
                     FROM habit_seeds
+                    WHERE strength > 0.01
                     ORDER BY strength DESC, activation_count DESC, updated_at DESC
                     LIMIT %s
                     """,
-                    (self._max_active_in_prompt,),
+                    (self._max_active_in_prompt * 3,),
                 )
                 rows = cur.fetchall()
             status = "ok"
@@ -77,7 +78,7 @@ class HabitMemory:
                 status,
                 len(rows),
             )
-        return [
+        all_entries = [
             {
                 "id": int(row[0]),
                 "pattern": str(row[1]),
@@ -86,6 +87,7 @@ class HabitMemory:
             }
             for row in rows
         ]
+        return _diverse_selection(all_entries, self._max_active_in_prompt)
 
     def ensure_bootstrap_seeds(self, items: list[dict]) -> None:
         for item in items:
@@ -96,24 +98,47 @@ class HabitMemory:
             strength = float(item.get("strength") or 0.1)
             self._upsert_seed(pattern, category, strength)
 
-    def activate_for_cycle(
-        self,
-        thoughts: list[Thought],
-        stimuli: list[Stimulus],
-    ) -> list[HabitPromptEntry]:
-        candidates = self.top_active()
-        if not candidates:
-            return []
-        context = " ".join(
-            [thought.content for thought in thoughts]
-            + [stimulus.content for stimulus in stimuli]
-        )
-        compact = _normalize_habit_text(context)
-        matched = [candidate for candidate in candidates if _habit_matches(candidate["pattern"], compact)]
-        if matched:
-            self._touch_habits([entry["id"] for entry in matched])
-            return matched
-        return candidates[: self._max_active_in_prompt]
+    def activate_for_cycle(self) -> list[HabitPromptEntry]:
+        """Return top active habits for prompt display.
+
+        Does NOT update activation timestamps — display alone is not activation.
+        Real strengthening happens only during light sleep (strengthen_from_sleep).
+        """
+        return self.top_active()
+
+    def observe_cycle(self, thoughts: list[Thought]) -> int:
+        """Record explicit activation evidence from current thoughts.
+
+        Only existing habits are touched. This updates recency/activation_count
+        without strengthening, so repeated real recurrence prevents stale decay
+        while keeping "display != strengthening".
+        """
+        conn = self._conn
+        if conn is None:
+            return 0
+        patterns = _activation_patterns_from_thoughts(thoughts)
+        if not patterns:
+            return 0
+        updated = 0
+        try:
+            with conn.cursor() as cur:
+                for pattern, category in patterns:
+                    cur.execute(
+                        """
+                        UPDATE habit_seeds
+                        SET activation_count = activation_count + 1,
+                            last_activated = NOW(),
+                            updated_at = NOW()
+                        WHERE pattern = %s AND category = %s
+                        """,
+                        (pattern, category),
+                    )
+                    updated += int(cur.rowcount or 0)
+            conn.commit()
+            return updated
+        except psycopg.Error:
+            conn.rollback()
+            raise
 
     def strengthen_from_sleep(self, thoughts: list[Thought]) -> list[HabitPromptEntry]:
         conn = self._conn
@@ -241,6 +266,19 @@ def _extract_habit_patterns(thoughts: list[Thought]) -> list[tuple[str, str, flo
     ]
 
 
+def _activation_patterns_from_thoughts(thoughts: list[Thought]) -> list[tuple[str, str]]:
+    seen: set[tuple[str, str]] = set()
+    ordered: list[tuple[str, str]] = []
+    for thought in thoughts:
+        for pattern, category in _habit_patterns_from_thought(thought):
+            key = (pattern, category)
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append(key)
+    return ordered
+
+
 def _habit_patterns_from_thought(thought: Thought) -> list[tuple[str, str]]:
     action_requests = thought_action_requests(thought)
     if action_requests:
@@ -268,18 +306,38 @@ def _habit_patterns_from_thought(thought: Thought) -> list[tuple[str, str]]:
     return []
 
 
+def _normalize_habit_text(text: str) -> str:
+    return " ".join(str(text).replace("\n", " ").split())
+
+
 def _habit_category(thought: Thought) -> str:
     if thought.type == "反应":
         return "emotional"
     return "cognitive"
 
 
-def _habit_matches(pattern: str, context: str) -> bool:
-    normalized_pattern = _normalize_habit_text(pattern)
-    if not normalized_pattern or not context:
-        return False
-    return normalized_pattern in context
-
-
-def _normalize_habit_text(text: str) -> str:
-    return " ".join(str(text).replace("\n", " ").split())
+def _diverse_selection(entries: list[HabitPromptEntry], limit: int) -> list[HabitPromptEntry]:
+    """Pick top habits with category diversity — avoid showing all from the same category."""
+    if len(entries) <= limit:
+        return entries
+    selected: list[HabitPromptEntry] = []
+    seen_categories: dict[str, int] = {}
+    max_per_category = max(1, (limit + 1) // 2)
+    # First pass: pick strongest from each category up to limit
+    for entry in entries:
+        if len(selected) >= limit:
+            break
+        category = entry["category"]
+        if seen_categories.get(category, 0) >= max_per_category:
+            continue
+        selected.append(entry)
+        seen_categories[category] = seen_categories.get(category, 0) + 1
+    # Fill remaining slots if diversity left gaps
+    if len(selected) < limit:
+        selected_ids = {entry["id"] for entry in selected}
+        for entry in entries:
+            if len(selected) >= limit:
+                break
+            if entry["id"] not in selected_ids:
+                selected.append(entry)
+    return selected

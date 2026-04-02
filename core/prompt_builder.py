@@ -114,7 +114,8 @@ ACTION_ECHO_LABELS = {
     "system_change": "[系统变更]",
 }
 UNKNOWN_ACTION_ECHO_LABEL = "[结果]"
-RUNNING_ACTION_VISIBLE_STATUSES = {"pending", "running"}
+PENDING_ACTION_VISIBLE_STATUSES = {"pending"}
+RUNNING_ACTION_VISIBLE_STATUSES = {"running"}
 PROMPT_SECTION_LOG_THRESHOLD_MS = 10.0
 STAGNATION_CHECK_CYCLES = 3
 STAGNATION_SIMILARITY_THRESHOLD = 0.6
@@ -174,6 +175,7 @@ def build_prompt(
     """Build a single prompt string for thought generation."""
     resolved_context = prompt_context or PromptBuildContext()
     parts = [_timed_prompt_section("system", lambda: _build_system(identity))]
+    visible_pending_actions = _visible_pending_actions(resolved_context.running_actions)
     visible_running_actions = _visible_running_actions(resolved_context.running_actions)
     window = recent_thoughts[-context_window * 3:]
     _append_prompt_context_sections(
@@ -196,6 +198,7 @@ def build_prompt(
         conversations,
         action_echoes,
         resolved_context.recent_action_echoes or [],
+        visible_pending_actions,
         visible_running_actions,
         passive,
         resolved_context.recent_conversations or [],
@@ -207,11 +210,12 @@ def build_prompt(
         resolved_context.note_text,
         resolved_context.recent_action_echoes or [],
         action_echoes,
+        visible_pending_actions,
         visible_running_actions,
         passive,
         resolved_context.perception_cues or [],
         resolved_context.recent_conversations or [],
-        bool(conversations or action_echoes or visible_running_actions),
+        bool(conversations or action_echoes or visible_pending_actions or visible_running_actions),
     )
     if stagnation_warning:
         parts.append(stagnation_warning)
@@ -265,6 +269,7 @@ def _append_prompt_stimulus_sections(
     conversations: list[Stimulus],
     action_echoes: list[Stimulus],
     recent_action_echoes: list[Stimulus],
+    visible_pending_actions: list[ActionRecord],
     visible_running_actions: list[ActionRecord],
     passive: list[Stimulus],
     recent_conversations: list[RecentConversationPrompt],
@@ -279,6 +284,12 @@ def _append_prompt_stimulus_sections(
                 action_echoes,
                 conversation_labels,
             ),
+        )
+    if visible_pending_actions:
+        _append_prompt_section(
+            parts,
+            "pending_actions",
+            lambda: _format_pending_actions(visible_pending_actions, conversation_labels),
         )
     if visible_running_actions:
         _append_prompt_section(
@@ -305,6 +316,7 @@ def _stagnation_warning_text(
     note_text: str,
     recent_action_echoes: list[Stimulus],
     action_echoes: list[Stimulus],
+    visible_pending_actions: list[ActionRecord],
     visible_running_actions: list[ActionRecord],
     passive: list[Stimulus],
     perception_cues: list[str],
@@ -320,6 +332,7 @@ def _stagnation_warning_text(
             note_text,
             recent_action_echoes,
             action_echoes,
+            visible_pending_actions,
             visible_running_actions,
             passive,
             perception_cues,
@@ -376,7 +389,7 @@ def _format_goal_stack(
             lines.append(f"- {guidance}")
     if prefrontal_state is not None and prefrontal_state["inhibition_notes"]:
         lines.append("")
-        lines.append("前额叶刚压住了这些冲动：")
+        lines.append("前额叶刚抑制了这些冲动：")
         for note in prefrontal_state["inhibition_notes"]:
             lines.append(f"- {note}")
     return _render_section("当前目标栈", lines, keep_blank_lines=True)
@@ -565,6 +578,7 @@ def _stagnation_sources(
     note_text: str,
     recent_action_echoes: list[Stimulus],
     action_echoes: list[Stimulus],
+    pending_actions: list[ActionRecord],
     running_actions: list[ActionRecord],
     passive: list[Stimulus],
     perception_cues: list[str],
@@ -577,6 +591,8 @@ def _stagnation_sources(
         sources.append("我的笔记")
     if recent_action_echoes or action_echoes:
         sources.append("行动有了回音")
+    if pending_actions:
+        sources.append("正在受理中的行动")
     if running_actions:
         sources.append("我已经发起、正在等回音的事")
     if passive:
@@ -689,6 +705,21 @@ def _format_running_actions(actions: list[ActionRecord], conversation_labels: di
             f"- [{action.type}/{action.status}] {_running_action_summary(action, conversation_labels)}"
         )
     return _render_section("我已经发起、正在等回音的事", lines)
+
+
+def _format_pending_actions(actions: list[ActionRecord], conversation_labels: dict[str, str]) -> str:
+    lines = []
+    for action in actions:
+        lines.append(
+            f"- [{action.type}/{action.status}] {_pending_action_summary(action, conversation_labels)}"
+        )
+    return _render_section("正在受理中的行动", lines)
+
+
+def _visible_pending_actions(actions: list[ActionRecord] | None) -> list[ActionRecord]:
+    return [
+        action for action in (actions or []) if action.status in PENDING_ACTION_VISIBLE_STATUSES
+    ]
 
 
 def _visible_running_actions(actions: list[ActionRecord] | None) -> list[ActionRecord]:
@@ -817,6 +848,15 @@ def _running_action_summary(action: ActionRecord, conversation_labels: dict[str,
         return task_summary
     summary = str(action.request.get("reason") or "").strip() or action.type
     return _compact_prompt_text(_strip_action_marker(summary))
+
+
+def _pending_action_summary(action: ActionRecord, conversation_labels: dict[str, str]) -> str:
+    summary = _running_action_summary(action, conversation_labels)
+    if action.awaiting_confirmation:
+        return f"已受理，等待确认：{summary}"
+    if action.retry_after is not None:
+        return f"已受理，等待恢复后重试：{summary}"
+    return f"已受理，等待执行：{summary}"
 
 
 def _running_send_message_summary(action: ActionRecord, conversation_labels: dict[str, str]) -> str:

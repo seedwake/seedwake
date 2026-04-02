@@ -341,4 +341,30 @@ news、reading、search 等信息类 action_result 被选入本轮 prompt 后即
 
 实际案例（C843）：模型在一个意图念头里同时写了 note_rewrite 和 send_message，只有 note_rewrite 被提交，send_message 丢失。
 
-**方案**：在 `Thought` dataclass 新增 `additional_action_requests: list[RawActionRequest]` 字段。`_parse_action` 用 `findall` 提取所有匹配，第一个放 `action_request`，其余放 `additional_action_requests`。`submit_from_thoughts` 对每个额外 action 也调用 planner 提交。下游的 planner/executor 逻辑不需要改——它们处理的仍然是单个 action。
+**方案**：在 `Thought` dataclass 新增 `additional_action_requests: list[RawActionRequest]` 字段。`_parse_action` 用 `findall` 提取所有匹配，第一个放 `action_request`，其余放 `additional_action_requests`。`submit_from_thoughts` 对每个额外 action 也调用 planner 提交。下游的 planner/executor 逻辑不需要改——它们处理的仍然是单个 action。（已实现）
+
+## 37. Phase 4 各模块的规则系统需要重写——不能用硬编码关键词做语义判断
+
+当前 Phase 4 的 attention、emotion、prefrontal 模块大量使用硬编码关键词匹配做语义判断，这不可靠：
+
+**问题示例**：
+- `emotion.py`：`any(token in text for token in ("静", "稳", "慢", "安"))` 判断 calm——"安静"和"不安"都包含"安"，但语义相反
+- `attention.py`：`_emotion_resonance_score` 用固定关键词列表判断念头是否和当前情绪共振——覆盖面太窄，稍微换个说法就匹配不到
+- `prefrontal.py`：`"别 reading" in note_text` 这种字符串匹配——模型可能写"暂停阅读"、"不要再 reading 了"等各种变体
+- `attention.py`：注意力权重的数值（0.3、0.18、0.12 等）是硬编码的，没有依据
+
+**改动原则**：
+
+1. **情绪推断用 LLM**：不要用关键词。每轮用 auxiliary 模型做一次简短的情绪判断调用，输入是当前轮的 3 个念头 + 当前刺激，输出是 5 个维度的 0-1 分值。用 inertia 平滑仍然保留。system prompt 要简洁，max_tokens 限制在 100 以内。
+
+2. **注意力评估简化**：去掉情绪共振和习气共振的关键词匹配。保留新颖度（bigram 相似度）和 action/trigger/conversation 的 bonus，这些是结构化信号不需要语义理解。注意力的核心价值是选 LTM 检索锚点，不需要太精确。
+
+3. **前额叶抑制用结构化规则，不用字符串匹配**：
+   - "对话时抑制非对话 action"——这条是对的，保留
+   - "精力低时抑制重型 action"——这条是对的，保留
+   - "连续重复 search/reading"——改为按 action_type + 参数去重，不是简单的类型匹配
+   - 删掉 `"别 reading" in note_text` 这种脆弱匹配——笔记内容应该由模型自己理解和遵守，不是由代码硬解析
+
+4. **习气系统的 pattern 匹配不要用 `pattern in text`**：习气的 pattern 应该是语义描述（如"倾向于在对话时过度自我铺垫"），不是可以做 substring 匹配的关键词。习气展示到 prompt 里让模型自己判断是否相关，不做程序级匹配。
+
+5. **不要为了用 LLM 就每轮调 5 次**：情绪推断 1 次 LLM 调用就够，其他模块用结构化规则。元认知反思已经用 LLM 了（auxiliary 模型），保持不变。

@@ -31,6 +31,7 @@ from core.action import (
     pop_action_controls,
     push_action_control,
 )
+from core.emotion import _llm_fusion_weight
 # noinspection PyProtectedMember
 from core.main import (
     _print_stimuli,
@@ -40,7 +41,7 @@ from core.main import (
     _select_cycle_stimuli,
     _summarize_recent_conversation,
 )
-from core.memory.habit import _extract_habit_patterns
+from core.memory.habit import _activation_patterns_from_thoughts, _extract_habit_patterns, HabitMemory
 from core.model_client import ModelClient
 from core.openclaw_gateway import (
     OpenClawGatewayExecutor,
@@ -48,6 +49,7 @@ from core.openclaw_gateway import (
     _normalize_worker_text,
 )
 from core.perception import PerceptionManager
+from core.prefrontal import _canonical_params
 from core.prompt_builder import PromptBuildContext, _stagnation_terms, build_prompt
 from core.rss import read_news_result, summarize_news_items
 from core.stimulus import (
@@ -976,11 +978,26 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             content="搜索完成\n1. 标题 (https://example.com) —— 摘要",
             metadata={"origin": "action", "action_type": "search"},
         )
+        pending_action = MagicMock()
+        pending_action.action_id = "act_0"
+        pending_action.type = "send_message"
+        pending_action.executor = "native"
+        pending_action.status = "pending"
+        pending_action.awaiting_confirmation = False
+        pending_action.retry_after = None
+        pending_action.request = {
+            "task": "向 telegram:1 发送消息：我先回一句。",
+            "target_source": "telegram:1",
+            "message_text": "我先回一句。",
+        }
+        pending_action.source_content = '我先回一句 {action:send_message, message:"我先回一句。"}'
         action = MagicMock()
         action.action_id = "act_1"
         action.type = "search"
         action.executor = "openclaw"
         action.status = "running"
+        action.awaiting_confirmation = False
+        action.retry_after = None
         action.request = {
             "task": (
                 "围绕“反馈”进行搜索，返回按相关性整理的简洁结果。\n\n"
@@ -993,6 +1010,8 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         completed.type = "send_message"
         completed.executor = "native"
         completed.status = "succeeded"
+        completed.awaiting_confirmation = False
+        completed.retry_after = None
         completed.request = {
             "task": "向 telegram:1 发送消息：我在。",
             "target_source": "telegram:1",
@@ -1014,7 +1033,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 long_term_context=["之前某次读到过关于雨后气味的解释。"],
                 note_text="记下：不要把刚刚的直觉弄丢。",
                 stimuli=[stimulus, passive, action_echo],
-                running_actions=[action, completed],
+                running_actions=[pending_action, action, completed],
                 perception_cues=["了解外界动态——最近发生了什么？"],
                 recent_conversations=load_recent_conversations(
                     redis_client,
@@ -1027,6 +1046,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("## 浮上来的记忆", prompt)
         self.assertIn("## 我的笔记", prompt)
         self.assertIn("## 好像有一阵子没有……", prompt)
+        self.assertIn("## 正在受理中的行动", prompt)
         self.assertIn("## 我已经发起、正在等回音的事", prompt)
         self.assertIn("## 此刻我注意到", prompt)
         self.assertIn("## 行动有了回音", prompt)
@@ -1037,7 +1057,8 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertLess(prompt.index("## 我的笔记"), prompt.index("## 好像有一阵子没有……"))
         self.assertLess(prompt.index("## 好像有一阵子没有……"), prompt.index("## 最近的念头"))
         self.assertLess(prompt.index("## 最近的念头"), prompt.index("## 行动有了回音"))
-        self.assertLess(prompt.index("## 行动有了回音"), prompt.index("## 我已经发起、正在等回音的事"))
+        self.assertLess(prompt.index("## 行动有了回音"), prompt.index("## 正在受理中的行动"))
+        self.assertLess(prompt.index("## 正在受理中的行动"), prompt.index("## 我已经发起、正在等回音的事"))
         self.assertLess(prompt.index("## 我已经发起、正在等回音的事"), prompt.index("## 此刻我注意到"))
         self.assertLess(prompt.index("## 此刻我注意到"), prompt.index("## 最近的对话"))
         self.assertLess(prompt.index("## 最近的对话"), prompt.index("## 有人对我说话了"))
@@ -1047,6 +1068,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("我：好，那我就接着陪你聊。", prompt)
         self.assertIn("如果我决定回应，需要用 {action:send_message} 真正把话发出去", prompt)
         self.assertIn("[时间感] 现在是晚上", prompt)
+        self.assertIn('[send_message/pending] 已受理，等待执行：给 [Alice](telegram:1) 发送消息：“我先回一句。”', prompt)
         self.assertIn("[搜索结果] 搜索完成 1. 标题 (https://example.com) —— 摘要", prompt)
         self.assertIn("[search/running] 围绕“反馈”进行搜索，返回按相关性整理的简洁结果。", prompt)
         self.assertNotIn("[send_message/succeeded]", prompt)
@@ -1373,6 +1395,81 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         extracted = {(pattern, category) for pattern, category, _ in patterns}
         self.assertIn(("经常会冒出 note_rewrite 行动冲动", "behavioral"), extracted)
         self.assertIn(("经常会冒出 send_message 行动冲动", "behavioral"), extracted)
+
+    def test_activation_patterns_from_thoughts_keep_explicit_recurrence_evidence(self) -> None:
+        patterns = _activation_patterns_from_thoughts([
+            _make_thought(
+                cycle_id=1,
+                index=1,
+                action_request={"type": "send_message", "params": 'message:"我在。"'},
+                additional_action_requests=[{"type": "note_rewrite", "params": 'content:"记下这句"'}],
+            ),
+            _make_thought(
+                cycle_id=1,
+                index=2,
+                thought_type="思考",
+                content="我总会在这里先把自己铺垫得太长。",
+            ),
+        ])
+
+        self.assertIn(("经常会冒出 send_message 行动冲动", "behavioral"), patterns)
+        self.assertIn(("经常会冒出 note_rewrite 行动冲动", "behavioral"), patterns)
+        self.assertIn(("我总会在这里先把自己铺垫得太长", "cognitive"), patterns)
+
+    def test_habit_observe_cycle_touches_existing_patterns_without_strengthening(self) -> None:
+        matched_patterns = {
+            ("经常会冒出 send_message 行动冲动", "behavioral"),
+            ("我总会在这里先把自己铺垫得太长", "cognitive"),
+        }
+        cursor = MagicMock()
+
+        def execute(_sql: str, params: tuple[str, str]) -> None:
+            cursor.rowcount = 1 if params in matched_patterns else 0
+
+        cursor.execute.side_effect = execute
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        memory = HabitMemory(conn, max_active_in_prompt=3, decay_rate=0.05)
+
+        updated = memory.observe_cycle([
+            _make_thought(
+                cycle_id=1,
+                index=1,
+                action_request={"type": "send_message", "params": 'message:"我在。"'},
+            ),
+            _make_thought(
+                cycle_id=1,
+                index=2,
+                thought_type="思考",
+                content="我总会在这里先把自己铺垫得太长。",
+            ),
+        ])
+
+        self.assertEqual(updated, 2)
+        conn.commit.assert_called_once()
+        executed_params = [call.args[1] for call in cursor.execute.call_args_list]
+        self.assertIn(("经常会冒出 send_message 行动冲动", "behavioral"), executed_params)
+        self.assertIn(("我总会在这里先把自己铺垫得太长", "cognitive"), executed_params)
+
+    def test_llm_fusion_weight_drops_to_zero_for_flat_empty_signal(self) -> None:
+        weight = _llm_fusion_weight(
+            {
+                "curiosity": 0.0,
+                "calm": 0.0,
+                "frustration": 0.0,
+                "satisfaction": 0.0,
+                "concern": 0.0,
+            },
+            ["curiosity", "calm", "frustration", "satisfaction", "concern"],
+        )
+
+        self.assertEqual(weight, 0.0)
+
+    def test_canonical_params_ignores_order_and_whitespace(self) -> None:
+        left = _canonical_params('target:"telegram:1", message:" 我在。 "')
+        right = _canonical_params('message:"我在。"\n target:"telegram:1"')
+
+        self.assertEqual(left, right)
 
     def test_load_recent_conversations_builds_summary_and_keeps_recent_raw_lines(self) -> None:
         redis_client = ListRedisStub()
@@ -1914,6 +2011,8 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         action.type = "send_message"
         action.executor = "native"
         action.status = "running"
+        action.awaiting_confirmation = False
+        action.retry_after = None
         action.request = {
             "task": "向 telegram:1 发送消息：我在。",
             "target_source": "telegram:1",
@@ -1934,6 +2033,38 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         )
 
         self.assertIn('[send_message/running] 给 telegram:1 发送消息：“我在。”', prompt)
+        self.assertNotIn("你怎么不说话", prompt)
+
+    def test_pending_send_message_summary_shows_already_accepted(self) -> None:
+        action = MagicMock()
+        action.action_id = "act_1"
+        action.type = "send_message"
+        action.executor = "native"
+        action.status = "pending"
+        action.awaiting_confirmation = False
+        action.retry_after = None
+        action.request = {
+            "task": "向 telegram:1 发送消息：我在。",
+            "target_source": "telegram:1",
+            "message_text": "我在。",
+        }
+        action.source_content = '那句"你怎么不说话"又把我往前推了一步'
+
+        prompt = build_prompt(
+            3,
+            {
+                "self_description": "我是 Seedwake。",
+                "core_goals": "探索和学习。",
+                "self_understanding": "我会在经验里慢慢形成自己。",
+            },
+            [_make_thought(cycle_id=2, index=1, thought_type="思考", content="之前的念头")],
+            30,
+            prompt_context=PromptBuildContext(running_actions=[action]),
+        )
+
+        self.assertIn("## 正在受理中的行动", prompt)
+        self.assertNotIn("## 我已经发起、正在等回音的事", prompt)
+        self.assertIn('[send_message/pending] 已受理，等待执行：给 telegram:1 发送消息：“我在。”', prompt)
         self.assertNotIn("你怎么不说话", prompt)
 
     def test_send_message_action_echo_uses_known_person_label(self) -> None:

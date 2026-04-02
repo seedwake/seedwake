@@ -1,14 +1,22 @@
-"""Emotion baseline manager for Phase 4."""
+"""Emotion baseline manager for Phase 4.
+
+Uses auxiliary LLM for semantic emotion inference instead of keyword matching.
+Structural signals (stimulus types, action status) still use rule-based adjustment.
+"""
 
 import json
+import logging
+import re
+import time
 from datetime import datetime, timezone
 
 import redis as redis_lib
 
 from core.action import ActionRecord
+from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient
 from core.stimulus import Stimulus
 from core.thought_parser import Thought
-from core.types import EmotionSnapshot
+from core.types import EmotionSnapshot, elapsed_ms
 
 EMOTION_STATE_KEY = "seedwake:emotion_state"
 DEFAULT_EMOTION_DIMENSIONS = ["curiosity", "calm", "frustration", "satisfaction", "concern"]
@@ -19,6 +27,12 @@ EMOTION_LABELS = {
     "satisfaction": "满足",
     "concern": "牵挂",
 }
+EMOTION_INFERENCE_SYSTEM_PROMPT = (
+    "你是 Seedwake 的情绪感知模块。"
+    "根据以下念头和刺激，判断此刻的情绪状态。"
+    "返回一行 JSON，格式：{\"curiosity\":0.5,\"calm\":0.3,\"frustration\":0.1,\"satisfaction\":0.0,\"concern\":0.1}"
+    "\n每个维度 0.0-1.0，所有维度之和不必为 1。只输出 JSON，不要解释。"
+)
 EMOTION_REDIS_EXCEPTIONS = (
     redis_lib.RedisError,
     json.JSONDecodeError,
@@ -26,6 +40,7 @@ EMOTION_REDIS_EXCEPTIONS = (
     ValueError,
     OSError,
 )
+logger = logging.getLogger(__name__)
 
 
 class EmotionManager:
@@ -57,18 +72,30 @@ class EmotionManager:
         stimuli: list[Stimulus],
         running_actions: list[ActionRecord],
         *,
+        auxiliary_client: ModelClient | None = None,
+        auxiliary_model_config: dict | None = None,
         inhibited_actions: int = 0,
         degeneration_alert: bool = False,
     ) -> EmotionSnapshot:
+        # Structural signals that don't need LLM
+        structural = _structural_emotion_signals(
+            stimuli, running_actions,
+            inhibited_actions=inhibited_actions,
+            degeneration_alert=degeneration_alert,
+        )
+        # LLM-based semantic inference from thoughts + stimuli
+        llm_inferred = _infer_emotion_via_llm(
+            auxiliary_client, auxiliary_model_config,
+            thoughts, stimuli, self._dimensions,
+        )
+        # Adaptive fusion: LLM weight depends on inference quality
+        llm_weight = _llm_fusion_weight(llm_inferred, self._dimensions)
+        struct_weight = 1.0 - llm_weight
         inferred = {dimension: 0.0 for dimension in self._dimensions}
-        self._infer_from_stimuli(inferred, stimuli)
-        self._infer_from_running_actions(inferred, running_actions)
-        self._infer_from_thoughts(inferred, thoughts)
-        if inhibited_actions > 0:
-            inferred["frustration"] = inferred.get("frustration", 0.0) + 0.20
-        if degeneration_alert:
-            inferred["frustration"] = inferred.get("frustration", 0.0) + 0.25
-            inferred["concern"] = inferred.get("concern", 0.0) + 0.15
+        for dimension in self._dimensions:
+            llm_value = llm_inferred.get(dimension, 0.0)
+            struct_value = structural.get(dimension, 0.0)
+            inferred[dimension] = _clamp_emotion(llm_value * llm_weight + struct_value * struct_weight)
 
         previous = self._shadow["dimensions"]
         next_dimensions = {
@@ -142,48 +169,147 @@ class EmotionManager:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    def _infer_from_stimuli(self, inferred: dict[str, float], stimuli: list[Stimulus]) -> None:
-        for stimulus in stimuli:
-            if stimulus.type == "conversation":
-                inferred["concern"] = inferred.get("concern", 0.0) + 0.55
-                inferred["curiosity"] = inferred.get("curiosity", 0.0) + 0.25
-                continue
-            if stimulus.type in {"reading", "search", "news", "web_fetch"}:
-                inferred["curiosity"] = inferred.get("curiosity", 0.0) + 0.40
-                continue
-            if stimulus.type in {"time", "weather", "system_status"}:
-                inferred["calm"] = inferred.get("calm", 0.0) + 0.10
-            status = str(stimulus.metadata.get("status") or "").strip()
-            if status == "failed":
-                inferred["frustration"] = inferred.get("frustration", 0.0) + 0.50
-            elif status == "succeeded":
-                inferred["satisfaction"] = inferred.get("satisfaction", 0.0) + 0.35
 
-    def _infer_from_running_actions(
-        self,
-        inferred: dict[str, float],
-        running_actions: list[ActionRecord],
-    ) -> None:
-        if not running_actions:
-            return
-        inferred["concern"] = inferred.get("concern", 0.0) + min(0.35, 0.08 * len(running_actions))
+def _structural_emotion_signals(
+    stimuli: list[Stimulus],
+    running_actions: list[ActionRecord],
+    *,
+    inhibited_actions: int,
+    degeneration_alert: bool,
+) -> dict[str, float]:
+    signals: dict[str, float] = {}
+    for stimulus in stimuli:
+        if stimulus.type == "conversation":
+            signals["concern"] = signals.get("concern", 0.0) + 0.55
+            signals["curiosity"] = signals.get("curiosity", 0.0) + 0.25
+        elif stimulus.type in {"reading", "search", "news", "web_fetch"}:
+            signals["curiosity"] = signals.get("curiosity", 0.0) + 0.40
+        elif stimulus.type in {"time", "weather", "system_status"}:
+            signals["calm"] = signals.get("calm", 0.0) + 0.10
+        status = str(stimulus.metadata.get("status") or "").strip()
+        if status == "failed":
+            signals["frustration"] = signals.get("frustration", 0.0) + 0.50
+        elif status == "succeeded":
+            signals["satisfaction"] = signals.get("satisfaction", 0.0) + 0.35
+    if running_actions:
+        signals["concern"] = signals.get("concern", 0.0) + min(0.35, 0.08 * len(running_actions))
+    if inhibited_actions > 0:
+        signals["frustration"] = signals.get("frustration", 0.0) + 0.20
+    if degeneration_alert:
+        signals["frustration"] = signals.get("frustration", 0.0) + 0.25
+        signals["concern"] = signals.get("concern", 0.0) + 0.15
+    return signals
 
-    def _infer_from_thoughts(self, inferred: dict[str, float], thoughts: list[Thought]) -> None:
-        for thought in thoughts:
-            text = thought.content
-            if thought.type == "意图":
-                inferred["curiosity"] = inferred.get("curiosity", 0.0) + 0.15
-            if thought.type == "反应":
-                inferred["concern"] = inferred.get("concern", 0.0) + 0.08
-            if any(token in text for token in ("想", "为什么", "好奇", "看看", "研究", "读")):
-                inferred["curiosity"] = inferred.get("curiosity", 0.0) + 0.12
-            if any(token in text for token in ("松", "静", "安", "稳", "宁")):
-                inferred["calm"] = inferred.get("calm", 0.0) + 0.10
-            if any(token in text for token in ("失败", "卡住", "等", "抱歉", "没回", "困住")):
-                inferred["frustration"] = inferred.get("frustration", 0.0) + 0.12
-                inferred["concern"] = inferred.get("concern", 0.0) + 0.08
-            if any(token in text for token in ("成功", "做到", "终于", "发出去", "接住")):
-                inferred["satisfaction"] = inferred.get("satisfaction", 0.0) + 0.12
+
+def _infer_emotion_via_llm(
+    client: ModelClient | None,
+    model_config: dict | None,
+    thoughts: list[Thought],
+    stimuli: list[Stimulus],
+    dimensions: list[str],
+) -> dict[str, float]:
+    if client is None or model_config is None:
+        return {}
+    user_text = _build_emotion_inference_input(thoughts, stimuli)
+    if not user_text.strip():
+        return {}
+    started_at = time.perf_counter()
+    try:
+        response = client.chat(
+            model=str(model_config.get("name") or model_config["name"]),
+            messages=[
+                {"role": "system", "content": EMOTION_INFERENCE_SYSTEM_PROMPT},
+                {"role": "user", "content": user_text},
+            ],
+            options={"temperature": 0.1, "max_tokens": 80},
+        )
+    except MODEL_CLIENT_EXCEPTIONS as exc:
+        logger.warning("emotion LLM inference failed: %s", exc)
+        return {}
+    finally:
+        logger.info("emotion LLM inference finished in %.1f ms", elapsed_ms(started_at))
+    raw_content = str(response.get("message", {}).get("content") or "").strip()
+    return _parse_emotion_json(raw_content, dimensions)
+
+
+def _build_emotion_inference_input(thoughts: list[Thought], stimuli: list[Stimulus]) -> str:
+    parts: list[str] = []
+    for thought in thoughts:
+        clean = _strip_noise(thought.content)
+        if clean:
+            parts.append(f"[{thought.type}] {clean}")
+    for stimulus in stimuli:
+        parts.append(_stimulus_emotion_summary(stimulus))
+    return "\n".join(line for line in parts if line)
+
+
+def _strip_noise(text: str) -> str:
+    cleaned = re.sub(r"\{action:[^}]+\}", "", text)
+    # Remove trigger refs
+    cleaned = re.sub(r"\(←\s*[^)]+\)", "", cleaned)
+    return " ".join(cleaned.split()).strip()
+
+
+def _stimulus_emotion_summary(stimulus: Stimulus) -> str:
+    if stimulus.type == "conversation":
+        content = " ".join(stimulus.content.split())[:80]
+        return f"[有人对我说话] {content}"
+    if stimulus.type in {"time", "system_status"}:
+        return ""
+    status = str(stimulus.metadata.get("status") or "").strip()
+    action_type = str(stimulus.metadata.get("action_type") or stimulus.type).strip()
+    if status == "failed":
+        return f"[行动失败] {action_type}"
+    if status == "succeeded":
+        return f"[行动完成] {action_type}"
+    content = " ".join(stimulus.content.split())[:60]
+    return f"[{stimulus.type}] {content}"
+
+
+def _parse_emotion_json(raw: str, dimensions: list[str]) -> dict[str, float]:
+    cleaned = raw.strip()
+    # Strip markdown fences if present
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        cleaned = "\n".join(
+            line for line in lines if not line.strip().startswith("```")
+        ).strip()
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        logger.warning("emotion LLM returned unparseable JSON: %s", cleaned[:200])
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    result: dict[str, float] = {}
+    for dimension in dimensions:
+        value = parsed.get(dimension)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            result[dimension] = _clamp_emotion(float(value))
+    return result
+
+
+def _llm_fusion_weight(llm_inferred: dict[str, float], dimensions: list[str]) -> float:
+    if not llm_inferred:
+        return 0.0
+    values = [
+        _clamp_emotion(float(llm_inferred[dimension]))
+        for dimension in dimensions
+        if dimension in llm_inferred
+    ]
+    if not values:
+        return 0.0
+    filled = len(values)
+    coverage = filled / max(1, len(dimensions))
+    peak = max(values)
+    total = sum(values)
+    if peak < 0.05 and total < 0.15:
+        return 0.0
+    if coverage >= 0.8 and peak >= 0.18 and total >= 0.40:
+        return 0.8
+    if coverage >= 0.5 and peak >= 0.10 and total >= 0.20:
+        return 0.5
+    return 0.2
 
 
 def _clamp_emotion(value: float) -> float:

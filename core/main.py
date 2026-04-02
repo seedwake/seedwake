@@ -878,7 +878,7 @@ def _execute_cycle(
         note_text = runtime.action_manager.current_note()
         current_emotion = runtime.emotion.current()
         current_sleep_state = runtime.sleep.current()
-        active_habits = runtime.habit_memory.activate_for_cycle(recent_thoughts, stimuli)
+        active_habits = runtime.habit_memory.activate_for_cycle()
         prefrontal_state = runtime.prefrontal.current_state(
             cycle_id,
             identity,
@@ -953,10 +953,6 @@ def _execute_cycle(
             thoughts,
             recent_thoughts,
             stimuli,
-            current_emotion,
-            prefrontal_state["goal_stack"],
-            note_text,
-            active_habits,
         )
         thoughts = attention_result.thoughts
         logger.info(
@@ -970,7 +966,6 @@ def _execute_cycle(
             thoughts,
             recent_thoughts,
             stimuli,
-            note_text,
             current_sleep_state,
         )
         logger.info(
@@ -1024,6 +1019,8 @@ def _execute_cycle(
             thoughts,
             stimuli,
             running_actions,
+            auxiliary_client=runtime.auxiliary_client,
+            auxiliary_model_config=runtime.auxiliary_model_config,
             inhibited_actions=len(inhibition_notes),
             degeneration_alert=degeneration_alert,
         )
@@ -1035,6 +1032,14 @@ def _execute_cycle(
         stm_started_at = time.perf_counter()
         runtime.stm.append(thoughts)
         logger.info("cycle C%s stm append finished in %.1f ms", cycle_id, elapsed_ms(stm_started_at))
+        habit_observe_started_at = time.perf_counter()
+        observed_habits = runtime.habit_memory.observe_cycle(thoughts)
+        logger.info(
+            "cycle C%s habit activation evidence finished in %.1f ms (matched=%d)",
+            cycle_id,
+            elapsed_ms(habit_observe_started_at),
+            observed_habits,
+        )
         action_submit_started_at = time.perf_counter()
         created_actions = runtime.action_manager.submit_from_thoughts(thoughts, stimuli=stimuli)
         logger.info(
