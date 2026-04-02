@@ -2,6 +2,7 @@ import json
 import io
 import unittest
 from concurrent.futures import wait
+from datetime import datetime
 from email.message import Message
 from threading import Barrier
 from typing import cast
@@ -31,6 +32,7 @@ from core.action import (
     pop_action_controls,
     push_action_control,
 )
+from core.attention import evaluate_attention
 from core.emotion import _llm_fusion_weight
 # noinspection PyProtectedMember
 from core.main import (
@@ -41,7 +43,13 @@ from core.main import (
     _select_cycle_stimuli,
     _summarize_recent_conversation,
 )
-from core.memory.habit import _activation_patterns_from_thoughts, _extract_habit_patterns, HabitMemory
+from core.memory.long_term import LongTermEntry
+from core.memory.habit import (
+    HabitMemory,
+    HabitSeed,
+    _activation_patterns_from_thoughts,
+    _extract_habit_patterns,
+)
 from core.model_client import ModelClient
 from core.openclaw_gateway import (
     OpenClawGatewayExecutor,
@@ -52,6 +60,7 @@ from core.perception import PerceptionManager
 from core.prefrontal import _canonical_params
 from core.prompt_builder import PromptBuildContext, _stagnation_terms, build_prompt
 from core.rss import read_news_result, summarize_news_items
+from core.sleep import _ensure_impression_contact, _impression_needs_refresh
 from core.stimulus import (
     CONVERSATION_HISTORY_KEY,
     RECENT_ACTION_ECHO_KEY,
@@ -1286,6 +1295,22 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertLess(prompt.index("## 相关习气/倾向性"), prompt.index("## 最近的反思"))
         self.assertLess(prompt.index("## 最近的反思"), prompt.index("## 浮上来的记忆"))
 
+    def test_prompt_includes_current_impressions_section(self) -> None:
+        prompt = build_prompt(
+            9,
+            {"self_description": "我是 Seedwake。"},
+            [_make_thought(cycle_id=8, index=1, thought_type="思考", content="之前的念头")],
+            30,
+            prompt_context=PromptBuildContext(
+                long_term_context=["一段浮上来的记忆。"],
+                current_impressions=["关系: Alice。印象: 直接。联系方式: telegram:1。"],
+            ),
+        )
+
+        self.assertIn("## 当前人物印象", prompt)
+        self.assertIn("联系方式: telegram:1", prompt)
+        self.assertLess(prompt.index("## 浮上来的记忆"), prompt.index("## 当前人物印象"))
+
     def test_prompt_warns_about_stagnation_without_forcing_full_topic_switch_during_conversation(self) -> None:
         repeated_thoughts = [
             _make_thought(cycle_id=1, index=1, thought_type="反应", content='我还在咂摸刚才那句“你在吗”。'),
@@ -1451,6 +1476,49 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn(("经常会冒出 send_message 行动冲动", "behavioral"), executed_params)
         self.assertIn(("我总会在这里先把自己铺垫得太长", "cognitive"), executed_params)
 
+    def test_activate_for_cycle_prefers_context_relevant_habit(self) -> None:
+        memory = HabitMemory(None, max_active_in_prompt=2, decay_rate=0.05)
+        memory._fetch_active_seeds = MagicMock(return_value=[  # type: ignore[method-assign]
+            HabitSeed(
+                id=1,
+                pattern="先搜索文档",
+                category="cognitive",
+                strength=0.55,
+                activation_count=4,
+                last_activated=None,
+            ),
+            HabitSeed(
+                id=2,
+                pattern="回应眼前的人",
+                category="behavioral",
+                strength=0.45,
+                activation_count=2,
+                last_activated=None,
+            ),
+        ])
+
+        selected = memory.activate_for_cycle(
+            goals=["回应眼前的人"],
+            note_text="",
+            stimuli=[_conversation_stimulus(content="你在吗？", message_id=101)],
+            emotion_summary="牵挂 0.60",
+        )
+
+        self.assertEqual(selected[0]["pattern"], "回应眼前的人")
+
+    def test_activate_for_cycle_uses_full_candidate_pool(self) -> None:
+        memory = HabitMemory(None, max_active_in_prompt=2, decay_rate=0.05)
+        memory._fetch_active_seeds = MagicMock(return_value=[])  # type: ignore[method-assign]
+
+        memory.activate_for_cycle(
+            goals=["回应眼前的人"],
+            note_text="",
+            stimuli=[_conversation_stimulus(content="你在吗？", message_id=101)],
+            emotion_summary="牵挂 0.60",
+        )
+
+        memory._fetch_active_seeds.assert_called_once_with(limit=None)  # type: ignore[attr-defined]
+
     def test_llm_fusion_weight_drops_to_zero_for_flat_empty_signal(self) -> None:
         weight = _llm_fusion_weight(
             {
@@ -1464,6 +1532,76 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         )
 
         self.assertEqual(weight, 0.0)
+
+    def test_attention_prefers_goal_aligned_reaction_under_conversation_foreground(self) -> None:
+        thoughts = [
+            _make_thought(cycle_id=12, index=1, thought_type="反应", content="我应该先回应眼前这个人。"),
+            _make_thought(cycle_id=12, index=2, thought_type="思考", content="我在想数据库索引还能怎么调。"),
+            _make_thought(
+                cycle_id=12,
+                index=3,
+                thought_type="意图",
+                content='我想去 reading 一段资料。 {action:reading, query:"索引优化"}',
+                action_request={"type": "reading", "params": 'query:"索引优化"'},
+            ),
+        ]
+        result = evaluate_attention(
+            thoughts,
+            recent_thoughts=[_make_thought(cycle_id=11, index=1, thought_type="思考", content="刚才还在打转。")],
+            stimuli=[_conversation_stimulus(content="你在吗？", message_id=101)],
+            goal_stack=["回应眼前的人"],
+            emotion={
+                "dimensions": {
+                    "curiosity": 0.2,
+                    "calm": 0.1,
+                    "frustration": 0.0,
+                    "satisfaction": 0.0,
+                    "concern": 0.7,
+                },
+                "dominant": "concern",
+                "summary": "牵挂 0.70",
+                "updated_at": "2026-04-02T00:00:00+00:00",
+            },
+        )
+
+        self.assertEqual(result.anchor_thought_id, "C12-1")
+
+    def test_impression_contact_is_preserved_for_entity_resolution(self) -> None:
+        summary = _ensure_impression_contact("关系: Alice。印象: 直接。", "telegram:1")
+
+        self.assertIn("telegram:1", summary)
+
+    def test_impression_refresh_requires_newer_dialogue_than_existing_summary(self) -> None:
+        existing = LongTermEntry(
+            id=1,
+            content="关系: Alice。印象: 直接。联系方式: telegram:1。",
+            memory_type="impression",
+            source_cycle_id=9,
+            importance=0.7,
+            created_at=datetime.fromisoformat("2026-04-02T10:00:00+00:00"),
+            entity_tags=["telegram:1", "_impression"],
+        )
+        older_entries: list[ConversationEntry] = [{
+            "entry_id": "conv_1",
+            "role": "user",
+            "source": "telegram:1",
+            "content": "你好",
+            "timestamp": "2026-04-02T09:59:00+00:00",
+            "stimulus_id": "stim_1",
+            "metadata": {},
+        }]
+        newer_entries: list[ConversationEntry] = [{
+            "entry_id": "conv_2",
+            "role": "user",
+            "source": "telegram:1",
+            "content": "你在吗",
+            "timestamp": "2026-04-02T10:01:00+00:00",
+            "stimulus_id": "stim_2",
+            "metadata": {},
+        }]
+
+        self.assertFalse(_impression_needs_refresh(existing, older_entries))
+        self.assertTrue(_impression_needs_refresh(existing, newer_entries))
 
     def test_canonical_params_ignores_order_and_whitespace(self) -> None:
         left = _canonical_params('target:"telegram:1", message:" 我在。 "')

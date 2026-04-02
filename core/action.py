@@ -19,7 +19,12 @@ from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient
 from core.openclaw_gateway import OpenClawGatewayExecutor, OpenClawUnavailableError
 from core.perception import collect_system_status_snapshot
 from core.rss import RSS_READ_EXCEPTIONS, read_news_result, summarize_news_items
-from core.stimulus import Stimulus, StimulusQueue, append_conversation_history
+from core.stimulus import (
+    Stimulus,
+    StimulusQueue,
+    append_action_result_history,
+    append_conversation_history,
+)
 from core.thought_parser import Thought, thought_action_requests
 from core.types import (
     ActionControl,
@@ -599,9 +604,12 @@ class ActionManager:
         self._publish_action_event(action, status, summary)
         self._publish_native_message(action, status, result)
         self._record_perception_observation(action, status, result)
+        stimulus_payload = _build_result_stimulus(action, status, result)
+        history_stimulus = _stimulus_from_payload(action.action_id, stimulus_payload)
+        append_action_result_history(self._redis, history_stimulus)  # type: ignore[arg-type]
         if not should_emit_stimulus:
             return
-        stimulus = _build_result_stimulus(action, status, result)
+        stimulus = stimulus_payload
         if _should_emit_prompt_echo_directly(action, status, result):
             self._remember_prompt_echo(action.action_id, stimulus)
             return
@@ -2771,6 +2779,19 @@ def _build_result_stimulus(
             "result": _action_result_to_json_object(result),
         },
     }
+
+
+def _stimulus_from_payload(action_id: str, payload: PerceptionStimulusPayload) -> Stimulus:
+    return Stimulus(
+        stimulus_id=f"stim_{action_id}",
+        type=payload["type"],
+        priority=payload["priority"],
+        source=payload["source"],
+        content=payload["content"],
+        action_id=action_id,
+        metadata=dict(payload["metadata"]),
+        timestamp=datetime.now(timezone.utc),
+    )
 
 
 def _infer_stimulus_type(

@@ -78,6 +78,10 @@ def thought_action_requests(thought: Thought) -> list[RawActionRequest]:
     return action_requests
 
 
+def strip_action_markers(content: str) -> str:
+    return ACTION_PATTERN.sub("", content).strip()
+
+
 def _parse_actions(content: str) -> list[RawActionRequest]:
     sanitized = INLINE_CODE_SPAN_PATTERN.sub("", content)
     return [

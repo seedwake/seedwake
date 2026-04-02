@@ -157,6 +157,7 @@ class PromptBuildContext:
     prefrontal_state: PrefrontalPromptState | None = None
     recent_reflections: list[ReflectionPromptEntry] | None = None
     long_term_context: list[str] | None = None
+    current_impressions: list[str] | None = None
     note_text: str = ""
     stimuli: list[Stimulus] | None = None
     recent_action_echoes: list[Stimulus] | None = None
@@ -188,6 +189,7 @@ def build_prompt(
         resolved_context.recent_reflections or [],
         window,
         resolved_context.long_term_context,
+        resolved_context.current_impressions or [],
         resolved_context.note_text,
         resolved_context.perception_cues or [],
     )
@@ -233,6 +235,7 @@ def _append_prompt_context_sections(
     recent_reflections: list[ReflectionPromptEntry],
     window: list[Thought],
     long_term_context: list[str] | None,
+    current_impressions: list[str],
     note_text: str,
     perception_cues: list[str],
 ) -> None:
@@ -255,6 +258,9 @@ def _append_prompt_context_sections(
     if long_term_context:
         ltm = long_term_context
         _append_prompt_section(parts, "long_term", lambda: _format_long_term(ltm))
+    if current_impressions:
+        impressions = current_impressions
+        _append_prompt_section(parts, "impressions", lambda: _format_impressions(impressions))
     if note_text.strip():
         _append_prompt_section(parts, "note", lambda: _format_note(note_text))
     if perception_cues:
@@ -434,6 +440,11 @@ def _format_long_term(memories: list[str]) -> str:
     for mem in memories:
         lines.append(f"- {_compact_prompt_text(mem)}")
     return _render_section("浮上来的记忆", lines)
+
+
+def _format_impressions(impressions: list[str]) -> str:
+    lines = [f"- {_compact_prompt_text(impression)}" for impression in impressions]
+    return _render_section("当前人物印象", lines)
 
 
 def _format_note(note_text: str) -> str:

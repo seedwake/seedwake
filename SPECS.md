@@ -194,19 +194,27 @@ core 通过 `localhost:5432` 连接 PostgreSQL，通过 `localhost:6379` 连接 
 每轮 Prompt 由以下部分按固定顺序组装，各部分有 token 预算上限（可在配置文件中调整）：
 
 ```
-[1] 系统指令与角色定义          （固定，约 500 token）
-[2] 身份文档                    （持久，约 500-1000 token）
-[3] 当前目标栈                  （持久，约 300 token）
-[4] 当前情绪基调                （每轮更新，约 100 token）
-[5] 相关习气/倾向性              （从习气库检索，约 300-500 token）
-[6] 长期记忆检索结果             （向量检索，约 2000-3000 token）
-[7] 短期记忆（最近 N 轮完整念头） （从 Redis，约 5000-10000 token）
-[8] 当前外部刺激（如有）          （从 StimulusQueue，约 500 token）
-[9] 待处理行动状态               （进行中/超时的行动，约 300 token）
-[10] 生成指令与 few-shot 示例    （固定，约 800 token）
+[1] 系统指令、输出格式、示例、规则   （固定）
+[2] 身份文档（"我"是谁）            （持久）
+[3] 最近的念头                      （从 Redis，最近 N 轮 × 3 条）
+[4] 浮上来的记忆                    （向量检索 + 印象）
+[5] 我的笔记                        （持久草稿纸，如有）
+[6] 当前目标栈与执行控制             （前额叶状态）
+[7] 当前情绪基调                    （每轮由 LLM 推断更新）
+[8] 睡眠状态                        （精力值、当前模式）
+[9] 相关习气/倾向性                  （从习气库按类别多样性选取）
+[10] 最近的元认知反思                （如有）
+[11] 好像有一阵子没有……              （感知提醒）
+[12] 行动有了回音                    （当前 + 近期缓存）
+[13] 我已经发起、正在等回音的事       （running actions）
+[14] 此刻我注意到                    （被动感知）
+[15] 最近的对话                      （对话历史 + 摘要）
+[16] 有人对我说话了                  （当前轮新消息）
+[17] 停滞警告                        （如检测到退化）
+[18] 接下来的念头 --- 第 N 轮 ---   （生成点）
 ```
 
-总预算约 10000-16000 token。以 Qwen 3.5 的 262K 窗口，有极大余量。可根据运行表现动态调整各部分预算。
+总预算随 prompt 内容动态变化，典型值约 8000-15000 字符。以 262K 上下文窗口（num_ctx 建议 131072），有足够余量。
 
 ### 3.4 Prompt 模板版本管理
 
@@ -247,7 +255,7 @@ Redis 中的短期记忆是一个三层结构：
 ### 4.2 长期记忆（PostgreSQL + pgvector）
 
 长期记忆存储在 PostgreSQL 中，启用 pgvector 扩展以支持向量检索。
-当前 Phase 2 的工程落点是：同一张 `long_term_memory` 表暂时同时承担 raw episodic trace store 和未来长期记忆容器两种职责。现阶段主要写入 `memory_type='episodic'` 的原始经历，用于验证 embedding 检索链路；浅睡/深睡引入后，再由 `memory_type` 区分整理后的 semantic / impression / action_result 等记忆类型。
+`long_term_memory` 表通过 `memory_type` 区分不同类型的记忆：`episodic`（原始经历，浅睡时从 STM 筛选归档）、`semantic`（浅睡时从经历中提炼的抽象认知）、`impression`（对人/事物的印象摘要）、`action_result`（行动结果）。检索时按 `相似度 × importance × time_decay_factor` 加权排序。Embedding 服务不可用时降级为按时间倒序取最近记忆。
 
 表结构：
 
@@ -257,7 +265,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE TABLE long_term_memory (
     id              BIGSERIAL PRIMARY KEY,
     content         TEXT NOT NULL,              -- 记忆内容（自然语言）
-    memory_type     TEXT NOT NULL,              -- episodic（情节）/ semantic（语义/事实）/ action_result（行动结果）
+    memory_type     TEXT NOT NULL,              -- episodic（情节）/ semantic（语义/事实）/ impression（人物/事物印象）/ action_result（行动结果）
     embedding       vector(4096),               -- 向量表示（须匹配 embedding 模型输出维度）
     entity_tags     TEXT[] DEFAULT '{}',         -- 实体标签，如 {'person:alice', 'project:seedwake'}
     source_cycle_id INTEGER,                    -- 来源循环编号
@@ -286,9 +294,10 @@ CREATE INDEX idx_ltm_created ON long_term_memory (created_at);
 
 #### 4.2.1 实体与印象
 
-对"人"和重要"事物"维护印象摘要，存储在长期记忆的 semantic 类型中，带特殊实体标签：
+对"人"和重要"事物"维护印象摘要，存储在长期记忆的 impression 类型中，并带特殊实体标签：
 
 ```
+memory_type: 'impression'
 entity_tags: {'person:alice', '_impression'}
 content: "关系: 管理员。印象: 技术能力强，提问直接，偏好简洁回答。最近互动: 讨论了数据库选型。情感基调: 正面。"
 ```
@@ -353,7 +362,7 @@ CREATE TABLE identity (
 - 新颖性（与近期念头的差异度）
 - 外部刺激引发的念头优先级更高
 
-实现方式：可以用规则引擎（基于关键词和简单评分），也可以用一次轻量的模型调用让模型自己评估"这三个念头中哪个最值得关注"。推荐先用规则引擎，后期视效果决定是否引入模型评估。
+实现方式：使用结构化信号评分（bigram 文本相似度做新颖性和目标相关度、情绪维度数值做共振度、刺激类型和念头类型做优先级加分），不使用关键词硬编码匹配。
 
 权重最高的念头成为下一轮向量检索的锚点（用它的 embedding 去长期记忆中检索），也是前端高亮展示的对象。
 
@@ -371,8 +380,9 @@ CREATE TABLE identity (
 ```
 
 每轮更新规则：
-- 根据上一轮念头内容做情绪推断（可用规则匹配或轻量模型调用）
-- 情绪有惯性：新值 = 0.7 × 旧值 + 0.3 × 本轮推断值
+- 使用辅助模型做语义情绪推断（输入为当前念头和刺激的清洗文本，输出为各维度 0-1 分值），辅以结构化信号（刺激类型、行动状态等）
+- 语义推断与结构化信号按自适应权重融合：LLM 输出质量高时语义权重大，输出残缺或全零时退回结构化信号主导
+- 情绪有惯性：新值 = inertia × 旧值 + (1-inertia) × 本轮推断值（inertia 可配置，默认 0.7）
 - 行动成功提升 satisfaction，失败提升 frustration
 - 外部刺激（如用户对话）可能显著改变情绪
 
@@ -548,10 +558,10 @@ admins:
 
 ## 8. 行动系统（统一 Action 层）
 
-Phase 3 采用双 API 分离：
+采用双 API 分离，支持多 provider（Ollama / OpenClaw / OpenAI-compatible）：
 
-- 念头生成继续使用 Ollama `generate` API，保持非对话式的意识流
-- 若解析出 `action_request`，再发起一次独立的 Ollama `chat + tools` 调用，对行动类型、参数和超时进行结构化确认
+- 念头生成使用主模型的 generate API（对 chat-only provider，prompt 放入 system message，user message 用零宽字符标记），保持非对话式的意识流
+- 若解析出 `action_request`（支持一个念头包含多个 action），再发起独立的 `chat + tools` 调用，对行动类型、参数和超时进行结构化确认；对不支持 tool_calls 的 provider 用 JSON 模式替代
 - 对模型暴露的是统一工具集合；底层可直接调用 native tools，也可委托 OpenClaw 处理需要浏览器、命令行、文件修改或多步外部探索的任务
 
 OpenClaw 的默认接入策略：
@@ -751,19 +761,15 @@ CREATE INDEX idx_audit_time ON audit_log (timestamp);
 
 ### 12.1 重复检测
 
-对最近 N 轮念头（N 可配置，默认 200）计算相邻念头之间的 embedding 余弦相似度。
-
-告警条件：
-- 最近 M 轮（默认 20）的平均相似度持续高于阈值（默认 0.85）
-- 检测到两个或多个念头之间的周期性振荡
+对最近 3 轮念头做两两 bigram Jaccard 相似度比较。所有两两对都超过阈值（默认 0.6）时触发退化告警。
 
 ### 12.2 打断机制
 
-检测到退化后，依次尝试：
-1. 注入随机外部刺激（从预设的刺激库中随机选取）
-2. 强制切换注意力焦点（忽略重复度高的念头类型，要求模型关注不同方向）
+检测到退化后：
+1. 在 prompt 中紧贴生成点注入停滞警告，明确列出重复的意象和可用的新信息源，要求模型跳出循环
+2. 退化告警喂给情绪模块（加速挫败感）和睡眠模块（加速精力消耗）
 3. 触发元认知反思（"我注意到最近一直在想同样的事情"）
-4. 如果以上都无法打破循环，触发浅睡
+4. 如果精力消耗到阈值，触发浅睡，通过记忆整理打破状态
 
 ---
 
@@ -771,53 +777,24 @@ CREATE INDEX idx_audit_time ON audit_log (timestamp);
 
 ### 13.1 生成模型（主力）
 
-**Qwen3.5-27B**（通过 Ollama 运行）
-- 用途：念头生成、对话回应、规划
-- 原因：密集架构，27.8B 参数，262K 原生上下文，中文能力强
-- 显存占用：Q4 量化约 18GB
+通过 `config.yml` 的 `models.primary` 配置，支持 Ollama、OpenClaw、OpenAI-compatible 三种 provider。
+- 用途：念头生成、行动规划（chat+tools 或 JSON 模式）
+- 当前推荐：Qwen3.5-27B（密集架构，262K 原生上下文，中文能力强）
+- 对 chat-only provider（如 OpenClaw），prompt 放入 system message，user message 用零宽字符标记
 
 ### 13.2 辅助模型
 
-**Qwen3.5-9B**（通过 Ollama 运行）
-- 用途：浅睡阶段的记忆整理、习气提炼、重复检测中的语义判断、前额叶抑制检查
-- 原因：9B 参数，性能超越上一代 30B，资源占用小
+通过 `config.yml` 的 `models.auxiliary` 配置，同样支持多 provider。
+- 用途：情绪推断、对话摘要压缩、浅睡/深睡记忆整理、习气提炼、元认知反思、印象摘要生成
+- 当前推荐：Qwen3.5-27B 或更轻量的同系列模型
 
 ### 13.3 Embedding 模型
 
-**Qwen3 Embedding**（通过 Ollama 运行）
+通过 `config.yml` 的 `models.embedding` 配置。
 - 用途：向量化念头和记忆，支持语义检索
-- 原因：中文语义理解优于 nomic-embed-text，项目以中文为主要思维语言
-- 备选：nomic-embed-text（如果中文效果经测试可接受）
+- 当前推荐：Qwen3 Embedding（中文语义理解好）
 
-所有模型在 64GB 显卡上可同时加载，无需换入换出。
-
-### 13.4 Ollama 调用参数
-
-```python
-# 念头生成
-response = ollama.chat(
-    model='qwen3.5:27b',
-    messages=[...],
-    options={
-        'num_predict': 2048,    # 控制最大输出 token
-        'num_ctx': 32768,       # 实际使用的上下文窗口（按需调整，不必用满 262K）
-        'temperature': 0.8,     # 念头生成需要一定创造性
-    }
-)
-
-# 辅助任务（记忆整理等）
-response = ollama.chat(
-    model='qwen3.5:9b',
-    messages=[...],
-    options={
-        'num_predict': 1024,
-        'num_ctx': 16384,
-        'temperature': 0.3,     # 整理任务需要更确定性的输出
-    }
-)
-```
-
-关闭 Qwen 3.5 的默认 thinking mode（避免 `<think>` 标签干扰念头格式）：在 system prompt 中指示模型直接输出，不使用思考标签。
+所有模型在 64GB 显卡上可同时加载，无需换入换出。参数通过 `config.yml` 配置（num_predict、num_ctx、temperature 等），不硬编码。
 
 ---
 
@@ -996,9 +973,6 @@ admins:
 - 身份文档
 - Embedding 模型集成
 - Docker Compose 编排
-- 注：长期记忆检索暂用纯向量距离排序；§4.2 要求的 `相似度 × importance × time_decay_factor` 加权排序延迟到第四阶段实现（依赖睡眠机制对 importance 的调整和足够的运行时间跨度）
-- 注：Embedding 服务故障时直接跳过长期记忆注入；§14.2 要求的"按时间倒序取最近几条"降级路径延迟实现（早期 LTM 数据与短期记忆高度重叠，该降级路径无实际收益）
-- 注：当前每轮直写 long_term_memory 作为阶段性简化，用于验证向量检索链路；§4.1/§9.2 要求的"短期记忆经浅睡筛选归档"写入路径延迟到第四阶段实现（依赖睡眠机制）
 - 注：向量索引暂不建立；qwen3-embedding 输出 4096 维，超出 pgvector 索引 2000 维限制，当前数据规模下全表扫描可接受
 - 注：审计系统（§11）表结构已建，写入接口未实现；各组件降级事件的审计记录（§14.2）待审计模块整体实现后统一接入
 

@@ -40,7 +40,7 @@ from core.memory.short_term import LATEST_CYCLE_KEY, ShortTermMemory
 from core.metacognition import MetacognitionManager
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient, create_model_client
 from core.perception import PerceptionManager
-from core.prefrontal import PrefrontalManager
+from core.prefrontal import PrefrontalManager, build_goal_stack
 from core.prompt_builder import PromptBuildContext
 from core.runtime import connect_redis_from_env, load_yaml_config
 from core.sleep import SleepManager
@@ -130,6 +130,7 @@ CYCLE_COUNTER_KEY = "seedwake:cycle_counter"
 CONVERSATION_MERGE_SEPARATOR = "\n"
 LTM_ACTION_MARKER_PATTERN = re.compile(r"\s*\{action:[^}]+\}\s*$")
 LTM_RETRIEVAL_OVERSAMPLE_FACTOR = 3
+LTM_ASSOCIATIVE_MEMORY_TYPES = ["episodic", "semantic", "action_result"]
 MERGED_TELEGRAM_METADATA_KEYS = (
     "telegram_user_id",
     "telegram_chat_id",
@@ -261,6 +262,10 @@ def _build_runtime_components(
         light_sleep_recovery=float(config.get("sleep", {}).get("light_sleep_recovery", 70)),
         deep_sleep_trigger_hours=float(config.get("sleep", {}).get("deep_sleep_trigger_hours", 24)),
         archive_importance_threshold=float(config.get("long_term_memory", {}).get("importance_threshold", 0.1)),
+        deep_sleep_failure_threshold=int(config.get("sleep", {}).get("deep_sleep_failure_threshold", 3)),
+        deep_sleep_active_memory_threshold=int(config.get("sleep", {}).get("deep_sleep_active_memory_threshold", 5000)),
+        inactive_purge_days=int(config.get("sleep", {}).get("inactive_purge_days", 30)),
+        restart_after_deep_sleep=bool(config.get("sleep", {}).get("restart_after_deep_sleep", True)),
     )
     action_manager = create_action_manager(
         _as_action_redis(redis_client),
@@ -427,7 +432,8 @@ def _run_engine_loop(
             continue
 
         _finish_cycle(log_file, cycle_id, stimuli, new_thoughts)
-        _post_cycle_phase4(runtime, cycle_id, stimuli, new_thoughts, degeneration_alert)
+        if _safe_post_cycle_phase4(runtime, cycle_id, stimuli, new_thoughts, degeneration_alert):
+            _graceful_restart_core(log_file, prompt_log_file, runtime.action_manager)
         last_completed_cycle_id = cycle_id
         pending_cycle_id = None
         current_retry_delay = runtime.retry_delay
@@ -467,7 +473,7 @@ def _post_cycle_phase4(
     stimuli: list[Stimulus],
     thoughts: list[Thought],
     degeneration_alert: bool,
-) -> None:
+) -> bool:
     failure_count = _failed_action_echo_count(stimuli)
     sleep_state = runtime.sleep.consume_cycle(
         cycle_id,
@@ -482,7 +488,13 @@ def _post_cycle_phase4(
         sleep_state["mode"],
     )
     buffer_thoughts = runtime.stm.buffer_thoughts()
-    if runtime.sleep.should_deep_sleep(now=datetime.now(timezone.utc)):
+    active_memory_count = runtime.ltm.active_count() if runtime.ltm.available else 0
+    if runtime.sleep.should_deep_sleep(
+        now=datetime.now(timezone.utc),
+        failure_count=failure_count,
+        degeneration_alert=degeneration_alert,
+        active_memory_count=active_memory_count,
+    ):
         result = runtime.sleep.run_deep_sleep(
             cycle_id=cycle_id,
             stm=runtime.stm,
@@ -495,14 +507,21 @@ def _post_cycle_phase4(
             emotion=runtime.emotion.current(),
         )
         logger.info(
-            "cycle C%s deep sleep finished (archived=%d, habits=%d, cooled=%d, summary=%s)",
+            "cycle C%s deep sleep finished (archived=%d, semantic=%d, impressions=%d, action_results=%d, habits=%d, cooled=%d, maintenance=%d, expired=%d, summary=%s, review=%s, restart=%s)",
             cycle_id,
             result.archived_count,
+            result.semantic_count,
+            result.impression_updates,
+            result.action_result_count,
             result.created_habits,
             result.cooled_memories,
+            result.maintenance_operations,
+            result.expired_count,
             bool(result.deep_summary),
+            bool(result.self_review),
+            result.restart_requested,
         )
-        return
+        return result.restart_requested
     if runtime.sleep.should_light_sleep(degeneration_alert=degeneration_alert, buffer_thoughts=buffer_thoughts):
         result = runtime.sleep.run_light_sleep(
             cycle_id=cycle_id,
@@ -511,14 +530,55 @@ def _post_cycle_phase4(
             habit_memory=runtime.habit_memory,
             embedding_client=runtime.embedding_client,
             embedding_model=runtime.embedding_model,
+            auxiliary_client=runtime.auxiliary_client,
+            auxiliary_model_config=runtime.auxiliary_model_config,
+            emotion=runtime.emotion.current(),
         )
         logger.info(
-            "cycle C%s light sleep finished (archived=%d, habits=%d, cooled=%d)",
+            "cycle C%s light sleep finished (archived=%d, semantic=%d, impressions=%d, action_results=%d, habits=%d, cooled=%d)",
             cycle_id,
             result.archived_count,
+            result.semantic_count,
+            result.impression_updates,
+            result.action_result_count,
             result.created_habits,
             result.cooled_memories,
         )
+    return False
+
+
+def _safe_post_cycle_phase4(
+    runtime: EngineRuntime,
+    cycle_id: int,
+    stimuli: list[Stimulus],
+    thoughts: list[Thought],
+    degeneration_alert: bool,
+) -> bool:
+    try:
+        return _post_cycle_phase4(runtime, cycle_id, stimuli, thoughts, degeneration_alert)
+    except MAIN_LOOP_EXCEPTIONS as exc:
+        logger.exception("phase4 post-cycle processing failed at cycle %s: %s", cycle_id, exc)
+        return False
+    # noinspection PyBroadException
+    except Exception as exc:
+        logger.exception("unexpected phase4 post-cycle failure at cycle %s: %s", cycle_id, exc)
+        return False
+
+
+def _graceful_restart_core(
+    log_file: TextIO | None,
+    prompt_log_file: TextIO | None,
+    action_manager: ActionManager,
+) -> None:
+    logger.info("deep sleep requested graceful restart")
+    drained = action_manager.shutdown_with_timeout(wait_timeout_seconds=5.0)
+    if log_file:
+        log_file.close()
+    if prompt_log_file:
+        prompt_log_file.close()
+    if not drained:
+        logger.warning("restart proceeding with running actions still active")
+    os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
 def _prepare_cycle(
@@ -878,7 +938,13 @@ def _execute_cycle(
         note_text = runtime.action_manager.current_note()
         current_emotion = runtime.emotion.current()
         current_sleep_state = runtime.sleep.current()
-        active_habits = runtime.habit_memory.activate_for_cycle()
+        current_goals = build_goal_stack(identity, note_text)
+        active_habits = runtime.habit_memory.activate_for_cycle(
+            goals=current_goals,
+            note_text=note_text,
+            stimuli=stimuli,
+            emotion_summary=current_emotion["summary"],
+        )
         prefrontal_state = runtime.prefrontal.current_state(
             cycle_id,
             identity,
@@ -888,18 +954,23 @@ def _execute_cycle(
             current_emotion["summary"],
         )
         recent_reflections = runtime.metacognition.recent_reflections()
+        current_entity_filter = _current_entity_filter(stimuli)
         ltm_started_at = time.perf_counter()
         ltm_context = _retrieve_associations(
             runtime.ltm,
             runtime.embedding_client,
             recent_thoughts,
             runtime.embedding_model,
+            current_entity_filter=current_entity_filter,
         )
+        current_impressions = _retrieve_current_impressions(runtime.ltm, current_entity_filter)
+        if current_impressions and ltm_context:
+            ltm_context = [memory for memory in ltm_context if memory not in current_impressions] or None
         logger.info(
             "cycle C%s association retrieval finished in %.1f ms (count=%d)",
             cycle_id,
             elapsed_ms(ltm_started_at),
-            len(ltm_context or []),
+            len(ltm_context or []) + len(current_impressions or []),
         )
         conversations_started_at = time.perf_counter()
         recent_conversations = _load_recent_conversations(runtime, cycle_id, stimuli, prompt_log_file)
@@ -933,6 +1004,7 @@ def _execute_cycle(
                 prefrontal_state=prefrontal_state,
                 recent_reflections=recent_reflections,
                 long_term_context=ltm_context,
+                current_impressions=current_impressions,
                 note_text=note_text,
                 stimuli=stimuli,
                 recent_action_echoes=recent_action_echoes,
@@ -953,6 +1025,8 @@ def _execute_cycle(
             thoughts,
             recent_thoughts,
             stimuli,
+            goal_stack=prefrontal_state["goal_stack"],
+            emotion=current_emotion,
         )
         thoughts = attention_result.thoughts
         logger.info(
@@ -1222,13 +1296,10 @@ def _retrieve_associations(
     embedding_client: ModelClient,
     recent_thoughts: list[Thought],
     embedding_model: str,
+    *,
+    current_entity_filter: str | None = None,
 ) -> list[str] | None:
-    """Embed the latest thought and retrieve related long-term memories.
-
-    # NOTE: SPECS §14.2 requires Embedding fallback to time-ordered retrieval.
-    # Current implementation skips LTM entirely on embed failure. Deferred
-    # because early-stage LTM data overlaps heavily with STM context window.
-    """
+    """Retrieve related long-term memories, degrading to recent-by-time on embed failure."""
     if not ltm.available:
         return None
     if not recent_thoughts:
@@ -1239,12 +1310,35 @@ def _retrieve_associations(
     try:
         vec = embed_text(embedding_client, anchor.content, embedding_model)
     except EMBEDDING_EXCEPTIONS:
-        return None
-    try:
-        entries = ltm.search(
-            vec,
-            top_k=_ltm_search_limit(ltm),
+        logger.warning(
+            "ltm embedding failed for anchor %s, falling back to recent-by-time retrieval",
+            anchor.thought_id,
+        )
+        return _recent_ltm_fallback(
+            ltm,
+            result_limit=result_limit,
             exclude_cycle_ids=exclude_cycle_ids,
+            current_entity_filter=current_entity_filter,
+        )
+    try:
+        entries: list[LongTermEntry] = []
+        if current_entity_filter:
+            entries.extend(
+                ltm.search(
+                    vec,
+                    top_k=max(2, result_limit),
+                    entity_filter=current_entity_filter,
+                    exclude_cycle_ids=exclude_cycle_ids,
+                    memory_types=LTM_ASSOCIATIVE_MEMORY_TYPES,
+                )
+            )
+        entries.extend(
+            ltm.search(
+                vec,
+                top_k=_ltm_search_limit(ltm),
+                exclude_cycle_ids=exclude_cycle_ids,
+                memory_types=LTM_ASSOCIATIVE_MEMORY_TYPES,
+            )
         )
         if not entries:
             return None
@@ -1256,6 +1350,78 @@ def _retrieve_associations(
     except LTM_EXCEPTIONS:
         ltm.disconnect()
         return None
+
+
+def _recent_ltm_fallback(
+    ltm: LongTermMemory,
+    *,
+    result_limit: int,
+    exclude_cycle_ids: list[int],
+    current_entity_filter: str | None,
+) -> list[str] | None:
+    try:
+        entries: list[LongTermEntry] = []
+        if current_entity_filter:
+            entries.extend(
+                ltm.recent_by_time(
+                    top_k=max(2, result_limit),
+                    entity_filter=current_entity_filter,
+                    exclude_cycle_ids=exclude_cycle_ids,
+                    memory_types=LTM_ASSOCIATIVE_MEMORY_TYPES,
+                )
+            )
+        entries.extend(
+            ltm.recent_by_time(
+                top_k=_ltm_search_limit(ltm),
+                exclude_cycle_ids=exclude_cycle_ids,
+                memory_types=LTM_ASSOCIATIVE_MEMORY_TYPES,
+            )
+        )
+        if not entries:
+            return None
+        memory_ids, contents = _dedupe_ltm_contents(entries, limit=result_limit)
+        if not contents:
+            return None
+        ltm.mark_accessed(memory_ids)
+        return contents
+    except LTM_EXCEPTIONS:
+        ltm.disconnect()
+        return None
+
+
+def _retrieve_current_impressions(
+    ltm: LongTermMemory,
+    current_entity_filter: str | None,
+) -> list[str] | None:
+    if not ltm.available or not current_entity_filter:
+        return None
+    try:
+        entries = ltm.recent_by_time(
+            top_k=1,
+            entity_filter=current_entity_filter,
+            memory_types=["impression"],
+        )
+    except LTM_EXCEPTIONS:
+        ltm.disconnect()
+        return None
+    if not entries:
+        return None
+    clean_content = _sanitize_ltm_content(entries[0].content)
+    if not clean_content:
+        return None
+    ltm.mark_accessed([entries[0].id])
+    return [clean_content]
+
+
+def _current_entity_filter(stimuli: list[Stimulus]) -> str | None:
+    sources = {
+        stimulus.source
+        for stimulus in stimuli
+        if stimulus.type == "conversation" and stimulus.source.strip()
+    }
+    if len(sources) != 1:
+        return None
+    return next(iter(sources))
 
 
 def _store_to_ltm(

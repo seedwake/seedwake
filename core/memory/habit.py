@@ -7,6 +7,7 @@ import time
 
 import psycopg
 
+from core.stimulus import Stimulus
 from core.thought_parser import Thought, thought_action_requests
 from core.types import HabitPromptEntry, elapsed_ms
 
@@ -45,49 +46,9 @@ class HabitMemory:
         self._conn = pg_conn
 
     def top_active(self) -> list[HabitPromptEntry]:
-        conn = self._conn
-        if conn is None:
-            return []
-        started_at = time.perf_counter()
-        status = "failed"
-        rows: list[tuple] = []
-        try:
-            with conn.cursor() as cur:
-                # Fetch more than needed for category-diverse selection
-                cur.execute(
-                    """
-                    SELECT id, pattern, category, strength
-                    FROM habit_seeds
-                    WHERE strength > 0.01
-                    ORDER BY strength DESC, activation_count DESC, updated_at DESC
-                    LIMIT %s
-                    """,
-                    (self._max_active_in_prompt * 3,),
-                )
-                rows = cur.fetchall()
-            status = "ok"
-        except psycopg.Error:
-            conn.rollback()
-            raise
-        finally:
-            import logging
-
-            logging.getLogger(logger_name).info(
-                "habit top_active finished in %.1f ms (status=%s, count=%d)",
-                elapsed_ms(started_at),
-                status,
-                len(rows),
-            )
-        all_entries = [
-            {
-                "id": int(row[0]),
-                "pattern": str(row[1]),
-                "category": str(row[2] or "cognitive"),
-                "strength": float(row[3]),
-            }
-            for row in rows
-        ]
-        return _diverse_selection(all_entries, self._max_active_in_prompt)
+        seeds = self._fetch_active_seeds(limit=self._max_active_in_prompt * 4)
+        entries = [_habit_entry(seed) for seed in seeds]
+        return _diverse_selection(entries, self._max_active_in_prompt)
 
     def ensure_bootstrap_seeds(self, items: list[dict]) -> None:
         for item in items:
@@ -98,13 +59,26 @@ class HabitMemory:
             strength = float(item.get("strength") or 0.1)
             self._upsert_seed(pattern, category, strength)
 
-    def activate_for_cycle(self) -> list[HabitPromptEntry]:
-        """Return top active habits for prompt display.
-
-        Does NOT update activation timestamps — display alone is not activation.
-        Real strengthening happens only during light sleep (strengthen_from_sleep).
-        """
-        return self.top_active()
+    def activate_for_cycle(
+        self,
+        *,
+        goals: list[str],
+        note_text: str,
+        stimuli: list[Stimulus],
+        emotion_summary: str,
+    ) -> list[HabitPromptEntry]:
+        """Return habits most relevant to the current context for prompt display."""
+        seeds = self._fetch_active_seeds(limit=None)
+        if not seeds:
+            return []
+        context_text = _habit_context_text(goals, note_text, stimuli, emotion_summary)
+        ranked = sorted(
+            seeds,
+            key=lambda seed: _habit_prompt_score(seed, context_text),
+            reverse=True,
+        )
+        entries = [_habit_entry(seed) for seed in ranked]
+        return _diverse_selection(entries, self._max_active_in_prompt)
 
     def observe_cycle(self, thoughts: list[Thought]) -> int:
         """Record explicit activation evidence from current thoughts.
@@ -139,6 +113,61 @@ class HabitMemory:
         except psycopg.Error:
             conn.rollback()
             raise
+
+    def _fetch_active_seeds(self, *, limit: int | None) -> list[HabitSeed]:
+        conn = self._conn
+        if conn is None:
+            return []
+        started_at = time.perf_counter()
+        status = "failed"
+        rows: list[tuple] = []
+        try:
+            with conn.cursor() as cur:
+                if limit is None:
+                    cur.execute(
+                        """
+                        SELECT id, pattern, category, strength, activation_count, last_activated
+                        FROM habit_seeds
+                        WHERE strength > 0.01
+                        ORDER BY updated_at DESC, activation_count DESC, strength DESC
+                        """
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, pattern, category, strength, activation_count, last_activated
+                        FROM habit_seeds
+                        WHERE strength > 0.01
+                        ORDER BY strength DESC, activation_count DESC, updated_at DESC
+                        LIMIT %s
+                        """,
+                        (limit,),
+                    )
+                rows = cur.fetchall()
+            status = "ok"
+        except psycopg.Error:
+            conn.rollback()
+            raise
+        finally:
+            import logging
+
+            logging.getLogger(logger_name).info(
+                "habit fetch_active_seeds finished in %.1f ms (status=%s, count=%d)",
+                elapsed_ms(started_at),
+                status,
+                len(rows),
+            )
+        return [
+            HabitSeed(
+                id=int(row[0]),
+                pattern=str(row[1]),
+                category=str(row[2] or "cognitive"),
+                strength=float(row[3]),
+                activation_count=int(row[4] or 0),
+                last_activated=row[5],
+            )
+            for row in rows
+        ]
 
     def strengthen_from_sleep(self, thoughts: list[Thought]) -> list[HabitPromptEntry]:
         conn = self._conn
@@ -341,3 +370,69 @@ def _diverse_selection(entries: list[HabitPromptEntry], limit: int) -> list[Habi
             if entry["id"] not in selected_ids:
                 selected.append(entry)
     return selected
+
+
+def _habit_entry(seed: HabitSeed) -> HabitPromptEntry:
+    return {
+        "id": seed.id,
+        "pattern": seed.pattern,
+        "category": seed.category,
+        "strength": seed.strength,
+    }
+
+
+def _habit_context_text(
+    goals: list[str],
+    note_text: str,
+    stimuli: list[Stimulus],
+    emotion_summary: str,
+) -> str:
+    parts: list[str] = []
+    parts.extend(goal.strip() for goal in goals if goal.strip())
+    if note_text.strip():
+        parts.append(" ".join(note_text.split()))
+    if emotion_summary.strip():
+        parts.append(emotion_summary.strip())
+    for stimulus in stimuli:
+        parts.append(_habit_stimulus_text(stimulus))
+    return " ".join(part for part in parts if part).strip()
+
+
+def _habit_stimulus_text(stimulus: Stimulus) -> str:
+    content = " ".join(stimulus.content.split()).strip()
+    if not content:
+        return stimulus.type
+    return f"{stimulus.type} {content[:120]}"
+
+
+def _habit_prompt_score(seed: HabitSeed, context_text: str) -> float:
+    relevance = _habit_context_similarity(seed.pattern, context_text)
+    recency = _habit_recency_bonus(seed.last_activated)
+    return round(seed.strength * 0.42 + relevance * 0.48 + recency * 0.10, 6)
+
+
+def _habit_context_similarity(pattern: str, context_text: str) -> float:
+    normalized_pattern = _normalize_habit_text(pattern)
+    normalized_context = _normalize_habit_text(context_text)
+    if not normalized_pattern or not normalized_context:
+        return 0.0
+    return _text_similarity(normalized_pattern, normalized_context)
+
+
+def _habit_recency_bonus(last_activated: datetime | None) -> float:
+    if last_activated is None:
+        return 0.0
+    tz = last_activated.tzinfo or datetime.now().astimezone().tzinfo
+    age_days = max(0.0, (datetime.now(tz) - last_activated).total_seconds() / 86400.0)
+    return max(0.0, 1.0 - min(age_days / 7.0, 1.0))
+
+
+def _text_similarity(a: str, b: str) -> float:
+    if len(a) < 2 or len(b) < 2:
+        return 0.0
+    grams_a = {a[index:index + 2] for index in range(len(a) - 1)}
+    grams_b = {b[index:index + 2] for index in range(len(b) - 1)}
+    union = len(grams_a | grams_b)
+    if union == 0:
+        return 0.0
+    return len(grams_a & grams_b) / union

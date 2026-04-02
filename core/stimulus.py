@@ -26,6 +26,8 @@ from core.types import (
 REDIS_KEY = "seedwake:stimuli"
 CONVERSATION_HISTORY_KEY = "seedwake:conversation_history"
 CONVERSATION_HISTORY_LIMIT = 500
+ACTION_RESULT_HISTORY_KEY = "seedwake:action_result_history"
+ACTION_RESULT_HISTORY_LIMIT = 500
 CONVERSATION_SUMMARY_KEY = "seedwake:conversation_summaries"
 RECENT_ACTION_ECHO_KEY = "seedwake:recent_action_echoes"
 RECENT_ACTION_ECHO_LIMIT = 100
@@ -296,6 +298,77 @@ def append_conversation_history(
             f"key={CONVERSATION_HISTORY_KEY}, limit={CONVERSATION_HISTORY_LIMIT}",
         )
     return entry
+
+
+def append_action_result_history(
+    redis_client: ConversationRedisLike | None,
+    stimulus: Stimulus,
+) -> None:
+    if redis_client is None:
+        return
+    push_started_at = time.perf_counter()
+    redis_client.rpush(ACTION_RESULT_HISTORY_KEY, _stimulus_to_json(stimulus))
+    _log_redis_operation("rpush", push_started_at, f"key={ACTION_RESULT_HISTORY_KEY}, count=1")
+    trim_started_at = time.perf_counter()
+    redis_client.ltrim(ACTION_RESULT_HISTORY_KEY, -ACTION_RESULT_HISTORY_LIMIT, -1)
+    _log_redis_operation(
+        "ltrim",
+        trim_started_at,
+        f"key={ACTION_RESULT_HISTORY_KEY}, limit={ACTION_RESULT_HISTORY_LIMIT}",
+    )
+
+
+def load_action_result_history(
+    redis_client: ConversationRedisLike | None,
+    limit: int = ACTION_RESULT_HISTORY_LIMIT,
+) -> list[Stimulus]:
+    if redis_client is None or limit <= 0:
+        return []
+    started_at = time.perf_counter()
+    raw_items = redis_client.lrange(ACTION_RESULT_HISTORY_KEY, -limit, -1)
+    _log_redis_operation("lrange", started_at, f"key={ACTION_RESULT_HISTORY_KEY}, count={len(raw_items)}")
+    stimuli: list[Stimulus] = []
+    for raw_item in raw_items:
+        try:
+            payload = json.loads(raw_item)
+        except (TypeError, ValueError) as exc:
+            logger.warning("skipping malformed action result history record: %s", exc)
+            continue
+        if not isinstance(payload, dict):
+            logger.warning("skipping non-object action result history record")
+            continue
+        try:
+            stimuli.append(_stimulus_from_dict(payload))  # type: ignore[arg-type]
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning("skipping invalid action result history record: %s", exc)
+    return stimuli
+
+
+def forget_action_result_history_ids(
+    redis_client: ConversationRedisLike | None,
+    stimulus_ids: list[str],
+) -> None:
+    if redis_client is None or not stimulus_ids:
+        return
+    id_set = {stimulus_id for stimulus_id in stimulus_ids if stimulus_id}
+    if not id_set:
+        return
+    started_at = time.perf_counter()
+    raw_items = redis_client.lrange(ACTION_RESULT_HISTORY_KEY, 0, -1)
+    _log_redis_operation("lrange", started_at, f"key={ACTION_RESULT_HISTORY_KEY}, count={len(raw_items)}")
+    for raw_item in raw_items:
+        try:
+            payload = json.loads(raw_item)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        stimulus_id = str(payload.get("stimulus_id") or "").strip()
+        if stimulus_id not in id_set:
+            continue
+        remove_started_at = time.perf_counter()
+        redis_client.lrem(ACTION_RESULT_HISTORY_KEY, 1, raw_item)
+        _log_redis_operation("lrem", remove_started_at, f"key={ACTION_RESULT_HISTORY_KEY}, count=1")
 
 
 def _sync_conversation_history(

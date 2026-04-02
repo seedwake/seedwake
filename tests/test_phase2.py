@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -14,6 +15,7 @@ from core.main import (
     EngineRuntime,
     _execute_cycle,
     _post_cycle_phase4,
+    _safe_post_cycle_phase4,
     _run_engine_loop,
     _maybe_reconnect_pg,
     _maybe_reconnect_redis,
@@ -26,6 +28,7 @@ from core.main import (
 from core.memory.short_term import LATEST_CYCLE_KEY
 from core.memory.identity import load_identity
 from core.memory.long_term import LongTermEntry, LongTermMemory
+from core.sleep import SleepManager, _archive_action_result_memories, _light_sleep_trace_line
 # noinspection PyProtectedMember
 from core.memory.short_term import ShortTermMemory, _thought_to_dict, _dict_to_thought
 from core.stimulus import Stimulus
@@ -297,8 +300,26 @@ class LongTermMemoryPromptNormalizationTests(unittest.TestCase):
             memories = _retrieve_associations(ltm, MagicMock(), stm.get_context(), "embed-model")
 
         self.assertEqual(memories, ["读过一段材料", "另一段记忆"])
-        ltm.search.assert_called_once_with([0.1, 0.2], top_k=15, exclude_cycle_ids=[1])
+        ltm.search.assert_called_once_with(
+            [0.1, 0.2],
+            top_k=15,
+            exclude_cycle_ids=[1],
+            memory_types=["episodic", "semantic", "action_result"],
+        )
         ltm.mark_accessed.assert_called_once_with([1, 3])
+
+    def test_merge_exact_duplicates_groups_by_memory_type(self) -> None:
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cursor
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        ltm = LongTermMemory(mock_conn)
+
+        ltm.merge_exact_duplicates()
+
+        executed_query = str(mock_cursor.execute.call_args_list[0].args[0])
+        self.assertIn("GROUP BY content, memory_type", executed_query)
 
     @staticmethod
     def _run_dedup_association_test(
@@ -324,7 +345,12 @@ class LongTermMemoryPromptNormalizationTests(unittest.TestCase):
         memories, ltm = self._run_dedup_association_test([])
 
         self.assertEqual(memories, ["重复记忆", "另一段记忆"])
-        ltm.search.assert_called_once_with([0.1, 0.2], top_k=6, exclude_cycle_ids=[1])
+        ltm.search.assert_called_once_with(
+            [0.1, 0.2],
+            top_k=6,
+            exclude_cycle_ids=[1],
+            memory_types=["episodic", "semantic", "action_result"],
+        )
         ltm.mark_accessed.assert_called_once_with([1, 3])
 
     def test_retrieve_associations_truncates_deduped_results_back_to_top_k(self) -> None:
@@ -334,7 +360,12 @@ class LongTermMemoryPromptNormalizationTests(unittest.TestCase):
         ])
 
         self.assertEqual(memories, ["重复记忆", "另一段记忆"])
-        ltm.search.assert_called_once_with([0.1, 0.2], top_k=6, exclude_cycle_ids=[1])
+        ltm.search.assert_called_once_with(
+            [0.1, 0.2],
+            top_k=6,
+            exclude_cycle_ids=[1],
+            memory_types=["episodic", "semantic", "action_result"],
+        )
         ltm.mark_accessed.assert_called_once_with([1, 3])
 
     @staticmethod
@@ -355,7 +386,12 @@ class LongTermMemoryPromptNormalizationTests(unittest.TestCase):
         with patch("core.main.embed_text", return_value=[0.1, 0.2]):
             _retrieve_associations(ltm, MagicMock(), stm.get_context(), "embed-model")
 
-        ltm.search.assert_called_once_with([0.1, 0.2], top_k=6, exclude_cycle_ids=[4, 5])
+        ltm.search.assert_called_once_with(
+            [0.1, 0.2],
+            top_k=6,
+            exclude_cycle_ids=[4, 5],
+            memory_types=["episodic", "semantic", "action_result"],
+        )
 
     def test_store_to_ltm_strips_action_markers_and_skips_batch_duplicates(self) -> None:
         ltm = MagicMock()
@@ -597,8 +633,16 @@ class Phase4RuntimeTests(unittest.TestCase):
         sleep.should_light_sleep.return_value = True
         sleep.run_light_sleep.return_value = SimpleNamespace(
             archived_count=5,
+            semantic_count=2,
+            impression_updates=1,
+            action_result_count=1,
             created_habits=2,
             cooled_memories=3,
+            maintenance_operations=0,
+            expired_count=0,
+            deep_summary="",
+            self_review="",
+            restart_requested=False,
         )
         runtime = SimpleNamespace(
             stm=MagicMock(),
@@ -625,6 +669,221 @@ class Phase4RuntimeTests(unittest.TestCase):
 
         sleep.consume_cycle.assert_called_once()
         sleep.run_light_sleep.assert_called_once()
+
+    @patch("core.main.embed_text", side_effect=OSError("embed offline"))
+    def test_retrieve_associations_falls_back_to_recent_by_time_when_embed_fails(self, mock_embed) -> None:
+        stm = _build_association_stm()
+        entity_recent = LongTermEntry(
+            id=1,
+            content="与当前对话对象相关的近期语义记忆",
+            memory_type="semantic",
+            source_cycle_id=9,
+            importance=0.6,
+            created_at=datetime.now(timezone.utc),
+            entity_tags=["telegram:1"],
+        )
+        recent = LongTermEntry(
+            id=2,
+            content="最近的一条语义记忆",
+            memory_type="semantic",
+            source_cycle_id=8,
+            importance=0.5,
+            created_at=datetime.now(timezone.utc),
+        )
+        ltm = MagicMock()
+        ltm.available = True
+        ltm.retrieval_top_k = 5
+        ltm.recent_by_time.side_effect = [[entity_recent], [recent]]
+        ltm.mark_accessed = MagicMock()
+
+        result = _retrieve_associations(
+            ltm,
+            MagicMock(),
+            stm.get_context(),
+            "embed-model",
+            current_entity_filter="telegram:1",
+        )
+
+        mock_embed.assert_called_once()
+        self.assertEqual(result, ["与当前对话对象相关的近期语义记忆", "最近的一条语义记忆"])
+        self.assertEqual(ltm.recent_by_time.call_count, 2)
+        ltm.search.assert_not_called()
+        ltm.mark_accessed.assert_called_once_with([1, 2])
+        first_call = ltm.recent_by_time.call_args_list[0]
+        self.assertEqual(first_call.kwargs["entity_filter"], "telegram:1")
+        self.assertEqual(first_call.kwargs["memory_types"], ["episodic", "semantic", "action_result"])
+
+    @patch("core.sleep._update_impression_memories", return_value=0)
+    @patch("core.sleep._store_light_sleep_semantic_memories", return_value=0)
+    @patch("core.sleep.embed_text", return_value=[0.1, 0.2])
+    def test_run_light_sleep_archives_reflection_trace_as_episodic(
+        self,
+        _mock_embed: MagicMock,
+        _mock_semantic: MagicMock,
+        _mock_impressions: MagicMock,
+    ) -> None:
+        sleep = SleepManager(
+            None,
+            energy_per_cycle=0.2,
+            drowsy_threshold=30,
+            light_sleep_recovery=70,
+            deep_sleep_trigger_hours=24,
+            archive_importance_threshold=0.1,
+            deep_sleep_failure_threshold=3,
+            deep_sleep_active_memory_threshold=5000,
+            inactive_purge_days=30,
+            restart_after_deep_sleep=False,
+        )
+        stm = ShortTermMemory(redis_client=None, context_window=1)
+        reflection = Thought(
+            thought_id="C12-4",
+            cycle_id=12,
+            index=4,
+            type="反思",
+            content="我注意到自己总在等待里打转。",
+        )
+        reflection.attention_weight = 0.9
+        reflection_2 = Thought(
+            thought_id="C12-5",
+            cycle_id=12,
+            index=5,
+            type="反思",
+            content="我又在这里反复等一个回音。",
+        )
+        reflection_2.attention_weight = 0.8
+        filler_1 = _make_thought(12, 6, "当前轮一")
+        filler_2 = _make_thought(12, 7, "当前轮二")
+        stm.append([reflection, reflection_2, filler_1, filler_2])
+        ltm = MagicMock()
+        ltm.store.return_value = 1
+        ltm.cool_inactive_memories.return_value = 0
+        habit_memory = MagicMock()
+        habit_memory.strengthen_from_sleep.return_value = []
+        emotion = {
+            "dimensions": {"curiosity": 0.2},
+            "dominant": "curiosity",
+            "summary": "好奇 0.20",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        }
+
+        sleep.run_light_sleep(
+            cycle_id=12,
+            stm=stm,
+            ltm=ltm,
+            habit_memory=habit_memory,
+            embedding_client=MagicMock(),
+            embedding_model="embed-model",
+            auxiliary_client=MagicMock(),
+            auxiliary_model_config={"name": "aux"},
+            emotion=emotion,
+        )
+
+        self.assertTrue(ltm.store.called)
+        self.assertEqual(ltm.store.call_args_list[0].kwargs["memory_type"], "episodic")
+
+    def test_light_sleep_trace_line_strips_action_markers(self) -> None:
+        thought = Thought(
+            thought_id="C12-4",
+            cycle_id=12,
+            index=4,
+            type="意图",
+            content='我想直接回一句。 {action:send_message, message:"我在"}',
+        )
+
+        line = _light_sleep_trace_line(thought)
+
+        self.assertEqual(line, "[意图] 我想直接回一句。")
+
+    @patch("core.sleep.embed_text", return_value=[0.1, 0.2])
+    def test_archive_action_result_memories_returns_duplicate_ids_for_cleanup(
+        self,
+        _mock_embed: MagicMock,
+    ) -> None:
+        ltm = MagicMock()
+        ltm.store.return_value = 11
+        emotion = {
+            "dimensions": {"curiosity": 0.2},
+            "dominant": "curiosity",
+            "summary": "好奇 0.20",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        }
+        first = Stimulus(
+            stimulus_id="stim_a",
+            type="action_result",
+            priority=2,
+            source="action",
+            content="同一条行动回音",
+            action_id="act_C1-1",
+            metadata={"action_type": "reading", "result": {"data": {}}},
+        )
+        second = Stimulus(
+            stimulus_id="stim_b",
+            type="action_result",
+            priority=2,
+            source="action",
+            content="同一条行动回音",
+            action_id="act_C1-2",
+            metadata={"action_type": "reading", "result": {"data": {}}},
+        )
+
+        archived_ids = _archive_action_result_memories(
+            ltm,
+            MagicMock(),
+            "embed-model",
+            [first, second],
+            emotion,
+        )
+
+        self.assertEqual(archived_ids, ["stim_a", "stim_b"])
+        ltm.store.assert_called_once()
+
+    def test_sleep_manager_uses_start_time_for_first_deep_sleep_deadline(self) -> None:
+        sleep = SleepManager(
+            None,
+            energy_per_cycle=0.2,
+            drowsy_threshold=30,
+            light_sleep_recovery=70,
+            deep_sleep_trigger_hours=24,
+            archive_importance_threshold=0.1,
+            deep_sleep_failure_threshold=3,
+            deep_sleep_active_memory_threshold=5000,
+            inactive_purge_days=30,
+            restart_after_deep_sleep=False,
+        )
+
+        current = sleep.current()
+        baseline = datetime.fromisoformat(current["last_deep_sleep_at"])
+
+        self.assertFalse(
+            sleep.should_deep_sleep(
+                now=baseline + timedelta(hours=23),
+                failure_count=0,
+                degeneration_alert=False,
+                active_memory_count=0,
+            )
+        )
+        self.assertTrue(
+            sleep.should_deep_sleep(
+                now=baseline + timedelta(hours=25),
+                failure_count=0,
+                degeneration_alert=False,
+                active_memory_count=0,
+            )
+        )
+
+    def test_safe_post_cycle_phase4_swallows_post_cycle_failures(self) -> None:
+        runtime = SimpleNamespace()
+
+        with patch("core.main._post_cycle_phase4", side_effect=RuntimeError("sleep down")):
+            result = _safe_post_cycle_phase4(
+                _as_runtime(runtime),
+                12,
+                [],
+                [_make_thought(12, 1, "now")],
+                False,
+            )
+
+        self.assertFalse(result)
 
 
 class CoreLogHandleTests(unittest.TestCase):

@@ -99,6 +99,10 @@ sleep:
   drowsy_threshold: 30
   light_sleep_recovery: 70
   deep_sleep_trigger_hours: 24
+  deep_sleep_failure_threshold: 3
+  deep_sleep_active_memory_threshold: 5000
+  inactive_purge_days: 30
+  restart_after_deep_sleep: true
 
 degeneration:
   window_size: 3

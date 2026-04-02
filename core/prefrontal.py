@@ -57,7 +57,7 @@ class PrefrontalManager:
         sleep_state: SleepStateSnapshot,
         emotion_summary: str,
     ) -> PrefrontalPromptState:
-        goal_stack = _build_goal_stack(identity, note_text)
+        goal_stack = build_goal_stack(identity, note_text)
         guidance: list[str] = []
         if sleep_state["mode"] != "awake":
             guidance.append(f"我现在偏{sleep_state['mode']}，需要把行动收得更谨慎。")
@@ -144,7 +144,7 @@ class PrefrontalManager:
             self._redis = None
 
 
-def _build_goal_stack(identity: dict[str, str], note_text: str) -> list[str]:
+def build_goal_stack(identity: dict[str, str], note_text: str) -> list[str]:
     goals: list[str] = []
     for line in str(identity.get("core_goals") or "").splitlines():
         goal = line.strip(" -")

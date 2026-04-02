@@ -6,6 +6,7 @@ Gracefully degrades when PostgreSQL is unavailable.
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import json
 import logging
 import re
 import time
@@ -73,6 +74,7 @@ class LongTermMemory:
         source_cycle_id: int | None = None,
         entity_tags: list[str] | None = None,
         importance: float = 0.5,
+        emotion_context: JsonObject | None = None,
     ) -> int | None:
         """Write a memory entry. Returns the new row id."""
         if not self.available:
@@ -95,10 +97,10 @@ class LongTermMemory:
                     """
                     SELECT id
                     FROM long_term_memory
-                    WHERE is_active = TRUE AND content = %s
+                    WHERE is_active = TRUE AND content = %s AND memory_type = %s
                     LIMIT 1
                     """,
-                    (normalized_content,),
+                    (normalized_content, memory_type),
                 )
                 existing = cur.fetchone()
                 if existing is not None:
@@ -109,12 +111,19 @@ class LongTermMemory:
                         """
                         INSERT INTO long_term_memory
                             (content, memory_type, embedding, entity_tags,
-                             source_cycle_id, importance)
-                        VALUES (%s, %s, %s::vector, %s, %s, %s)
+                             source_cycle_id, importance, emotion_context)
+                        VALUES (%s, %s, %s::vector, %s, %s, %s, %s::jsonb)
                         RETURNING id
                         """,
-                        (normalized_content, memory_type, vec_literal, tags,
-                         source_cycle_id, importance),
+                        (
+                            normalized_content,
+                            memory_type,
+                            vec_literal,
+                            tags,
+                            source_cycle_id,
+                            importance,
+                            _jsonb_or_none(emotion_context),
+                        ),
                     )
                     row = cur.fetchone()
                     entry_id = _row_first_int(row)
@@ -139,6 +148,7 @@ class LongTermMemory:
         top_k: int | None = None,
         entity_filter: str | None = None,
         exclude_cycle_ids: list[int] | None = None,
+        memory_types: list[str] | None = None,
     ) -> list[LongTermEntry]:
         """Retrieve semantically similar memories."""
         if not self.available:
@@ -149,13 +159,16 @@ class LongTermMemory:
         k = top_k or self._top_k
         vec_literal = _format_vector(query_embedding)
         filters = [sql.SQL("is_active = TRUE")]
-        params: list[str | int | list[int]] = [vec_literal]
+        params: list[str | int | list[int] | list[str]] = [vec_literal]
         if entity_filter:
             filters.append(sql.SQL("%s = ANY(entity_tags)"))
             params.append(entity_filter)
         if exclude_cycle_ids:
             filters.append(sql.SQL("(source_cycle_id IS NULL OR source_cycle_id <> ALL(%s))"))
             params.append(exclude_cycle_ids)
+        if memory_types:
+            filters.append(sql.SQL("memory_type = ANY(%s)"))
+            params.append(memory_types)
         params.extend([vec_literal, k])
         query = sql.SQL("""
             SELECT id, content, memory_type, source_cycle_id,
@@ -181,29 +194,18 @@ class LongTermMemory:
             raise
         finally:
             logger.info(
-                "ltm search finished in %.1f ms (status=%s, top_k=%d, results=%d, entity_filter=%s, exclude_cycles=%d)",
+                "ltm search finished in %.1f ms (status=%s, top_k=%d, results=%d, entity_filter=%s, types=%d, exclude_cycles=%d)",
                 elapsed_ms(started_at),
                 status,
                 k,
                 len(rows) if status == "ok" else 0,
                 bool(entity_filter),
+                len(memory_types or []),
                 len(exclude_cycle_ids or []),
             )
 
         entries = [
-            LongTermEntry(
-                id=r[0],
-                content=r[1],
-                memory_type=r[2],
-                source_cycle_id=r[3],
-                importance=r[4],
-                created_at=r[5],
-                similarity=r[6],
-                entity_tags=list(r[7] or []),
-                emotion_context=coerce_json_object(r[8]),
-                access_count=int(r[9] or 0),
-                last_accessed=r[10],
-            )
+            _entry_from_search_row(r)
             for r in rows
         ]
         for entry in entries:
@@ -215,6 +217,193 @@ class LongTermMemory:
             )
         entries.sort(key=lambda entry: entry.weighted_score, reverse=True)
         return entries
+
+    def recent_by_time(
+        self,
+        *,
+        top_k: int | None = None,
+        entity_filter: str | None = None,
+        exclude_cycle_ids: list[int] | None = None,
+        memory_types: list[str] | None = None,
+    ) -> list[LongTermEntry]:
+        """Retrieve most recent memories as fallback when semantic retrieval is unavailable."""
+        if not self.available:
+            return []
+        conn = self._conn
+        if conn is None:
+            return []
+        k = top_k or self._top_k
+        filters = [sql.SQL("is_active = TRUE")]
+        params: list[str | int | list[int]] = []
+        if entity_filter:
+            filters.append(sql.SQL("%s = ANY(entity_tags)"))
+            params.append(entity_filter)
+        if exclude_cycle_ids:
+            filters.append(sql.SQL("(source_cycle_id IS NULL OR source_cycle_id <> ALL(%s))"))
+            params.append(exclude_cycle_ids)
+        if memory_types:
+            filters.append(sql.SQL("memory_type = ANY(%s)"))
+            params.append(memory_types)
+        params.append(k)
+        query = sql.SQL("""
+            SELECT id, content, memory_type, source_cycle_id,
+                   importance, created_at, entity_tags,
+                   emotion_context, access_count, last_accessed
+            FROM long_term_memory
+            WHERE {filters}
+            ORDER BY created_at DESC
+            LIMIT %s
+        """).format(filters=sql.SQL(" AND ").join(filters))
+
+        started_at = time.perf_counter()
+        status = "failed"
+        rows: list[tuple] = []
+        try:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                rows = cur.fetchall()
+            status = "ok"
+        except psycopg.Error:
+            conn.rollback()
+            raise
+        finally:
+            logger.info(
+                "ltm recent_by_time finished in %.1f ms (status=%s, top_k=%d, results=%d, entity_filter=%s, types=%d, exclude_cycles=%d)",
+                elapsed_ms(started_at),
+                status,
+                k,
+                len(rows) if status == "ok" else 0,
+                bool(entity_filter),
+                len(memory_types or []),
+                len(exclude_cycle_ids or []),
+            )
+        return [_entry_from_recent_row(row) for row in rows]
+
+    def active_count(self) -> int:
+        if not self.available:
+            return 0
+        conn = self._conn
+        if conn is None:
+            return 0
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM long_term_memory
+                    WHERE is_active = TRUE
+                    """
+                )
+                row = cur.fetchone()
+        except psycopg.Error:
+            conn.rollback()
+            raise
+        count = _row_first_int(row)
+        return int(count or 0)
+
+    def purge_inactive_memories(self, *, older_than_days: int) -> int:
+        if not self.available:
+            return 0
+        conn = self._conn
+        if conn is None:
+            return 0
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM long_term_memory
+                    WHERE is_active = FALSE
+                      AND updated_at < NOW() - (%s * INTERVAL '1 day')
+                    """,
+                    (max(1, older_than_days),),
+                )
+                affected = cur.rowcount
+            conn.commit()
+            return int(affected or 0)
+        except psycopg.Error:
+            conn.rollback()
+            raise
+
+    def run_deep_sleep_maintenance(self) -> int:
+        if not self.available:
+            return 0
+        conn = self._conn
+        if conn is None:
+            return 0
+        old_autocommit = conn.autocommit
+        operations = 0
+        try:
+            if not old_autocommit:
+                conn.commit()
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("VACUUM ANALYZE long_term_memory")
+                operations += 1
+                cur.execute("REINDEX TABLE long_term_memory")
+                operations += 1
+            return operations
+        finally:
+            conn.autocommit = old_autocommit
+
+    def upsert_impression(
+        self,
+        *,
+        entity_tag: str,
+        content: str,
+        embedding: list[float],
+        source_cycle_id: int | None,
+        importance: float,
+        emotion_context: JsonObject | None = None,
+    ) -> int | None:
+        if not self.available:
+            return None
+        conn = self._conn
+        if conn is None:
+            return None
+        normalized_content = content.strip()
+        normalized_tag = entity_tag.strip()
+        if not normalized_content or not normalized_tag:
+            return None
+        vec_literal = _format_vector(embedding)
+        try:
+            entry_id: int | None = None
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE long_term_memory
+                    SET is_active = FALSE,
+                        updated_at = NOW()
+                    WHERE is_active = TRUE
+                      AND memory_type = 'impression'
+                      AND %s = ANY(entity_tags)
+                      AND '_impression' = ANY(entity_tags)
+                    """,
+                    (normalized_tag,),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO long_term_memory
+                        (content, memory_type, embedding, entity_tags,
+                         source_cycle_id, importance, emotion_context)
+                    VALUES (%s, 'impression', %s::vector, %s, %s, %s, %s::jsonb)
+                    RETURNING id
+                    """,
+                    (
+                        normalized_content,
+                        vec_literal,
+                        [normalized_tag, "_impression"],
+                        source_cycle_id,
+                        importance,
+                        _jsonb_or_none(emotion_context),
+                    ),
+                )
+                row = cur.fetchone()
+                entry_id = _row_first_int(row)
+            conn.commit()
+            return entry_id
+        except psycopg.Error:
+            conn.rollback()
+            raise
 
     def mark_accessed(self, memory_ids: list[int]) -> None:
         """Bump access_count and last_accessed for retrieved memories."""
@@ -331,15 +520,15 @@ class LongTermMemory:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT content, ARRAY_AGG(id ORDER BY id) AS ids
+                    SELECT content, memory_type, ARRAY_AGG(id ORDER BY id) AS ids
                     FROM long_term_memory
                     WHERE is_active = TRUE
-                    GROUP BY content
+                    GROUP BY content, memory_type
                     HAVING COUNT(*) > 1
                     """
                 )
                 rows = cur.fetchall()
-                for content, ids in rows:
+                for content, memory_type, ids in rows:
                     if not isinstance(ids, list) or len(ids) < 2:
                         continue
                     keep_id = int(ids[0])
@@ -369,7 +558,7 @@ class LongTermMemory:
                         (duplicate_ids,),
                     )
                     merged += len(duplicate_ids)
-                    _ = content
+                    _ = (content, memory_type)
             conn.commit()
             return merged
         except psycopg.Error:
@@ -437,6 +626,40 @@ def _row_first_int(row: tuple[int | None, ...] | list[int | None] | None) -> int
     return value if isinstance(value, int) else None
 
 
+def _entry_from_search_row(row: tuple) -> LongTermEntry:
+    return LongTermEntry(
+        id=row[0],
+        content=row[1],
+        memory_type=row[2],
+        source_cycle_id=row[3],
+        importance=row[4],
+        created_at=row[5],
+        similarity=row[6],
+        entity_tags=list(row[7] or []),
+        emotion_context=coerce_json_object(row[8]),
+        access_count=int(row[9] or 0),
+        last_accessed=row[10],
+    )
+
+
+def _entry_from_recent_row(row: tuple) -> LongTermEntry:
+    entry = LongTermEntry(
+        id=row[0],
+        content=row[1],
+        memory_type=row[2],
+        source_cycle_id=row[3],
+        importance=row[4],
+        created_at=row[5],
+        similarity=0.0,
+        entity_tags=list(row[6] or []),
+        emotion_context=coerce_json_object(row[7]),
+        access_count=int(row[8] or 0),
+        last_accessed=row[9],
+    )
+    entry.weighted_score = entry.importance
+    return entry
+
+
 def _weighted_memory_score(
     similarity: float,
     importance: float,
@@ -447,6 +670,12 @@ def _weighted_memory_score(
     age_days = max(0.0, (datetime.now(timezone.utc) - created).total_seconds() / 86400.0)
     time_decay = time_decay_factor ** age_days
     return round(max(0.0, similarity) * max(0.0, importance) * time_decay, 6)
+
+
+def _jsonb_or_none(value: JsonObject | None) -> str | None:
+    if value is None:
+        return None
+    return json.dumps(value, ensure_ascii=False)
 
 
 TELEGRAM_TARGET_PATTERNS = (

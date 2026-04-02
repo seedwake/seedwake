@@ -1,14 +1,14 @@
-"""Structural attention evaluation for Phase 4.
+"""Attention evaluation for Phase 4.
 
-Uses only structural signals (action presence, trigger refs, conversation foreground,
-novelty via bigram similarity) — no keyword matching for semantic judgments.
+Uses goal relevance, emotion resonance, novelty, and external stimulus priority.
+Avoids brittle keyword rules by relying on text similarity plus structural cues.
 """
 
 from dataclasses import dataclass
 
 from core.stimulus import Stimulus
-from core.thought_parser import Thought
-from core.types import AttentionPromptEntry
+from core.thought_parser import Thought, thought_action_requests
+from core.types import AttentionPromptEntry, EmotionSnapshot
 
 NOVELTY_WINDOW = 12
 
@@ -25,16 +25,24 @@ def evaluate_attention(
     thoughts: list[Thought],
     recent_thoughts: list[Thought],
     stimuli: list[Stimulus],
+    *,
+    goal_stack: list[str] | None = None,
+    emotion: EmotionSnapshot | None = None,
 ) -> AttentionResult:
     recent_texts = [
         thought.content
         for thought in recent_thoughts[-NOVELTY_WINDOW:]
         if thought.content.strip()
     ]
-    foreground_types = {stimulus.type for stimulus in stimuli}
     entries: list[tuple[float, str, Thought]] = []
     for thought in thoughts:
-        score, reason = _attention_score(thought, recent_texts, foreground_types)
+        score, reason = _attention_score(
+            thought,
+            recent_texts,
+            stimuli,
+            goal_stack or [],
+            emotion,
+        )
         thought.attention_weight = score
         entries.append((score, reason, thought))
     ranked = sorted(entries, key=lambda item: item[0], reverse=True)
@@ -70,10 +78,17 @@ def select_attention_anchor(thoughts: list[Thought]) -> Thought | None:
 def _attention_score(
     thought: Thought,
     recent_texts: list[str],
-    foreground_types: set[str],
+    stimuli: list[Stimulus],
+    goal_stack: list[str],
+    emotion: EmotionSnapshot | None,
 ) -> tuple[float, str]:
     score = 0.15
     reasons: list[str] = []
+
+    goal_relevance = _max_text_similarity(thought.content, goal_stack)
+    score += goal_relevance * 0.28
+    if goal_relevance >= 0.16:
+        reasons.append("贴近目标")
 
     # Novelty: how different is this thought from recent ones (bigram Jaccard)
     novelty = _novelty_score(thought.content, recent_texts)
@@ -81,14 +96,20 @@ def _attention_score(
     if novelty >= 0.4:
         reasons.append("较新")
 
+    emotion_resonance = _emotion_resonance_score(thought, stimuli, emotion)
+    score += emotion_resonance * 0.18
+    if emotion_resonance >= 0.2:
+        reasons.append("契合情绪")
+
     # Structural bonuses
     if thought.trigger_ref:
         score += 0.12
         reasons.append("有触发源")
-    if thought.type == "反应" and "conversation" in foreground_types:
-        score += 0.20
-        reasons.append("承接对话")
-    if thought.action_request is not None:
+    stimulus_bonus, stimulus_reason = _external_priority_bonus(thought, stimuli)
+    score += stimulus_bonus
+    if stimulus_reason:
+        reasons.append(stimulus_reason)
+    if thought_action_requests(thought):
         score += 0.12
         reasons.append("带行动冲动")
     if thought.type == "反思":
@@ -105,6 +126,62 @@ def _novelty_score(content: str, recent_texts: list[str]) -> float:
     similarities = [_text_similarity(normalized, _normalize_text(text)) for text in recent_texts]
     highest_similarity = max(similarities) if similarities else 0.0
     return max(0.0, 1.0 - highest_similarity)
+
+
+def _max_text_similarity(content: str, targets: list[str]) -> float:
+    normalized = _normalize_text(content)
+    if not normalized or not targets:
+        return 0.0
+    similarities = [
+        _text_similarity(normalized, _normalize_text(target))
+        for target in targets
+        if _normalize_text(target)
+    ]
+    return max(similarities) if similarities else 0.0
+
+
+def _emotion_resonance_score(
+    thought: Thought,
+    stimuli: list[Stimulus],
+    emotion: EmotionSnapshot | None,
+) -> float:
+    if emotion is None:
+        return 0.0
+    dimensions = emotion["dimensions"]
+    summary_similarity = _text_similarity(
+        _normalize_text(thought.content),
+        _normalize_text(emotion["summary"]),
+    )
+    score = summary_similarity * 0.25
+    curiosity = float(dimensions.get("curiosity", 0.0))
+    concern = float(dimensions.get("concern", 0.0))
+    frustration = float(dimensions.get("frustration", 0.0))
+    calm = float(dimensions.get("calm", 0.0))
+    action_types = {
+        str(request.get("type") or "").strip()
+        for request in thought_action_requests(thought)
+    }
+    if thought.type == "思考" or action_types & {"reading", "search", "web_fetch", "news"}:
+        score += curiosity * 0.35
+    if any(stimulus.type == "conversation" for stimulus in stimuli) and thought.type in {"反应", "意图"}:
+        score += concern * 0.35
+    if thought.type == "反思":
+        score += max(frustration, calm) * 0.18
+    return min(1.0, score)
+
+
+def _external_priority_bonus(thought: Thought, stimuli: list[Stimulus]) -> tuple[float, str]:
+    if not stimuli:
+        return 0.0, ""
+    priorities = sorted(stimuli, key=lambda stimulus: stimulus.priority)
+    highest = priorities[0]
+    if highest.type == "conversation" and thought.type == "反应":
+        return 0.20, "承接对话"
+    if highest.type == "action_result" and thought.type in {"反应", "意图"}:
+        return 0.14, "承接回音"
+    if thought.type == "反应":
+        return 0.10, "承接外界刺激"
+    return 0.0, ""
 
 
 def _normalize_text(text: str) -> str:
