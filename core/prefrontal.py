@@ -21,6 +21,8 @@ PREFRONTAL_REDIS_EXCEPTIONS = (
     OSError,
 )
 HEAVY_ACTION_TYPES = {"reading", "search", "web_fetch", "file_modify", "system_change"}
+HABIT_IMPULSE_ACTION_TYPES = {"reading", "news", "weather", "web_fetch", "search"}
+ACTION_IMPULSE_SIGNAL_TYPE = "action_impulse"
 
 
 class PrefrontalManager:
@@ -59,10 +61,8 @@ class PrefrontalManager:
         manifested_habits = [habit for habit in active_habits if habit.get("manifested")]
         if sleep_state["mode"] != "awake":
             guidance.append(f"我现在偏{sleep_state['mode']}，需要把行动收得更谨慎。")
-        if active_habits:
-            guidance.append(f"我的惯性倾向：{', '.join(habit['pattern'] for habit in active_habits[:2])}。")
         if manifested_habits:
-            guidance.append(f"此刻有旧种子正在现行：{', '.join(habit['pattern'] for habit in manifested_habits[:2])}。")
+            guidance.append("此刻有旧的惯性正在浮现，留意是否在重复旧模式。")
         plan_mode = cycle_id % self._check_interval == 0 or bool(manifested_habits)
         if plan_mode:
             guidance.append("这一轮我需要多留意：是否偏题、是否重复、是否该压住冲动。")
@@ -81,11 +81,13 @@ class PrefrontalManager:
         recent_thoughts: list[Thought],
         stimuli: list[Stimulus],
         sleep_state: SleepStateSnapshot,
+        active_habits: list[HabitPromptEntry],
     ) -> tuple[list[Thought], list[str]]:
         if not self._inhibition_enabled:
             return thoughts, []
         conversation_foreground = any(stimulus.type == "conversation" for stimulus in stimuli)
         recent_action_types_with_params = _recent_action_signatures(recent_thoughts)
+        manifested_impulses = _manifested_impulse_scores(active_habits)
         notes: list[str] = []
         reviewed_thoughts: list[Thought] = []
         for thought in thoughts:
@@ -96,6 +98,7 @@ class PrefrontalManager:
                     conversation_foreground=conversation_foreground,
                     sleep_mode=str(sleep_state["mode"]),
                     recent_signatures=recent_action_types_with_params,
+                    manifested_impulses=manifested_impulses,
                 )
                 if inhibition_note is not None:
                     notes.append(inhibition_note)
@@ -224,24 +227,67 @@ def _canonical_params(params: str) -> str:
     return "|".join(f"{key}={value}" for key, value in sorted(pairs.items()))
 
 
+def _manifested_impulse_scores(active_habits: list[HabitPromptEntry]) -> dict[str, float]:
+    scores: dict[str, float] = {}
+    for habit in active_habits:
+        if not habit.get("manifested"):
+            continue
+        signal = habit.get("signal")
+        if not isinstance(signal, dict):
+            continue
+        if str(signal.get("type") or "").strip() != ACTION_IMPULSE_SIGNAL_TYPE:
+            continue
+        action_type = str(signal.get("action_type") or "").strip()
+        if action_type not in HABIT_IMPULSE_ACTION_TYPES:
+            continue
+        score = max(
+            float(habit.get("activation_score") or 0.0),
+            float(habit.get("strength") or 0.0),
+        )
+        current = scores.get(action_type, 0.0)
+        if score > current:
+            scores[action_type] = score
+    return scores
+
+
+def _recent_same_action_type_count(recent_signatures: list[str], action_type: str) -> int:
+    return sum(
+        1
+        for signature in recent_signatures[-4:]
+        if signature.partition(":")[0] == action_type
+    )
+
+
+def _action_impulse_repeat_threshold(action_type: str, impulse_score: float) -> int:
+    if action_type in HABIT_IMPULSE_ACTION_TYPES:
+        return 2
+    return 2
+
+
 def _inhibition_note(
     action_request: RawActionRequest,
     *,
     conversation_foreground: bool,
     sleep_mode: str,
     recent_signatures: list[str],
+    manifested_impulses: dict[str, float],
 ) -> str | None:
     action_type = str(action_request.get("type") or "").strip()
     if not action_type:
         return None
     # During conversation, suppress background info-gathering actions
-    if conversation_foreground and action_type in {"reading", "search", "web_fetch", "news"}:
-        return f"当前有人在说话，抑制 {action_type}，优先回应前景对话。"
+    if conversation_foreground and action_type in {"reading", "search", "web_fetch", "news", "weather"}:
+        return f"有人在说话，先放下 {action_type}，回应眼前的人。"
     # Low energy: suppress heavy actions
     if sleep_mode != "awake" and action_type in HEAVY_ACTION_TYPES:
-        return f"当前精力偏低，抑制高负荷行动 {action_type}。"
+        return f"现在有点累了，{action_type} 太耗精力，先不做。"
     # Exact duplicate action (same canonical signature) in last 2 actions
     signature = _action_signature(action_request)
     if signature and signature in recent_signatures[-2:]:
-        return f"最近刚发起过相同的 {action_type}（参数一致），先抑制重复冲动。"
+        return f"刚做过一样的 {action_type}，不必再来一次。"
+    habit_impulse_score = manifested_impulses.get(action_type, 0.0)
+    repeat_count = _recent_same_action_type_count(recent_signatures, action_type)
+    repeat_threshold = _action_impulse_repeat_threshold(action_type, habit_impulse_score)
+    if habit_impulse_score > 0.0 and repeat_count >= repeat_threshold:
+        return f"最近已经连续做了好几次 {action_type}，这次先缓一缓。"
     return None

@@ -246,9 +246,6 @@ def _append_prompt_context_sections(
     emotion_alert = _emotion_alert(emotion) if emotion else ""
     if emotion_alert:
         _append_prompt_section(parts, "emotion", lambda: emotion_alert)
-    if active_habits:
-        habits = active_habits
-        _append_prompt_section(parts, "habits", lambda: _format_habits(habits))
     if recent_reflections:
         reflections = recent_reflections
         _append_prompt_section(parts, "reflections", lambda: _format_recent_reflections(reflections))
@@ -447,23 +444,15 @@ def _emotion_alert(emotion: EmotionSnapshot) -> str:
 
 
 
-def _format_habits(habits: list[HabitPromptEntry]) -> str:
-    lines: list[str] = []
-    for habit in habits:
-        category = str(habit["category"])
-        strength = float(habit["strength"])
-        activation_score = float(habit.get("activation_score") or 0.0)
-        if habit.get("manifested"):
-            lines.append(
-                f"- 现行：{habit['pattern']}（{category}，相应度 {activation_score:.2f}，种子强度 {strength:.2f}）"
-            )
-            continue
-        lines.append(f"- 倾向：{habit['pattern']}（{category}，强度 {strength:.2f}）")
-    return _render_section("相关习气/倾向性", lines)
-
 
 def _format_recent_reflections(reflections: list[ReflectionPromptEntry]) -> str:
-    lines = [f"- {reflection['content']}" for reflection in reflections]
+    seen: set[str] = set()
+    lines: list[str] = []
+    for reflection in reflections:
+        content = reflection["content"].strip()
+        if content and content not in seen:
+            seen.add(content)
+            lines.append(f"- {content}")
     return _render_section("最近的反思", lines)
 
 
@@ -668,16 +657,16 @@ def _stagnation_warning(
         source_text = "一个新的具体问题、记忆、感知或行动"
     if has_foreground:
         return (
-            "⚠ 最近 3 轮念头进入死循环。"
+            "⚠ 我最近 3 轮的念头在打转。"
             f"{repeated_text}"
-            "不要再机械改写同一句话或同一组意象。"
-            f"这一轮至少一个念头必须明确引入新的源：{source_text}。"
-            "如果眼前有人在说话，最多只让一个念头承接当前对话，其余念头不要继续复述。"
+            "我不能再机械改写同一句话或同一组意象。"
+            f"这一轮我至少要有一个念头从新的源头出发：{source_text}。"
+            "如果眼前有人在说话，最多一个念头承接对话，其余念头不要继续复述。"
         )
     return (
-        "⚠ 最近 3 轮念头进入死循环。"
+        "⚠ 我最近 3 轮的念头在打转。"
         f"{repeated_text}"
-        f"这一轮至少一个念头必须明确引入新的源：{source_text}。"
+        f"这一轮我至少要有一个念头从新的源头出发：{source_text}。"
         "不要三个念头继续围着同一组意象改写。"
     )
 

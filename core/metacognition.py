@@ -97,7 +97,7 @@ class MetacognitionManager:
             return True
         if degeneration_alert or failure_count >= 2:
             return True
-        if stimuli_changed and dominant_strength >= 0.45:
+        if stimuli_changed and dominant_strength >= 0.65:
             return True
         return False
 

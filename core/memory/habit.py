@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
 import logging
 import re
 import time
@@ -12,12 +13,13 @@ from core.embedding import embed_text
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient
 from core.stimulus import Stimulus
 from core.thought_parser import Thought, thought_action_requests
-from core.types import HabitPromptEntry, elapsed_ms
+from core.types import HabitControlSignal, HabitPromptEntry, JsonObject, elapsed_ms
 
 logger = logging.getLogger(__name__)
 HABIT_MIN_PATTERN_LENGTH = 4
 HABIT_TEXT_STOPWORDS = {"刚才", "现在", "继续", "已经", "不是", "只是", "一个", "没有"}
 HABIT_EMBEDDING_DIMENSIONS = 4096
+ACTION_IMPULSE_SIGNAL_TYPE = "action_impulse"
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,17 @@ class HabitSeed:
     last_activated: datetime | None
     embedding: list[float] | None = None
     semantic_similarity: float = 0.0
+    signal_type: str = ""
+    signal_payload: JsonObject | None = None
+
+
+@dataclass(frozen=True)
+class HabitSeedCandidate:
+    pattern: str
+    category: str
+    strength: float
+    signal_type: str = ""
+    signal_payload: JsonObject | None = None
 
 
 class HabitMemory:
@@ -77,13 +90,70 @@ class HabitMemory:
                 cur.execute(
                     """
                     ALTER TABLE habit_seeds
+                    ADD COLUMN IF NOT EXISTS signal_type TEXT DEFAULT ''
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE habit_seeds
+                    ADD COLUMN IF NOT EXISTS signal_payload JSONB DEFAULT '{}'::jsonb
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE habit_seeds
                     ALTER COLUMN category SET DEFAULT 'cognitive'
                     """
                 )
                 cur.execute(
                     """
                     ALTER TABLE habit_seeds
+                    ALTER COLUMN signal_type SET DEFAULT ''
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE habit_seeds
+                    ALTER COLUMN signal_payload SET DEFAULT '{}'::jsonb
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE habit_seeds
                     ALTER COLUMN category SET NOT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    UPDATE habit_seeds
+                    SET signal_type = '',
+                        signal_payload = '{}'::jsonb
+                    WHERE signal_type IS NULL OR signal_payload IS NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE habit_seeds
+                    ALTER COLUMN signal_type SET NOT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE habit_seeds
+                    ALTER COLUMN signal_payload SET NOT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    UPDATE habit_seeds
+                    SET signal_type = 'action_impulse',
+                        signal_payload = jsonb_build_object(
+                            'action_type',
+                            substring(pattern FROM '^经常会冒出 ([a-z_]+) 行动冲动$')
+                        )
+                    WHERE category = 'behavioral'
+                      AND signal_type = ''
+                      AND pattern ~ '^经常会冒出 [a-z_]+ 行动冲动$'
                     """
                 )
                 cur.execute(
@@ -95,6 +165,8 @@ class HabitMemory:
                                strength,
                                activation_count,
                                last_activated,
+                               signal_type,
+                               signal_payload,
                                created_at,
                                updated_at,
                                source_memories,
@@ -125,6 +197,24 @@ class HabitMemory:
                                 ORDER BY source_memory
                             ) AS merged_source_memories,
                             (
+                                SELECT signaled.signal_type
+                                FROM habit_seeds AS signaled
+                                JOIN ranked AS signaled_ranked ON signaled_ranked.id = signaled.id
+                                WHERE signaled_ranked.keep_id = ranked.keep_id
+                                  AND signaled.signal_type <> ''
+                                ORDER BY signaled.id
+                                LIMIT 1
+                            ) AS merged_signal_type,
+                            (
+                                SELECT signaled.signal_payload
+                                FROM habit_seeds AS signaled
+                                JOIN ranked AS signaled_ranked ON signaled_ranked.id = signaled.id
+                                WHERE signaled_ranked.keep_id = ranked.keep_id
+                                  AND signaled.signal_type <> ''
+                                ORDER BY signaled.id
+                                LIMIT 1
+                            ) AS merged_signal_payload,
+                            (
                                 SELECT embedded.embedding
                                 FROM habit_seeds AS embedded
                                 JOIN ranked AS embedded_ranked ON embedded_ranked.id = embedded.id
@@ -143,6 +233,14 @@ class HabitMemory:
                         created_at = grouped.merged_created_at,
                         updated_at = grouped.merged_updated_at,
                         embedding = COALESCE(keeper.embedding, grouped.merged_embedding),
+                        signal_type = COALESCE(NULLIF(keeper.signal_type, ''), grouped.merged_signal_type, ''),
+                        signal_payload = CASE
+                            WHEN NULLIF(keeper.signal_type, '') IS NOT NULL
+                                THEN keeper.signal_payload
+                            WHEN grouped.merged_signal_payload IS NOT NULL
+                                THEN grouped.merged_signal_payload
+                            ELSE keeper.signal_payload
+                        END,
                         source_memories = grouped.merged_source_memories
                     FROM grouped
                     WHERE keeper.id = grouped.keep_id
@@ -278,7 +376,7 @@ class HabitMemory:
                 if limit is None:
                     cur.execute(
                         """
-                        SELECT id, pattern, category, strength, activation_count, last_activated, embedding
+                        SELECT id, pattern, category, strength, activation_count, last_activated, embedding, signal_type, signal_payload
                         FROM habit_seeds
                         WHERE strength > 0.01
                         ORDER BY updated_at DESC, activation_count DESC, strength DESC
@@ -287,7 +385,7 @@ class HabitMemory:
                 else:
                     cur.execute(
                         """
-                        SELECT id, pattern, category, strength, activation_count, last_activated, embedding
+                        SELECT id, pattern, category, strength, activation_count, last_activated, embedding, signal_type, signal_payload
                         FROM habit_seeds
                         WHERE strength > 0.01
                         ORDER BY strength DESC, activation_count DESC, updated_at DESC
@@ -316,6 +414,8 @@ class HabitMemory:
                 activation_count=int(row[4] or 0),
                 last_activated=row[5],
                 embedding=_coerce_vector(row[6]) if len(row) >= 7 else None,
+                signal_type=str(row[7] or "") if len(row) >= 8 else "",
+                signal_payload=_coerce_signal_payload(row[8]) if len(row) >= 9 else None,
             )
             for row in rows
         ]
@@ -334,19 +434,28 @@ class HabitMemory:
         if not extracted:
             return []
         created: list[HabitPromptEntry] = []
-        for pattern, category, strength in extracted:
-            embedding = _embed_habit_pattern(embedding_client, embedding_model, pattern)
-            habit_id = self._upsert_seed(pattern, category, strength, embedding=embedding)
+        for candidate in extracted:
+            embedding = _embed_habit_pattern(embedding_client, embedding_model, candidate.pattern)
+            habit_id = self._upsert_seed(
+                candidate.pattern,
+                candidate.category,
+                candidate.strength,
+                embedding=embedding,
+                signal_type=candidate.signal_type,
+                signal_payload=candidate.signal_payload,
+            )
             if habit_id is None:
                 continue
-            created.append(
-                {
-                    "id": habit_id,
-                    "pattern": pattern,
-                    "category": category,
-                    "strength": strength,
-                }
-            )
+            entry: HabitPromptEntry = {
+                "id": habit_id,
+                "pattern": candidate.pattern,
+                "category": candidate.category,
+                "strength": candidate.strength,
+            }
+            signal = _habit_control_signal(candidate.signal_type, candidate.signal_payload)
+            if signal is not None:
+                entry["signal"] = signal
+            created.append(entry)
         return created
 
     def decay_inactive(self) -> int:
@@ -432,6 +541,8 @@ class HabitMemory:
                            activation_count,
                            last_activated,
                            embedding,
+                           signal_type,
+                           signal_payload,
                            1 - (embedding <=> %s::vector) AS similarity
                     FROM habit_seeds
                     WHERE strength > 0.01
@@ -458,7 +569,9 @@ class HabitMemory:
                 activation_count=int(row[4] or 0),
                 last_activated=row[5],
                 embedding=_coerce_vector(row[6]),
-                semantic_similarity=float(row[7] or 0.0),
+                signal_type=str(row[7] or ""),
+                signal_payload=_coerce_signal_payload(row[8]),
+                semantic_similarity=float(row[9] or 0.0),
             )
             for row in rows
         ]
@@ -470,25 +583,38 @@ class HabitMemory:
         strength: float,
         *,
         embedding: list[float] | None = None,
+        signal_type: str = "",
+        signal_payload: JsonObject | None = None,
     ) -> int | None:
         conn = self._conn
         if conn is None:
             return None
         vec_literal = _format_vector(embedding) if embedding is not None else None
+        signal_payload_text = _jsonb_or_empty(signal_payload)
         try:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO habit_seeds (pattern, category, strength, embedding)
-                    VALUES (%s, %s, %s, %s::vector)
+                    INSERT INTO habit_seeds (pattern, category, strength, embedding, signal_type, signal_payload)
+                    VALUES (%s, %s, %s, %s::vector, %s, %s::jsonb)
                     ON CONFLICT (pattern, category)
                     DO UPDATE SET
                         strength = LEAST(1.0, GREATEST(habit_seeds.strength, EXCLUDED.strength) + 0.05),
                         embedding = COALESCE(habit_seeds.embedding, EXCLUDED.embedding),
+                        signal_type = CASE
+                            WHEN habit_seeds.signal_type = '' AND EXCLUDED.signal_type <> ''
+                                THEN EXCLUDED.signal_type
+                            ELSE habit_seeds.signal_type
+                        END,
+                        signal_payload = CASE
+                            WHEN habit_seeds.signal_type = '' AND EXCLUDED.signal_type <> ''
+                                THEN EXCLUDED.signal_payload
+                            ELSE habit_seeds.signal_payload
+                        END,
                         updated_at = NOW()
                     RETURNING id
                     """,
-                    (pattern, category, strength, vec_literal),
+                    (pattern, category, strength, vec_literal, signal_type, signal_payload_text),
                 )
                 inserted = cur.fetchone()
                 habit_id = int(inserted[0]) if inserted is not None else None
@@ -505,28 +631,42 @@ class HabitMemory:
         strength: float,
         *,
         embedding: list[float] | None = None,
+        signal_type: str = "",
+        signal_payload: JsonObject | None = None,
     ) -> int | None:
         conn = self._conn
         if conn is None:
             return None
         vec_literal = _format_vector(embedding) if embedding is not None else None
+        signal_payload_text = _jsonb_or_empty(signal_payload)
         try:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO habit_seeds (pattern, category, strength, embedding)
-                    VALUES (%s, %s, %s, %s::vector)
+                    INSERT INTO habit_seeds (pattern, category, strength, embedding, signal_type, signal_payload)
+                    VALUES (%s, %s, %s, %s::vector, %s, %s::jsonb)
                     ON CONFLICT (pattern, category)
                     DO UPDATE SET
                         embedding = COALESCE(habit_seeds.embedding, EXCLUDED.embedding),
+                        signal_type = CASE
+                            WHEN habit_seeds.signal_type = '' AND EXCLUDED.signal_type <> ''
+                                THEN EXCLUDED.signal_type
+                            ELSE habit_seeds.signal_type
+                        END,
+                        signal_payload = CASE
+                            WHEN habit_seeds.signal_type = '' AND EXCLUDED.signal_type <> ''
+                                THEN EXCLUDED.signal_payload
+                            ELSE habit_seeds.signal_payload
+                        END,
                         updated_at = CASE
                             WHEN habit_seeds.embedding IS NULL AND EXCLUDED.embedding IS NOT NULL
+                                 OR (habit_seeds.signal_type = '' AND EXCLUDED.signal_type <> '')
                                 THEN NOW()
                             ELSE habit_seeds.updated_at
                         END
                     RETURNING id
                     """,
-                    (pattern, category, strength, vec_literal),
+                    (pattern, category, strength, vec_literal, signal_type, signal_payload_text),
                 )
                 inserted = cur.fetchone()
                 habit_id = int(inserted[0]) if inserted is not None else None
@@ -537,17 +677,38 @@ class HabitMemory:
             raise
 
 
-def _extract_habit_patterns(thoughts: list[Thought]) -> list[tuple[str, str, float]]:
-    patterns: dict[tuple[str, str], tuple[int, float]] = {}
+def _extract_habit_patterns(thoughts: list[Thought]) -> list[HabitSeedCandidate]:
+    patterns: dict[tuple[str, str], tuple[int, HabitSeedCandidate]] = {}
     for thought in thoughts:
-        for pattern, category in _habit_patterns_from_thought(thought):
-            key = (pattern, category)
-            count, strength = patterns.get(key, (0, 0.18))
-            patterns[key] = (count + 1, min(0.95, strength + 0.08))
+        for candidate in _habit_patterns_from_thought(thought):
+            key = (candidate.pattern, candidate.category)
+            count, existing = patterns.get(
+                key,
+                (
+                    0,
+                    HabitSeedCandidate(
+                        pattern=candidate.pattern,
+                        category=candidate.category,
+                        strength=0.18,
+                        signal_type=candidate.signal_type,
+                        signal_payload=candidate.signal_payload,
+                    ),
+                ),
+            )
+            patterns[key] = (
+                count + 1,
+                HabitSeedCandidate(
+                    pattern=existing.pattern,
+                    category=existing.category,
+                    strength=min(0.95, existing.strength + 0.08),
+                    signal_type=existing.signal_type or candidate.signal_type,
+                    signal_payload=existing.signal_payload or candidate.signal_payload,
+                ),
+            )
     return [
-        (pattern, category, strength)
-        for (pattern, category), (count, strength) in patterns.items()
-        if count >= 2 or strength >= 0.34
+        candidate
+        for _, (count, candidate) in patterns.items()
+        if count >= 2 or candidate.strength >= 0.34
     ]
 
 
@@ -555,8 +716,8 @@ def _activation_patterns_from_thoughts(thoughts: list[Thought]) -> list[tuple[st
     seen: set[tuple[str, str]] = set()
     ordered: list[tuple[str, str]] = []
     for thought in thoughts:
-        for pattern, category in _habit_patterns_from_thought(thought):
-            key = (pattern, category)
+        for candidate in _habit_patterns_from_thought(thought):
+            key = (candidate.pattern, candidate.category)
             if key in seen:
                 continue
             seen.add(key)
@@ -564,7 +725,7 @@ def _activation_patterns_from_thoughts(thoughts: list[Thought]) -> list[tuple[st
     return ordered
 
 
-def _habit_patterns_from_thought(thought: Thought) -> list[tuple[str, str]]:
+def _habit_patterns_from_thought(thought: Thought) -> list[HabitSeedCandidate]:
     action_patterns = _action_habit_patterns(thought)
     if action_patterns:
         return action_patterns
@@ -579,19 +740,27 @@ def _normalize_habit_text(text: str) -> str:
     return " ".join(str(text).replace("\n", " ").split())
 
 
-def _action_habit_patterns(thought: Thought) -> list[tuple[str, str]]:
+def _action_habit_patterns(thought: Thought) -> list[HabitSeedCandidate]:
     seen_action_types: set[str] = set()
-    patterns: list[tuple[str, str]] = []
+    patterns: list[HabitSeedCandidate] = []
     for action_request in thought_action_requests(thought):
         action_type = str(action_request.get("type") or "").strip()
         if not action_type or action_type in seen_action_types:
             continue
         seen_action_types.add(action_type)
-        patterns.append((f"经常会冒出 {action_type} 行动冲动", "behavioral"))
+        patterns.append(
+            HabitSeedCandidate(
+                pattern=f"经常会冒出 {action_type} 行动冲动",
+                category="behavioral",
+                strength=0.18,
+                signal_type=ACTION_IMPULSE_SIGNAL_TYPE,
+                signal_payload={"action_type": action_type},
+            )
+        )
     return patterns
 
 
-def _text_habit_pattern(normalized: str, thought: Thought) -> tuple[str, str] | None:
+def _text_habit_pattern(normalized: str, thought: Thought) -> HabitSeedCandidate | None:
     clauses = re.split(r"[，。！？；,.!?;]+", normalized)
     for clause in clauses:
         compact = clause.strip()
@@ -599,7 +768,11 @@ def _text_habit_pattern(normalized: str, thought: Thought) -> tuple[str, str] | 
             continue
         if compact in HABIT_TEXT_STOPWORDS:
             continue
-        return compact[:48], _habit_category(thought)
+        return HabitSeedCandidate(
+            pattern=compact[:48],
+            category=_habit_category(thought),
+            strength=0.18,
+        )
     return None
 
 
@@ -643,10 +816,28 @@ def _habit_entry(seed: HabitSeed, threshold: float) -> HabitPromptEntry:
         "category": seed.category,
         "strength": seed.strength,
     }
+    signal = _habit_control_signal(seed.signal_type, seed.signal_payload)
+    if signal is not None:
+        entry["signal"] = signal
     if seed.semantic_similarity > 0.0:
         entry["activation_score"] = round(seed.semantic_similarity, 4)
         entry["manifested"] = seed.semantic_similarity >= threshold
     return entry
+
+
+def _habit_control_signal(
+    signal_type: str,
+    signal_payload: JsonObject | None,
+) -> HabitControlSignal | None:
+    normalized_signal_type = str(signal_type or "").strip()
+    if not normalized_signal_type:
+        return None
+    signal: HabitControlSignal = {"type": normalized_signal_type}
+    if normalized_signal_type == ACTION_IMPULSE_SIGNAL_TYPE and signal_payload:
+        action_type = str(signal_payload.get("action_type") or "").strip()
+        if action_type:
+            signal["action_type"] = action_type
+    return signal
 
 
 def _habit_context_text(
@@ -721,6 +912,23 @@ def _embed_habit_pattern(
     except MODEL_CLIENT_EXCEPTIONS:
         logger.warning("habit embedding unavailable for pattern/context")
         return None
+
+
+def _jsonb_or_empty(value: JsonObject | None) -> str:
+    return json.dumps(value or {}, ensure_ascii=False)
+
+
+def _coerce_signal_payload(value: object) -> JsonObject | None:
+    if isinstance(value, dict):
+        return {str(key): item for key, item in value.items()}
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+        if isinstance(payload, dict):
+            return {str(key): item for key, item in payload.items()}
+    return None
 
 
 def _format_vector(vec: list[float]) -> str:

@@ -1230,7 +1230,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             ),
         )
 
-        self.assertIn("最近 3 轮念头进入死循环", prompt)
+        self.assertIn("我最近 3 轮的念头在打转", prompt)
         self.assertIn("至少一个念头必须明确引入新的源：浮上来的记忆、我的笔记、此刻我注意到、好像有一阵子没有……。", prompt)
         self.assertIn("晚安", prompt)
         self.assertNotIn("必须刻意跳到完全不同的话题", prompt)
@@ -1299,10 +1299,9 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("## 此刻的自我感", prompt)
         self.assertNotIn("## 当前情绪基调", prompt)  # curiosity 0.61 < alert threshold 0.65
         self.assertNotIn("## 清醒与困意", prompt)  # awake mode doesn't render
-        self.assertIn("## 相关习气/倾向性", prompt)
+        self.assertNotIn("## 相关习气/倾向性", prompt)  # habits no longer shown in prompt
         self.assertIn("## 最近的反思", prompt)
         self.assertLess(prompt.index("## 此刻需要留意"), prompt.index("## 此刻的自我感"))
-        self.assertLess(prompt.index("## 相关习气/倾向性"), prompt.index("## 最近的反思"))
         self.assertLess(prompt.index("## 最近的反思"), prompt.index("## 最近的念头"))
 
     def test_prompt_includes_current_impressions_section(self) -> None:
@@ -1344,7 +1343,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             ),
         )
 
-        self.assertIn("最近 3 轮念头进入死循环", prompt)
+        self.assertIn("我最近 3 轮的念头在打转", prompt)
         self.assertIn("最多只让一个念头承接当前对话", prompt)
         self.assertNotIn("必须刻意跳到完全不同的话题", prompt)
 
@@ -1385,7 +1384,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             ),
         )
 
-        self.assertIn("最近 3 轮念头进入死循环", prompt)
+        self.assertIn("我最近 3 轮的念头在打转", prompt)
         self.assertNotIn("最近的对话", prompt.split("⚠", 1)[1])
 
     def test_stagnation_terms_use_clause_level_phrases(self) -> None:
@@ -1427,9 +1426,20 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             ),
         ])
 
-        extracted = {(pattern, category) for pattern, category, _ in patterns}
+        extracted = {(candidate.pattern, candidate.category) for candidate in patterns}
         self.assertIn(("经常会冒出 note_rewrite 行动冲动", "behavioral"), extracted)
         self.assertIn(("经常会冒出 send_message 行动冲动", "behavioral"), extracted)
+        by_pattern = {candidate.pattern: candidate for candidate in patterns}
+        self.assertEqual(by_pattern["经常会冒出 note_rewrite 行动冲动"].signal_type, "action_impulse")
+        self.assertEqual(
+            by_pattern["经常会冒出 note_rewrite 行动冲动"].signal_payload,
+            {"action_type": "note_rewrite"},
+        )
+        self.assertEqual(by_pattern["经常会冒出 send_message 行动冲动"].signal_type, "action_impulse")
+        self.assertEqual(
+            by_pattern["经常会冒出 send_message 行动冲动"].signal_payload,
+            {"action_type": "send_message"},
+        )
 
     def test_activation_patterns_from_thoughts_keep_explicit_recurrence_evidence(self) -> None:
         patterns = _activation_patterns_from_thoughts([
@@ -1526,7 +1536,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertNotIn("strength = LEAST", executed_sql[0])
         self.assertEqual(
             cursor.execute.call_args_list[0].args[1],
-            ("先回应眼前的人", "behavioral", 0.4, "[0.30000000,0.40000000]"),
+            ("先回应眼前的人", "behavioral", 0.4, "[0.30000000,0.40000000]", "", "{}"),
         )
         conn.commit.assert_called_once()
 
@@ -1547,7 +1557,10 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         sql = cursor.execute.call_args_list[0].args[0]
         params = cursor.execute.call_args_list[0].args[1]
         self.assertIn("ON CONFLICT (pattern, category)", sql)
-        self.assertEqual(params, ("先回应眼前的人", "behavioral", 0.4, "[0.30000000,0.40000000]"))
+        self.assertEqual(
+            params,
+            ("先回应眼前的人", "behavioral", 0.4, "[0.30000000,0.40000000]", "", "{}"),
+        )
         conn.commit.assert_called_once()
 
     def test_ensure_schema_adds_unique_pattern_category_index(self) -> None:
@@ -1565,6 +1578,49 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertTrue(any("source_memories = grouped.merged_source_memories" in sql for sql in sqls))
         self.assertTrue(any("DELETE FROM habit_seeds AS duplicate" in sql for sql in sqls))
         conn.commit.assert_called_once()
+
+    def test_ensure_schema_backfills_signal_columns_before_not_null_constraints(self) -> None:
+        cursor = MagicMock()
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        memory = HabitMemory(conn, max_active_in_prompt=3, decay_rate=0.05)
+
+        memory.ensure_schema()
+
+        sqls = [call.args[0] for call in cursor.execute.call_args_list]
+        null_backfill_index = next(
+            index
+            for index, sql in enumerate(sqls)
+            if "SET signal_type = ''" in sql and "signal_payload = '{}'::jsonb" in sql
+        )
+        signal_not_null_index = next(
+            index
+            for index, sql in enumerate(sqls)
+            if "ALTER COLUMN signal_type SET NOT NULL" in sql
+        )
+        payload_not_null_index = next(
+            index
+            for index, sql in enumerate(sqls)
+            if "ALTER COLUMN signal_payload SET NOT NULL" in sql
+        )
+
+        self.assertLess(null_backfill_index, signal_not_null_index)
+        self.assertLess(null_backfill_index, payload_not_null_index)
+
+    def test_ensure_schema_backfills_action_impulse_signal_for_legacy_patterns(self) -> None:
+        cursor = MagicMock()
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        memory = HabitMemory(conn, max_active_in_prompt=3, decay_rate=0.05)
+
+        memory.ensure_schema()
+
+        sqls = [call.args[0] for call in cursor.execute.call_args_list]
+        self.assertTrue(any("ADD COLUMN IF NOT EXISTS signal_type" in sql for sql in sqls))
+        self.assertTrue(any("ADD COLUMN IF NOT EXISTS signal_payload" in sql for sql in sqls))
+        self.assertTrue(any("SET signal_type = 'action_impulse'" in sql for sql in sqls))
+        self.assertTrue(any("jsonb_build_object" in sql for sql in sqls))
+        self.assertTrue(any("substring(pattern FROM '^经常会冒出 ([a-z_]+) 行动冲动$')" in sql for sql in sqls))
 
     def test_activate_for_cycle_prefers_context_relevant_habit(self) -> None:
         memory = HabitMemory(None, max_active_in_prompt=2, decay_rate=0.05)
@@ -1969,10 +2025,210 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 "last_deep_sleep_at": "",
                 "summary": "",
             },
+            active_habits=[
+                {
+                    "id": 1,
+                    "pattern": "经常会冒出 reading 行动冲动",
+                    "category": "behavioral",
+                    "strength": 0.82,
+                    "activation_score": 0.86,
+                    "manifested": True,
+                    "signal": {"type": "action_impulse", "action_type": "reading"},
+                }
+            ],
         )
 
         self.assertEqual(notes, [])
         self.assertIsNotNone(reviewed[0].action_request)
+
+    def test_prefrontal_suppresses_repeated_reading_when_matching_habit_manifested(self) -> None:
+        manager = PrefrontalManager(
+            redis_client=None,
+            check_interval=3,
+            inhibition_enabled=True,
+        )
+
+        reviewed, notes = manager.review_thoughts(
+            thoughts=[
+                _make_thought(
+                    thought_type="意图",
+                    content='我再去读一点。 {action:reading, query:"第三段"}',
+                    action_request={"type": "reading", "params": 'query:"第三段"'},
+                )
+            ],
+            recent_thoughts=[
+                _make_thought(
+                    cycle_id=11,
+                    index=1,
+                    thought_type="意图",
+                    content='先读第一段。 {action:reading, query:"意识流"}',
+                    action_request={"type": "reading", "params": 'query:"意识流"'},
+                ),
+                _make_thought(
+                    cycle_id=11,
+                    index=2,
+                    thought_type="意图",
+                    content='再读第二段。 {action:reading, query:"第二段"}',
+                    action_request={"type": "reading", "params": 'query:"第二段"'},
+                ),
+            ],
+            stimuli=[],
+            sleep_state={
+                "energy": 0.82,
+                "mode": "awake",
+                "last_light_sleep_cycle": 0,
+                "last_deep_sleep_cycle": 0,
+                "last_deep_sleep_at": "",
+                "summary": "",
+            },
+            active_habits=[
+                {
+                    "id": 1,
+                    "pattern": "经常会冒出 reading 行动冲动",
+                    "category": "behavioral",
+                    "strength": 0.82,
+                    "activation_score": 0.86,
+                    "manifested": True,
+                    "signal": {"type": "action_impulse", "action_type": "reading"},
+                }
+            ],
+        )
+
+        self.assertEqual(
+            notes,
+            ["最近已经连续做了好几次 reading，这次先缓一缓。"],
+        )
+        self.assertIsNone(reviewed[0].action_request)
+
+    def test_prefrontal_allows_note_rewrite_even_with_matching_habit_manifested(self) -> None:
+        """note_rewrite is the model's private space — never suppress it via habit impulse."""
+        manager = PrefrontalManager(
+            redis_client=None,
+            check_interval=3,
+            inhibition_enabled=True,
+        )
+
+        reviewed, notes = manager.review_thoughts(
+            thoughts=[
+                _make_thought(
+                    thought_type="意图",
+                    content='还是先记下来。 {action:note_rewrite, content:"记下现在这句"}',
+                    action_request={"type": "note_rewrite", "params": 'content:"记下现在这句"'},
+                )
+            ],
+            recent_thoughts=[
+                _make_thought(
+                    cycle_id=11,
+                    index=1,
+                    thought_type="意图",
+                    content='先记上一句。 {action:note_rewrite, content:"记下前一句"}',
+                    action_request={"type": "note_rewrite", "params": 'content:"记下前一句"'},
+                )
+            ],
+            stimuli=[],
+            sleep_state={
+                "energy": 0.82,
+                "mode": "awake",
+                "last_light_sleep_cycle": 0,
+                "last_deep_sleep_cycle": 0,
+                "last_deep_sleep_at": "",
+                "summary": "",
+            },
+            active_habits=[
+                {
+                    "id": 1,
+                    "pattern": "经常会冒出 note_rewrite 行动冲动",
+                    "category": "behavioral",
+                    "strength": 0.91,
+                    "activation_score": 0.88,
+                    "manifested": True,
+                    "signal": {"type": "action_impulse", "action_type": "note_rewrite"},
+                }
+            ],
+        )
+
+        self.assertEqual(notes, [])
+        self.assertIsNotNone(reviewed[0].action_request)
+
+    def test_prefrontal_does_not_apply_habit_impulse_suppression_to_send_message(self) -> None:
+        manager = PrefrontalManager(
+            redis_client=None,
+            check_interval=3,
+            inhibition_enabled=True,
+        )
+
+        reviewed, notes = manager.review_thoughts(
+            thoughts=[
+                _make_thought(
+                    thought_type="意图",
+                    content='我先回他一句。 {action:send_message, message:"我在。"}',
+                    action_request={"type": "send_message", "params": 'message:"我在。"'},
+                )
+            ],
+            recent_thoughts=[
+                _make_thought(
+                    cycle_id=11,
+                    index=1,
+                    thought_type="意图",
+                    content='我先回上一句。 {action:send_message, message:"收到。"}',
+                    action_request={"type": "send_message", "params": 'message:"收到。"'},
+                )
+            ],
+            stimuli=[],
+            sleep_state={
+                "energy": 0.82,
+                "mode": "awake",
+                "last_light_sleep_cycle": 0,
+                "last_deep_sleep_cycle": 0,
+                "last_deep_sleep_at": "",
+                "summary": "",
+            },
+            active_habits=[
+                {
+                    "id": 1,
+                    "pattern": "经常会冒出 send_message 行动冲动",
+                    "category": "behavioral",
+                    "strength": 0.9,
+                    "activation_score": 0.87,
+                    "manifested": True,
+                    "signal": {"type": "action_impulse", "action_type": "send_message"},
+                }
+            ],
+        )
+
+        self.assertEqual(notes, [])
+        self.assertIsNotNone(reviewed[0].action_request)
+
+    def test_prefrontal_suppresses_weather_under_conversation_foreground(self) -> None:
+        manager = PrefrontalManager(
+            redis_client=None,
+            check_interval=3,
+            inhibition_enabled=True,
+        )
+
+        reviewed, notes = manager.review_thoughts(
+            thoughts=[
+                _make_thought(
+                    thought_type="意图",
+                    content='我先查一下天气。 {action:weather, location:"Tallinn"}',
+                    action_request={"type": "weather", "params": 'location:"Tallinn"'},
+                )
+            ],
+            recent_thoughts=[],
+            stimuli=[_conversation_stimulus(content="你先回我一下", message_id=301)],
+            sleep_state={
+                "energy": 0.82,
+                "mode": "awake",
+                "last_light_sleep_cycle": 0,
+                "last_deep_sleep_cycle": 0,
+                "last_deep_sleep_at": "",
+                "summary": "",
+            },
+            active_habits=[],
+        )
+
+        self.assertEqual(notes, ["有人在说话，先放下 weather，回应眼前的人。"])
+        self.assertIsNone(reviewed[0].action_request)
 
     def test_load_recent_conversations_builds_summary_and_keeps_recent_raw_lines(self) -> None:
         redis_client = ListRedisStub()

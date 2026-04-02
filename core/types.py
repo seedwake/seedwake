@@ -119,6 +119,11 @@ class EmotionSnapshot(TypedDict):
     updated_at: str
 
 
+class HabitControlSignal(TypedDict):
+    type: str
+    action_type: NotRequired[str]
+
+
 class HabitPromptEntry(TypedDict):
     id: int
     pattern: str
@@ -126,6 +131,7 @@ class HabitPromptEntry(TypedDict):
     strength: float
     activation_score: NotRequired[float]
     manifested: NotRequired[bool]
+    signal: NotRequired[HabitControlSignal]
 
 
 class ManasPromptState(TypedDict):

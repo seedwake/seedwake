@@ -47,6 +47,8 @@ CREATE TABLE habit_seeds (
     category         TEXT NOT NULL DEFAULT 'cognitive',  -- cognitive / behavioral / emotional
     strength         FLOAT DEFAULT 0.1,
     embedding        vector(4096),
+    signal_type      TEXT NOT NULL DEFAULT '',          -- action_impulse / ...
+    signal_payload   JSONB NOT NULL DEFAULT '{}',
     activation_count INTEGER DEFAULT 0,
     last_activated   TIMESTAMPTZ,
     source_memories  BIGINT[] DEFAULT '{}',
