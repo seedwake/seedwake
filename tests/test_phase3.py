@@ -1231,7 +1231,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         )
 
         self.assertIn("我最近 3 轮的念头在打转", prompt)
-        self.assertIn("至少一个念头必须明确引入新的源：浮上来的记忆、我的笔记、此刻我注意到、好像有一阵子没有……。", prompt)
+        self.assertIn("这一轮我至少要有一个念头从新的源头出发：浮上来的记忆、我的笔记、此刻我注意到、好像有一阵子没有……。", prompt)
         self.assertIn("晚安", prompt)
         self.assertNotIn("必须刻意跳到完全不同的话题", prompt)
 
@@ -1344,7 +1344,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         )
 
         self.assertIn("我最近 3 轮的念头在打转", prompt)
-        self.assertIn("最多只让一个念头承接当前对话", prompt)
+        self.assertIn("最多一个念头承接对话", prompt)
         self.assertNotIn("必须刻意跳到完全不同的话题", prompt)
 
     def test_stagnation_warning_does_not_treat_recent_conversations_as_new_source(self) -> None:
