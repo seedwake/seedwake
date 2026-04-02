@@ -1101,6 +1101,8 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("最近的行动回音：", prompt)
         self.assertIn("刚刚收到的行动回音：", prompt)
         self.assertLess(prompt.index("最近的行动回音："), prompt.index("刚刚收到的行动回音："))
+        self.assertIn("最近的行动回音：\n\n- [搜索结果] 搜索完成 1. 旧结果", prompt)
+        self.assertIn("刚刚收到的行动回音：\n\n- [外界消息] 已查看 RSS，没有新的新闻条目", prompt)
         self.assertIn("[搜索结果] 搜索完成 1. 旧结果", prompt)
         self.assertIn("[外界消息] 已查看 RSS，没有新的新闻条目", prompt)
 
@@ -1125,7 +1127,8 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         self.assertIn("最近的行动回音：", prompt)
         self.assertIn("刚刚收到的行动回音：", prompt)
-        self.assertIn("- 无", prompt)
+        self.assertIn("最近的行动回音：\n\n- [搜索结果] 搜索完成 1. 旧结果", prompt)
+        self.assertIn("刚刚收到的行动回音：\n\n- 无", prompt)
 
     def test_prompt_warns_about_stagnation_and_requires_new_source(self) -> None:
         repeated_thoughts = [
@@ -3045,10 +3048,10 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(mock_urlopen.call_count, 11)
         self.assertEqual(mock_sleep.call_count, 10)
 
-    def test_send_telegram_message_does_not_retry_ambiguous_reset_error(self) -> None:
+    def test_send_telegram_message_retries_reset_error(self) -> None:
         transient_error = error.URLError(ConnectionResetError(104, "Connection reset by peer"))
         with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
-            with patch("core.action.request.urlopen", side_effect=[transient_error]) as mock_urlopen:
+            with patch("core.action.request.urlopen", side_effect=[transient_error, _urlopen_success_response()]) as mock_urlopen:
                 with patch("core.action.time.sleep") as mock_sleep:
                     send_error, delivered_reply_to = _send_telegram_message(
                         "telegram:1",
@@ -3057,10 +3060,10 @@ class ActionManagerTests(unittest.TestCase):
                         reply_to_message_id="",
                     )
 
-        self.assertIn("Connection reset by peer", str(send_error))
+        self.assertIsNone(send_error)
         self.assertEqual(delivered_reply_to, "")
-        self.assertEqual(mock_urlopen.call_count, 1)
-        mock_sleep.assert_not_called()
+        self.assertEqual(mock_urlopen.call_count, 2)
+        mock_sleep.assert_called_once()
 
     def test_send_telegram_message_retries_then_drops_missing_reply_to(self) -> None:
         transient_error = error.URLError(ConnectionRefusedError(111, "Connection refused"))

@@ -2605,6 +2605,7 @@ def _should_retry_transient_telegram_send_error(send_error: str) -> bool:
     transient_markers = (
         "temporary failure",
         "temporarily unavailable",
+        "connection reset by peer",
         "connection refused",
         "network is unreachable",
         "no route to host",
