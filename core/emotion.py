@@ -28,7 +28,7 @@ EMOTION_LABELS = {
     "concern": "牵挂",
 }
 EMOTION_INFERENCE_SYSTEM_PROMPT = (
-    "你是 Seedwake 的情绪感知模块。"
+    "你是我的情绪感知模块。"
     "根据以下念头和刺激，判断此刻的情绪状态。"
     "返回一行 JSON，格式：{\"curiosity\":0.5,\"calm\":0.3,\"frustration\":0.1,\"satisfaction\":0.0,\"concern\":0.1}"
     "\n每个维度 0.0-1.0，所有维度之和不必为 1。只输出 JSON，不要解释。"

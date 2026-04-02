@@ -1064,10 +1064,10 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("## 最近的对话", prompt)
         self.assertIn("## 有人对我说话了", prompt)
         self.assertIn("## 接下来的念头", prompt)
-        self.assertLess(prompt.index("## 浮上来的记忆"), prompt.index("## 我的笔记"))
         self.assertLess(prompt.index("## 我的笔记"), prompt.index("## 好像有一阵子没有……"))
         self.assertLess(prompt.index("## 好像有一阵子没有……"), prompt.index("## 最近的念头"))
-        self.assertLess(prompt.index("## 最近的念头"), prompt.index("## 行动有了回音"))
+        self.assertLess(prompt.index("## 最近的念头"), prompt.index("## 浮上来的记忆"))
+        self.assertLess(prompt.index("## 浮上来的记忆"), prompt.index("## 行动有了回音"))
         self.assertLess(prompt.index("## 行动有了回音"), prompt.index("## 正在受理中的行动"))
         self.assertLess(prompt.index("## 正在受理中的行动"), prompt.index("## 我已经发起、正在等回音的事"))
         self.assertLess(prompt.index("## 我已经发起、正在等回音的事"), prompt.index("## 此刻我注意到"))
@@ -1301,7 +1301,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("## 最近的反思", prompt)
         self.assertLess(prompt.index("## 此刻需要留意"), prompt.index("## 此刻的自我感"))
         self.assertLess(prompt.index("## 相关习气/倾向性"), prompt.index("## 最近的反思"))
-        self.assertLess(prompt.index("## 最近的反思"), prompt.index("## 浮上来的记忆"))
+        self.assertLess(prompt.index("## 最近的反思"), prompt.index("## 最近的念头"))
 
     def test_prompt_includes_current_impressions_section(self) -> None:
         prompt = build_prompt(
@@ -1317,7 +1317,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         self.assertIn("## 当前人物印象", prompt)
         self.assertIn("联系方式: telegram:1", prompt)
-        self.assertLess(prompt.index("## 浮上来的记忆"), prompt.index("## 当前人物印象"))
+        self.assertLess(prompt.index("## 当前人物印象"), prompt.index("## 接下来的念头"))
 
     def test_prompt_warns_about_stagnation_without_forcing_full_topic_switch_during_conversation(self) -> None:
         repeated_thoughts = [
@@ -2255,6 +2255,36 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         )
 
         self.assertEqual(recent, [])
+
+    def test_recent_action_echo_cache_keeps_send_message_results_for_following_cycles(self) -> None:
+        redis_client = ListRedisStub()
+        send_echo = Stimulus(
+            stimulus_id="stim_send",
+            type="action_result",
+            priority=2,
+            source="action:act_send",
+            content='已成功发送给 telegram:1：“我在。”',
+            action_id="act_send",
+            metadata={
+                "origin": "action",
+                "action_type": "send_message",
+                "status": "succeeded",
+                "result": {
+                    "ok": True,
+                    "data": {"source": "telegram:1", "message": "我在。"},
+                },
+            },
+        )
+        remember_recent_action_echoes(_as_conversation_redis(redis_client), 10, [send_echo])
+
+        recent = load_recent_action_echoes(
+            _as_conversation_redis(redis_client),
+            current_cycle_id=11,
+            exclude_action_ids=set(),
+        )
+
+        self.assertEqual([stimulus.action_id for stimulus in recent], ["act_send"])
+        self.assertEqual(recent[0].metadata["action_type"], "send_message")
 
     def test_load_recent_conversations_skips_empty_recent_block_for_current_only_source(self) -> None:
         redis_client = ListRedisStub()

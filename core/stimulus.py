@@ -36,7 +36,7 @@ RECENT_CONVERSATION_RAW_LIMIT = 10
 RECENT_CONVERSATION_WINDOW_HOURS = 24
 RECENT_CONVERSATION_SUMMARY_VERSION = 2
 RECENT_CONVERSATION_SUMMARY_MAX_CHARS = 500
-RECENT_ACTION_ECHO_ACTION_TYPES = {"news", "search", "reading", "web_fetch", "weather"}
+RECENT_ACTION_ECHO_ACTION_TYPES = {"news", "search", "reading", "web_fetch", "weather", "send_message"}
 MERGED_CONVERSATION_HISTORY_METADATA_KEYS = (
     "telegram_user_id",
     "telegram_chat_id",
@@ -965,6 +965,9 @@ def _should_retain_recent_action_echo(stimulus: Stimulus) -> bool:
     if not _is_information_action_echo(stimulus):
         return False
     status = str(stimulus.metadata.get("status") or "").strip()
+    action_type = str(stimulus.metadata.get("action_type") or "").strip()
+    if action_type == "send_message":
+        return status in {"succeeded", "failed"}
     return status == "succeeded"
 
 

@@ -637,11 +637,10 @@ def _summarize_light_sleep_batch(
     if not batch:
         return ""
     prompt = (
-        "你在为 Seedwake 做一次浅睡整理。"
-        "把下面这些原始经历压缩成一条更抽象的中文语义记忆。"
-        "保留事实、关系、认识或稳定结论，不要逐条复读，不要项目符号，控制在 180 字以内。\n\n"
-        f"cycle={cycle_id}\n"
-        f"emotion={emotion['summary']}\n"
+        "把下面这些我最近的经历压缩成一条更抽象的语义记忆。"
+        "用第一人称（我），保留事实、关系、认识或稳定结论，"
+        "不要逐条复读，不要项目符号，控制在 180 字以内。\n\n"
+        f"当前情绪：{emotion['summary']}\n"
         "经历：\n"
         + "\n".join(f"- {line}" for line in batch)
     )
@@ -649,7 +648,7 @@ def _summarize_light_sleep_batch(
         response = client.chat(
             model=str(model_config["name"]),
             messages=[
-                {"role": "system", "content": "你在压缩 Seedwake 的短期经历，只输出一条中文语义记忆。"},
+                {"role": "system", "content": "你在压缩自己的短期经历，用（我）做主语，只输出一条中文语义记忆。"},
                 {"role": "user", "content": prompt},
             ],
             options={"temperature": 0.2, "max_tokens": 160},
@@ -760,8 +759,8 @@ def _summarize_impression(
         return ""
     contact_hint = _impression_contact_hint(source)
     prompt = (
-        "你在为 Seedwake 更新某个对话对象的印象摘要。"
-        "根据已有印象和最近互动，写一段中文自然语言摘要。"
+        "更新我对一个对话对象的印象摘要。"
+        "根据已有印象和最近互动，用第一人称写一段中文自然语言摘要。"
         "必须包含：关系、印象、最近互动、情感基调。"
         "如果有可用联系方式，也要自然保留在摘要里。"
         "不要项目符号，不要编造，不超过 180 字。\n\n"
@@ -776,7 +775,7 @@ def _summarize_impression(
         response = client.chat(
             model=str(model_config["name"]),
             messages=[
-                {"role": "system", "content": "你在生成人物印象摘要，只输出一段中文摘要。"},
+                {"role": "system", "content": "你在生成我对某人的印象摘要，用（我）做主语，只输出一段中文摘要。"},
                 {"role": "user", "content": prompt},
             ],
             options={"temperature": 0.2, "max_tokens": 180},
@@ -906,7 +905,7 @@ def _generate_deep_sleep_summary(
         response = client.chat(
             model=str(model_config["name"]),
             messages=[
-                {"role": "system", "content": "你在总结 Seedwake 的一次深睡整理。只输出一句中文总结。"},
+                {"role": "system", "content": "你在总结自己的一次深睡整理，用（我）做主语。只输出一句中文总结。"},
                 {"role": "user", "content": prompt},
             ],
             options={"temperature": 0.2, "max_tokens": 80},
@@ -935,8 +934,8 @@ def _generate_deep_sleep_review(
     expired_count: int,
 ) -> str:
     prompt = (
-        "你在为 Seedwake 做一次深睡后的自我评估。"
-        "请用一小段中文总结近期状态，并给出一条最值得关注的参数调整建议。"
+        "这是一次深睡后的自我评估。"
+        "请用第一人称，一小段中文总结我的近期状态，并给出一条最值得关注的调整方向。"
         "不要项目符号，不超过 220 字。\n\n"
         f"cycle={cycle_id}\n"
         f"emotion={emotion['summary']}\n"
@@ -953,7 +952,7 @@ def _generate_deep_sleep_review(
         response = client.chat(
             model=str(model_config["name"]),
             messages=[
-                {"role": "system", "content": "你在输出 Seedwake 的深睡自评，只输出一段中文总结。"},
+                {"role": "system", "content": "你在做自己的深睡自评，用（我）做主语，只输出一段中文总结。"},
                 {"role": "user", "content": prompt},
             ],
             options={"temperature": 0.2, "max_tokens": 220},

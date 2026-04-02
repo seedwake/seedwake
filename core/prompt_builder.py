@@ -184,13 +184,11 @@ def build_prompt(
         parts,
         resolved_context.manas_state,
         resolved_context.emotion,
-        resolved_context.sleep_state,
         resolved_context.active_habits or [],
         resolved_context.prefrontal_state,
         resolved_context.recent_reflections or [],
         window,
         resolved_context.long_term_context,
-        resolved_context.current_impressions or [],
         resolved_context.note_text,
         resolved_context.perception_cues or [],
     )
@@ -204,6 +202,7 @@ def build_prompt(
         visible_pending_actions,
         visible_running_actions,
         passive,
+        resolved_context.current_impressions or [],
         resolved_context.recent_conversations or [],
         conversation_labels,
     )
@@ -230,13 +229,11 @@ def _append_prompt_context_sections(
     parts: list[str],
     manas_state: ManasPromptState | None,
     emotion: EmotionSnapshot | None,
-    sleep_state: SleepStateSnapshot | None,
     active_habits: list[HabitPromptEntry],
     prefrontal_state: PrefrontalPromptState | None,
     recent_reflections: list[ReflectionPromptEntry],
     window: list[Thought],
     long_term_context: list[str] | None,
-    current_impressions: list[str],
     note_text: str,
     perception_cues: list[str],
 ) -> None:
@@ -249,21 +246,12 @@ def _append_prompt_context_sections(
     emotion_alert = _emotion_alert(emotion) if emotion else ""
     if emotion_alert:
         _append_prompt_section(parts, "emotion", lambda: emotion_alert)
-    if sleep_state and sleep_state["mode"] != "awake":
-        current_sleep_state = sleep_state
-        _append_prompt_section(parts, "sleep", lambda: _format_sleep_state(current_sleep_state))
     if active_habits:
         habits = active_habits
         _append_prompt_section(parts, "habits", lambda: _format_habits(habits))
     if recent_reflections:
         reflections = recent_reflections
         _append_prompt_section(parts, "reflections", lambda: _format_recent_reflections(reflections))
-    if long_term_context:
-        ltm = long_term_context
-        _append_prompt_section(parts, "long_term", lambda: _format_long_term(ltm))
-    if current_impressions:
-        impressions = current_impressions
-        _append_prompt_section(parts, "impressions", lambda: _format_impressions(impressions))
     if note_text.strip():
         _append_prompt_section(parts, "note", lambda: _format_note(note_text))
     if perception_cues:
@@ -271,6 +259,9 @@ def _append_prompt_context_sections(
         _append_prompt_section(parts, "perception_cues", lambda: _format_perception_cues(cues))
     if window:
         _append_prompt_section(parts, "recent_thoughts", lambda: _format_thought_history(window))
+    if long_term_context:
+        ltm = long_term_context
+        _append_prompt_section(parts, "long_term", lambda: _format_long_term(ltm))
 
 
 def _append_prompt_stimulus_sections(
@@ -281,6 +272,7 @@ def _append_prompt_stimulus_sections(
     visible_pending_actions: list[ActionRecord],
     visible_running_actions: list[ActionRecord],
     passive: list[Stimulus],
+    current_impressions: list[str],
     recent_conversations: list[RecentConversationPrompt],
     conversation_labels: dict[str, str],
 ) -> None:
@@ -308,6 +300,9 @@ def _append_prompt_stimulus_sections(
         )
     if passive:
         _append_prompt_section(parts, "passive_stimuli", lambda: _format_sensory_stimuli(passive))
+    if current_impressions:
+        impressions = current_impressions
+        _append_prompt_section(parts, "impressions", lambda: _format_impressions(impressions))
     if recent_conversations:
         convos = recent_conversations
         _append_prompt_section(
@@ -450,17 +445,6 @@ def _emotion_alert(emotion: EmotionSnapshot) -> str:
         return ""
     return "\n".join(alerts)
 
-
-def _format_sleep_state(sleep_state: SleepStateSnapshot) -> str:
-    lines = [sleep_state["summary"]]
-    lines.append("")
-    lines.append(f"- mode: {sleep_state['mode']}")
-    lines.append(f"- energy: {sleep_state['energy']:.1f}/100")
-    if sleep_state["last_light_sleep_cycle"] > 0:
-        lines.append(f"- last_light_sleep_cycle: C{sleep_state['last_light_sleep_cycle']}")
-    if sleep_state["last_deep_sleep_cycle"] > 0:
-        lines.append(f"- last_deep_sleep_cycle: C{sleep_state['last_deep_sleep_cycle']}")
-    return _render_section("清醒与困意", lines, keep_blank_lines=True)
 
 
 def _format_habits(habits: list[HabitPromptEntry]) -> str:
