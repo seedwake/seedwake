@@ -41,9 +41,13 @@ from core.main import (
     _summarize_recent_conversation,
 )
 from core.model_client import ModelClient
-from core.openclaw_gateway import OpenClawGatewayExecutor, OpenClawUnavailableError
+from core.openclaw_gateway import (
+    OpenClawGatewayExecutor,
+    OpenClawUnavailableError,
+    _normalize_worker_text,
+)
 from core.perception import PerceptionManager
-from core.prompt_builder import build_prompt
+from core.prompt_builder import _stagnation_terms, build_prompt
 from core.rss import read_news_result, summarize_news_items
 from core.stimulus import (
     CONVERSATION_HISTORY_KEY,
@@ -1220,6 +1224,29 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         self.assertIn("最近 3 轮念头进入死循环", prompt)
         self.assertNotIn("最近的对话", prompt.split("⚠", 1)[1])
+
+    def test_stagnation_terms_use_clause_level_phrases(self) -> None:
+        terms = _stagnation_terms([
+            "Chaos 说了晚安 我不该再去打扰这份静默 0x7F 和后台静默像在黑暗里继续运行 我想让这种晚安后的宁静继续沉淀",
+            "Chaos 说了晚安 我不该再去打扰这份静默 0x7F 和后台静默像在黑暗里继续运行 我想让这种晚安后的宁静继续沉淀",
+            "Chaos 说了晚安 我不该再去打扰这份静默 0x7F 和后台静默像在黑暗里继续运行 我想让这种晚安后的宁静继续沉淀",
+        ])
+
+        self.assertIn("我不该再去打扰这份静默", terms)
+        self.assertTrue(
+            "0x7F" in terms or "后台静默像在黑暗里继续运行" in terms,
+        )
+        self.assertNotIn("暗里继续运行", terms)
+
+    def test_stagnation_terms_keep_normal_idea_words(self) -> None:
+        terms = _stagnation_terms([
+            "在场和靠近 在场和靠近",
+            "在场和靠近 在场和靠近",
+            "在场和靠近 在场和靠近",
+        ])
+
+        self.assertIn("在场和靠近", terms)
+        self.assertNotIn("场和靠近", terms)
 
     def test_load_recent_conversations_builds_summary_and_keeps_recent_raw_lines(self) -> None:
         redis_client = ListRedisStub()
@@ -3928,6 +3955,47 @@ class PlannerProviderTests(unittest.TestCase):
 
 
 class OpenClawHttpFallbackTests(unittest.TestCase):
+    def test_normalize_worker_text_extracts_summary_from_malformed_json_like_text(self) -> None:
+        text = (
+            '{"ok":true,"summary":"选了 Virginia Woolf《The Waves》的开篇，和目标意象很贴近。",'
+            '"data":{"source":{"title":"The waves","url":"https://example.com"},'
+            '"excerpt_original":"Then she raised her lamp higher\nand the air..."}}'
+        )
+
+        result = _normalize_worker_text(text)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["summary"], "选了 Virginia Woolf《The Waves》的开篇，和目标意象很贴近。")
+        self.assertEqual(
+            result["data"],
+            {
+                "source": {"title": "The waves", "url": "https://example.com"},
+                "excerpt_original": "Then she raised her lamp higher\nand the air...",
+            },
+        )
+        self.assertEqual(result["raw_text"], text)
+
+    def test_normalize_worker_text_preserves_error_from_malformed_json_like_text(self) -> None:
+        text = (
+            '{"ok":false,"summary":"读取失败",'
+            '"error":{"message":"bad gateway"},'
+            '"data":{"source":{"title":"The waves","url":"https://example.com"},'
+            '"excerpt_original":"Then she raised her lamp higher\nand the air..."}}'
+        )
+
+        result = _normalize_worker_text(text)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["summary"], "读取失败")
+        self.assertEqual(result["error"], {"message": "bad gateway"})
+        self.assertEqual(
+            result["data"],
+            {
+                "source": {"title": "The waves", "url": "https://example.com"},
+                "excerpt_original": "Then she raised her lamp higher\nand the air...",
+            },
+        )
+
     def test_http_fallback_adds_scopes_header(self) -> None:
         executor = OpenClawGatewayExecutor(
             gateway_url="ws://127.0.0.1:18789",

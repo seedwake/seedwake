@@ -1,3 +1,6 @@
+import json
+import re
+
 from core.types import ActionEventPayload, StatusEventPayload
 
 
@@ -34,7 +37,7 @@ def format_action_event(payload: ActionEventPayload) -> str:
     action_type = str(payload.get("type") or "").strip()
     executor = str(payload.get("executor") or "").strip()
     status = str(payload.get("status") or "").strip()
-    summary = str(payload.get("summary") or "").strip()
+    summary = _event_summary_text(str(payload.get("summary") or ""))
     if not action_id:
         return ""
     prefix = "需要确认的行动" if bool(payload.get("awaiting_confirmation")) else "行动更新"
@@ -61,3 +64,30 @@ def _load_numeric_user_ids(config: dict, key: str) -> list[int]:
         except (TypeError, ValueError):
             continue
     return sorted(set(user_ids))
+
+
+def _event_summary_text(summary: str) -> str:
+    normalized = summary.strip()
+    if not normalized.startswith("{"):
+        return normalized
+    extracted = _extract_embedded_summary(normalized)
+    return extracted or normalized
+
+
+def _extract_embedded_summary(summary: str) -> str | None:
+    try:
+        payload = json.loads(summary)
+    except json.JSONDecodeError:
+        match = re.search(r'"summary"\s*:\s*"((?:\\.|[^"\\])*)"', summary, re.DOTALL)
+        if not match:
+            return None
+        raw_value = match.group(1)
+        try:
+            normalized = json.loads(f'"{raw_value}"')
+        except json.JSONDecodeError:
+            return raw_value.strip() or None
+        return str(normalized).strip() or None
+    if not isinstance(payload, dict):
+        return None
+    extracted = str(payload.get("summary") or "").strip()
+    return extracted or None

@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -477,6 +478,21 @@ def _normalize_worker_text(text: str) -> ActionResultEnvelope:
             transport="openclaw",
             raw_text=text,
         )
+    summary = _extract_json_string_field(text, "summary")
+    ok = _extract_json_bool_field(text, "ok")
+    salvaged_data = _extract_salvaged_result_data(text)
+    salvaged_error = _extract_salvaged_error_detail(text)
+    if summary is not None or ok is not None or salvaged_data or salvaged_error is not None:
+        return _build_gateway_result(
+            ok=True if ok is None else ok,
+            summary=summary or text or "OpenClaw 完成任务",
+            data=salvaged_data,
+            error_detail=salvaged_error,
+            run_id=None,
+            session_key=None,
+            transport="openclaw",
+            raw_text=text,
+        )
     return _build_gateway_result(
         ok=True,
         summary=text or "OpenClaw 完成任务",
@@ -501,6 +517,74 @@ def _extract_json_object(text: str) -> JsonObject | None:
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _extract_json_string_field(text: str, field_name: str) -> str | None:
+    pattern = re.compile(
+        rf'"{re.escape(field_name)}"\s*:\s*"((?:\\.|[^"\\])*)"',
+        re.DOTALL,
+    )
+    match = pattern.search(text)
+    if not match:
+        return None
+    raw_value = match.group(1)
+    try:
+        normalized = json.loads(f'"{raw_value}"')
+    except json.JSONDecodeError:
+        return raw_value.strip() or None
+    return str(normalized).strip() or None
+
+
+def _extract_json_bool_field(text: str, field_name: str) -> bool | None:
+    pattern = re.compile(rf'"{re.escape(field_name)}"\s*:\s*(true|false)')
+    match = pattern.search(text)
+    if not match:
+        return None
+    return match.group(1) == "true"
+
+
+def _extract_salvaged_result_data(text: str) -> JsonObject:
+    data: JsonObject = {}
+    source = _extract_salvaged_source(text)
+    if source:
+        data["source"] = source
+    excerpt_original = _extract_json_string_field(text, "excerpt_original")
+    if excerpt_original is not None:
+        data["excerpt_original"] = excerpt_original
+    excerpt = _extract_json_string_field(text, "excerpt")
+    if excerpt is not None:
+        data["excerpt"] = excerpt
+    brief_note = _extract_json_string_field(text, "brief_note")
+    if brief_note is not None:
+        data["brief_note"] = brief_note
+    return data
+
+
+def _extract_salvaged_source(text: str) -> JsonObject | None:
+    title = _extract_json_string_field(text, "title")
+    url = _extract_json_string_field(text, "url")
+    if title is None and url is None:
+        return None
+    source: JsonObject = {}
+    if title is not None:
+        source["title"] = title
+    if url is not None:
+        source["url"] = url
+    return source
+
+
+def _extract_salvaged_error_detail(text: str) -> JsonValue:
+    error_string = _extract_json_string_field(text, "error")
+    if error_string is not None:
+        return error_string
+    error_object_match = re.search(r'"error"\s*:\s*\{(?P<body>.*?)\}(?:\s*,|\s*\})', text, re.DOTALL)
+    if not error_object_match:
+        return None
+    body = error_object_match.group("body")
+    message = _extract_json_string_field(body, "message")
+    if message is None:
+        return None
+    return {"message": message}
 
 
 def _build_gateway_result(

@@ -106,7 +106,6 @@ RUNNING_ACTION_VISIBLE_STATUSES = {"pending", "running"}
 PROMPT_SECTION_LOG_THRESHOLD_MS = 10.0
 STAGNATION_CHECK_CYCLES = 3
 STAGNATION_SIMILARITY_THRESHOLD = 0.6
-STAGNATION_TERM_PATTERN = re.compile(r"[A-Za-z0-9_:+°%.-]{2,}|[\u4e00-\u9fff]{2,8}")
 STAGNATION_TERM_STOPWORDS = {
     "刚才",
     "现在",
@@ -517,18 +516,51 @@ def _stagnation_warning(
 
 def _stagnation_terms(cycle_texts: list[str]) -> list[str]:
     counts: Counter[str] = Counter()
+    first_seen: dict[str, int] = {}
+    next_index = 0
     for text in cycle_texts:
-        terms = {
-            match.group(0)
-            for match in STAGNATION_TERM_PATTERN.finditer(text)
-            if match.group(0) not in STAGNATION_TERM_STOPWORDS
-        }
+        terms = _stagnation_term_candidates(text)
         counts.update(terms)
+        for term in terms:
+            if term not in first_seen:
+                first_seen[term] = next_index
+                next_index += 1
     ranked_terms = [
-        term for term, count in counts.most_common()
+        term for term, count in sorted(
+            counts.items(),
+            key=lambda item: (-item[1], first_seen[item[0]]),
+        )
         if count >= 2
     ]
     return ranked_terms[:5]
+
+
+def _stagnation_term_candidates(text: str) -> list[str]:
+    terms: list[str] = []
+    seen_terms: set[str] = set()
+    for clause in text.split():
+        candidate = clause.strip()
+        if not candidate:
+            continue
+        candidate = _trim_stagnation_prefix(candidate)
+        if len(candidate) < 2:
+            continue
+        if candidate in STAGNATION_TERM_STOPWORDS:
+            continue
+        if len(candidate) > 24:
+            candidate = f"{candidate[:24].rstrip()}..."
+        if candidate in seen_terms:
+            continue
+        terms.append(candidate)
+        seen_terms.add(candidate)
+    return terms
+
+
+def _trim_stagnation_prefix(candidate: str) -> str:
+    trimmed = candidate
+    while len(trimmed) >= 3 and trimmed[:1] in {"和", "与"}:
+        trimmed = trimmed[1:]
+    return trimmed
 
 
 def _text_similarity(a: str, b: str) -> float:

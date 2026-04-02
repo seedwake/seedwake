@@ -227,6 +227,28 @@ class TelegramBotHelpersTests(unittest.TestCase):
         self.assertIn("需要确认的行动", text)
         self.assertIn("act_1", text)
 
+    def test_format_action_event_extracts_summary_from_embedded_json_text(self) -> None:
+        payload: ActionEventPayload = {
+            "action_id": "act_2",
+            "type": "reading",
+            "executor": "openclaw",
+            "status": "succeeded",
+            "summary": (
+                '{"ok":true,"summary":"选了 Virginia Woolf《The Waves》的开篇，和目标意象很贴近。",'
+                '"data":{"source":{"title":"The waves","url":"https://example.com"},"excerpt_original":"x"}}'
+            ),
+            "run_id": None,
+            "session_key": None,
+            "awaiting_confirmation": False,
+        }
+
+        text = format_action_event(payload)
+
+        self.assertIn("行动更新", text)
+        self.assertIn("act_2", text)
+        self.assertIn("选了 Virginia Woolf《The Waves》的开篇，和目标意象很贴近。", text)
+        self.assertNotIn('{"ok":true', text)
+
 
 class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_handle_text_message_ignores_missing_effective_message(self) -> None:
