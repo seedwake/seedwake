@@ -151,7 +151,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class PromptBuildContext:
-    goal_stack: list[str] | None = None
     manas_state: ManasPromptState | None = None
     emotion: EmotionSnapshot | None = None
     sleep_state: SleepStateSnapshot | None = None
@@ -183,7 +182,6 @@ def build_prompt(
     window = recent_thoughts[-context_window * 3:]
     _append_prompt_context_sections(
         parts,
-        resolved_context.goal_stack or [],
         resolved_context.manas_state,
         resolved_context.emotion,
         resolved_context.sleep_state,
@@ -230,7 +228,6 @@ def build_prompt(
 
 def _append_prompt_context_sections(
     parts: list[str],
-    goal_stack: list[str],
     manas_state: ManasPromptState | None,
     emotion: EmotionSnapshot | None,
     sleep_state: SleepStateSnapshot | None,
@@ -243,17 +240,16 @@ def _append_prompt_context_sections(
     note_text: str,
     perception_cues: list[str],
 ) -> None:
-    if goal_stack or prefrontal_state:
-        goals = goal_stack
+    if _prefrontal_needs_prompt(prefrontal_state):
         executive = prefrontal_state
-        _append_prompt_section(parts, "goal_stack", lambda: _format_goal_stack(goals, executive))
-    if manas_state:
+        _append_prompt_section(parts, "goal_stack", lambda: _format_prefrontal_alert(executive))
+    if manas_state and _manas_needs_prompt(manas_state):
         current_manas = manas_state
         _append_prompt_section(parts, "manas", lambda: _format_manas(current_manas))
-    if emotion:
-        emotion_state = emotion
-        _append_prompt_section(parts, "emotion", lambda: _format_emotion(emotion_state))
-    if sleep_state:
+    emotion_alert = _emotion_alert(emotion) if emotion else ""
+    if emotion_alert:
+        _append_prompt_section(parts, "emotion", lambda: emotion_alert)
+    if sleep_state and sleep_state["mode"] != "awake":
         current_sleep_state = sleep_state
         _append_prompt_section(parts, "sleep", lambda: _format_sleep_state(current_sleep_state))
     if active_habits:
@@ -388,50 +384,71 @@ def _build_system(identity: dict[str, str]) -> str:
     return "\n\n".join(parts)
 
 
-def _format_goal_stack(
-    goal_stack: list[str],
-    prefrontal_state: PrefrontalPromptState | None,
-) -> str:
+def _prefrontal_needs_prompt(prefrontal_state: PrefrontalPromptState | None) -> bool:
+    if prefrontal_state is None:
+        return False
+    return bool(prefrontal_state.get("guidance") or prefrontal_state.get("inhibition_notes"))
+
+
+def _format_prefrontal_alert(prefrontal_state: PrefrontalPromptState) -> str:
     lines: list[str] = []
-    for goal in goal_stack:
-        lines.append(f"- {goal}")
-    if prefrontal_state is not None and prefrontal_state["guidance"]:
-        lines.append("")
-        lines.append("前额叶提醒：")
-        for guidance in prefrontal_state["guidance"]:
-            lines.append(f"- {guidance}")
-    if prefrontal_state is not None and prefrontal_state["inhibition_notes"]:
-        lines.append("")
-        lines.append("前额叶刚抑制了这些冲动：")
+    for guidance in prefrontal_state.get("guidance") or []:
+        lines.append(f"- {guidance}")
+    if prefrontal_state.get("inhibition_notes"):
+        if lines:
+            lines.append("")
+        lines.append("刚刚有些冲动被压下了：")
         for note in prefrontal_state["inhibition_notes"]:
             lines.append(f"- {note}")
-    return _render_section("当前目标栈", lines, keep_blank_lines=True)
+    return _render_section("此刻需要留意", lines, keep_blank_lines=True)
 
 
-def _format_emotion(emotion: EmotionSnapshot) -> str:
-    ranked = sorted(emotion["dimensions"].items(), key=lambda item: item[1], reverse=True)
-    lines = [emotion["summary"]]
-    lines.append("")
-    for name, value in ranked[:5]:
-        lines.append(f"- {name}: {value:.2f}")
-    return _render_section("当前情绪基调", lines, keep_blank_lines=True)
+def _manas_needs_prompt(manas_state: ManasPromptState) -> bool:
+    return bool(
+        str(manas_state.get("session_context") or "").strip()
+        or str(manas_state.get("identity_notice") or "").strip()
+        or str(manas_state.get("warning") or "").strip()
+        or manas_state.get("reflection_requested")
+    )
 
 
 def _format_manas(manas_state: ManasPromptState) -> str:
-    lines = [f"- 连续性评分: {manas_state['self_coherence_score']:.2f}"]
-    lines.append(f"- 连续中断计数: {manas_state['consecutive_disruptions']}")
+    lines: list[str] = []
     session_context = str(manas_state.get("session_context") or "").strip()
     if session_context:
-        lines.append(f"- 过渡语境: {session_context}")
+        lines.append(session_context)
     identity_notice = str(manas_state.get("identity_notice") or "").strip()
     if identity_notice:
-        lines.append(f"- 身份提醒: {identity_notice}")
+        lines.append(identity_notice)
     warning = str(manas_state.get("warning") or "").strip()
     if warning:
-        lines.append(f"- 当前警示: {warning}")
+        lines.append(warning)
     if manas_state.get("reflection_requested"):
-        lines.append("- 我需要做一次更认真地回身自照。")
-    return _render_section("自我连续性", lines)
+        lines.append("我需要做一次更认真地回身自照。")
+    return _render_section("此刻的自我感", lines)
+
+
+EMOTION_ALERT_THRESHOLD = 0.65
+EMOTION_ALERT_LABELS = {
+    "frustration": "此刻我有些焦躁不安。",
+    "concern": "此刻我心里有些牵挂和不放心。",
+    "curiosity": "此刻有一股很强的好奇心在推着我。",
+    "satisfaction": "此刻我感到一种踏实的满足。",
+    "calm": "此刻我内心很平静。",
+}
+
+
+def _emotion_alert(emotion: EmotionSnapshot) -> str:
+    dimensions = emotion.get("dimensions") or {}
+    alerts: list[str] = []
+    for dimension, value in sorted(dimensions.items(), key=lambda item: item[1], reverse=True):
+        if float(value) >= EMOTION_ALERT_THRESHOLD:
+            label = EMOTION_ALERT_LABELS.get(dimension)
+            if label:
+                alerts.append(label)
+    if not alerts:
+        return ""
+    return "\n".join(alerts)
 
 
 def _format_sleep_state(sleep_state: SleepStateSnapshot) -> str:

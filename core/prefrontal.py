@@ -51,12 +51,10 @@ class PrefrontalManager:
         self,
         cycle_id: int,
         identity: dict[str, str],
-        note_text: str,
         active_habits: list[HabitPromptEntry],
         sleep_state: SleepStateSnapshot,
-        emotion_summary: str,
     ) -> PrefrontalPromptState:
-        goal_stack = build_goal_stack(identity, note_text)
+        goal_stack = build_goal_stack(identity)
         guidance: list[str] = []
         manifested_habits = [habit for habit in active_habits if habit.get("manifested")]
         if sleep_state["mode"] != "awake":
@@ -65,11 +63,9 @@ class PrefrontalManager:
             guidance.append(f"我的惯性倾向：{', '.join(habit['pattern'] for habit in active_habits[:2])}。")
         if manifested_habits:
             guidance.append(f"此刻有旧种子正在现行：{', '.join(habit['pattern'] for habit in manifested_habits[:2])}。")
-        if emotion_summary:
-            guidance.append(f"情绪底色是：{emotion_summary}")
         plan_mode = cycle_id % self._check_interval == 0 or bool(manifested_habits)
         if plan_mode:
-            guidance.append("这一轮前额叶检查已开启：先看是否偏题、是否重复、是否该抑制冲动。")
+            guidance.append("这一轮我需要多留意：是否偏题、是否重复、是否该压住冲动。")
         self._last_state = {
             "goal_stack": goal_stack,
             "guidance": guidance[:3],
@@ -146,13 +142,9 @@ class PrefrontalManager:
             self._redis = None
 
 
-def build_goal_stack(identity: dict[str, str], note_text: str) -> list[str]:
+def build_goal_stack(identity: dict[str, str]) -> list[str]:
     goals: list[str] = []
     for line in str(identity.get("core_goals") or "").splitlines():
-        goal = line.strip(" -")
-        if goal:
-            goals.append(goal)
-    for line in note_text.splitlines():
         goal = line.strip(" -")
         if goal:
             goals.append(goal)

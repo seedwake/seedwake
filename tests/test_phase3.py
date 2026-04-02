@@ -1244,7 +1244,6 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             [_make_thought(cycle_id=8, index=1, thought_type="思考", content="之前的念头")],
             30,
             prompt_context=PromptBuildContext(
-                goal_stack=["保持清醒。", "回应眼前的人。"],
                 manas_state={
                     "self_coherence_score": 0.78,
                     "consecutive_disruptions": 2,
@@ -1294,17 +1293,13 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             ),
         )
 
-        self.assertIn("## 当前目标栈", prompt)
-        self.assertIn("## 自我连续性", prompt)
-        self.assertIn("## 当前情绪基调", prompt)
-        self.assertIn("## 清醒与困意", prompt)
+        self.assertIn("## 此刻需要留意", prompt)
+        self.assertIn("## 此刻的自我感", prompt)
+        self.assertNotIn("## 当前情绪基调", prompt)  # curiosity 0.61 < alert threshold 0.65
+        self.assertNotIn("## 清醒与困意", prompt)  # awake mode doesn't render
         self.assertIn("## 相关习气/倾向性", prompt)
         self.assertIn("## 最近的反思", prompt)
-        self.assertLess(prompt.index("## 当前目标栈"), prompt.index("## 当前情绪基调"))
-        self.assertLess(prompt.index("## 当前目标栈"), prompt.index("## 自我连续性"))
-        self.assertLess(prompt.index("## 自我连续性"), prompt.index("## 当前情绪基调"))
-        self.assertLess(prompt.index("## 当前情绪基调"), prompt.index("## 清醒与困意"))
-        self.assertLess(prompt.index("## 清醒与困意"), prompt.index("## 相关习气/倾向性"))
+        self.assertLess(prompt.index("## 此刻需要留意"), prompt.index("## 此刻的自我感"))
         self.assertLess(prompt.index("## 相关习气/倾向性"), prompt.index("## 最近的反思"))
         self.assertLess(prompt.index("## 最近的反思"), prompt.index("## 浮上来的记忆"))
 

@@ -972,7 +972,7 @@ def _execute_cycle(
         note_text = runtime.action_manager.current_note()
         current_emotion = runtime.emotion.current()
         current_sleep_state = runtime.sleep.current()
-        current_goals = build_goal_stack(identity, note_text)
+        current_goals = build_goal_stack(identity)
         active_habits = runtime.habit_memory.activate_for_cycle(
             goals=current_goals,
             note_text=note_text,
@@ -984,10 +984,8 @@ def _execute_cycle(
         prefrontal_state = runtime.prefrontal.current_state(
             cycle_id,
             identity,
-            note_text,
             active_habits,
             current_sleep_state,
-            current_emotion["summary"],
         )
         manas_state = runtime.manas.current_prompt_state(cycle_id=cycle_id, identity=identity)
         recent_reflections = runtime.metacognition.recent_reflections()
@@ -1034,7 +1032,6 @@ def _execute_cycle(
             runtime.context_window,
             runtime.model_config,
             prompt_context=PromptBuildContext(
-                goal_stack=prefrontal_state["goal_stack"],
                 manas_state=manas_state,
                 emotion=current_emotion,
                 sleep_state=current_sleep_state,
