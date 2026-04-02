@@ -32,6 +32,7 @@ CONVERSATION_SUMMARY_KEY = "seedwake:conversation_summaries"
 RECENT_ACTION_ECHO_KEY = "seedwake:recent_action_echoes"
 RECENT_ACTION_ECHO_LIMIT = 100
 RECENT_ACTION_ECHO_RETAIN_CYCLES = 3
+RECENT_ACTION_ECHO_RETAIN_SECONDS = 600
 RECENT_CONVERSATION_RAW_LIMIT = 10
 RECENT_CONVERSATION_WINDOW_HOURS = 24
 RECENT_CONVERSATION_SUMMARY_VERSION = 2
@@ -955,10 +956,26 @@ def _recent_action_echo_record_from_raw(raw_value: str) -> RecentActionEchoRecor
 
 def _recent_action_echo_is_visible(record: RecentActionEchoRecord, current_cycle_id: int) -> bool:
     recorded_cycle_id = record["cycle_id"]
-    return (
+    cycle_visible = (
         recorded_cycle_id < current_cycle_id
         and current_cycle_id - recorded_cycle_id <= RECENT_ACTION_ECHO_RETAIN_CYCLES
     )
+    if cycle_visible:
+        return True
+    recorded_at = _recent_action_echo_timestamp(record)
+    if recorded_at is None:
+        return False
+    return datetime.now(timezone.utc) - recorded_at <= timedelta(seconds=RECENT_ACTION_ECHO_RETAIN_SECONDS)
+
+
+def _recent_action_echo_timestamp(record: RecentActionEchoRecord) -> datetime | None:
+    raw_timestamp = record["stimulus"].get("timestamp")
+    if not isinstance(raw_timestamp, str) or not raw_timestamp.strip():
+        return None
+    try:
+        return datetime.fromisoformat(raw_timestamp)
+    except ValueError:
+        return None
 
 
 def _should_retain_recent_action_echo(stimulus: Stimulus) -> bool:

@@ -4,6 +4,7 @@ Usage: python -m core.main [--config config.yml] [--log data/test.txt]
 """
 
 import argparse
+from collections.abc import Callable
 import json
 import logging
 import os
@@ -1007,14 +1008,11 @@ def _execute_cycle(
             runtime.embedding_model,
             current_entity_filter=current_entity_filter,
         )
-        current_impressions = _retrieve_current_impressions(runtime.ltm, current_entity_filter)
-        if current_impressions and ltm_context:
-            ltm_context = [memory for memory in ltm_context if memory not in current_impressions] or None
         logger.info(
             "cycle C%s association retrieval finished in %.1f ms (count=%d)",
             cycle_id,
             elapsed_ms(ltm_started_at),
-            len(ltm_context or []) + len(current_impressions or []),
+            len(ltm_context or []),
         )
         conversations_started_at = time.perf_counter()
         recent_conversations = _load_recent_conversations(runtime, cycle_id, stimuli, prompt_log_file)
@@ -1024,14 +1022,22 @@ def _execute_cycle(
             elapsed_ms(conversations_started_at),
             len(recent_conversations),
         )
-        recent_action_echoes = load_recent_action_echoes(
-            _as_conversation_redis(runtime.stm.redis_client),
-            current_cycle_id=cycle_id,
-            exclude_action_ids=_action_echo_action_ids(stimuli),
-        )
+        impression_sources = _conversation_entity_sources(stimuli, recent_conversations)
+        current_impressions = _retrieve_current_impressions(runtime.ltm, impression_sources)
+        if current_impressions and ltm_context:
+            ltm_context = [memory for memory in ltm_context if memory not in current_impressions] or None
         pending_prompt_echoes = runtime.action_manager.pop_prompt_echoes()
         if pending_prompt_echoes:
             stimuli = [*stimuli, *pending_prompt_echoes]
+        running_actions, recent_action_echoes = _resolve_prompt_action_state(
+            runtime.action_manager,
+            pending_prompt_echoes,
+            lambda: load_recent_action_echoes(
+                _as_conversation_redis(runtime.stm.redis_client),
+                current_cycle_id=cycle_id,
+                exclude_action_ids=_action_echo_action_ids(stimuli),
+            ),
+        )
         thought_cycle_started_at = time.perf_counter()
         thoughts = run_cycle(
             runtime.primary_client,
@@ -1456,26 +1462,35 @@ def _recent_ltm_fallback(
 
 def _retrieve_current_impressions(
     ltm: LongTermMemory,
-    current_entity_filter: str | None,
+    entity_sources: list[str],
 ) -> list[str] | None:
-    if not ltm.available or not current_entity_filter:
+    if not ltm.available or not entity_sources:
         return None
-    try:
-        entries = ltm.recent_by_time(
-            top_k=1,
-            entity_filter=current_entity_filter,
-            memory_types=["impression"],
-        )
-    except LTM_EXCEPTIONS:
-        ltm.disconnect()
-        return None
-    if not entries:
-        return None
-    clean_content = _sanitize_ltm_content(entries[0].content)
-    if not clean_content:
-        return None
-    ltm.mark_accessed([entries[0].id])
-    return [clean_content]
+    contents: list[str] = []
+    accessed_ids: list[int] = []
+    seen: set[str] = set()
+    for source in entity_sources:
+        if not source or source in seen:
+            continue
+        seen.add(source)
+        try:
+            entries = ltm.recent_by_time(
+                top_k=1,
+                entity_filter=source,
+                memory_types=["impression"],
+            )
+        except LTM_EXCEPTIONS:
+            ltm.disconnect()
+            return contents or None
+        if not entries:
+            continue
+        clean_content = _sanitize_ltm_content(entries[0].content)
+        if clean_content:
+            contents.append(clean_content)
+            accessed_ids.append(entries[0].id)
+    if accessed_ids:
+        ltm.mark_accessed(accessed_ids)
+    return contents or None
 
 
 def _current_entity_filter(stimuli: list[Stimulus]) -> str | None:
@@ -1487,6 +1502,26 @@ def _current_entity_filter(stimuli: list[Stimulus]) -> str | None:
     if len(sources) != 1:
         return None
     return next(iter(sources))
+
+
+def _conversation_entity_sources(
+    stimuli: list[Stimulus],
+    recent_conversations: list[RecentConversationPrompt],
+) -> list[str]:
+    """Collect all conversation sources from current stimuli and recent conversation history."""
+    seen: set[str] = set()
+    sources: list[str] = []
+    # Current conversation first (higher priority)
+    for stimulus in stimuli:
+        if stimulus.type == "conversation" and stimulus.source.strip() and stimulus.source not in seen:
+            seen.add(stimulus.source)
+            sources.append(stimulus.source)
+    for conversation in recent_conversations:
+        source = str(conversation.get("source") or "").strip()
+        if source and source not in seen:
+            seen.add(source)
+            sources.append(source)
+    return sources
 
 
 def _store_to_ltm(
@@ -1585,6 +1620,28 @@ def _action_echo_action_ids(stimuli: list[Stimulus]) -> set[str]:
             if source_action_id:
                 action_ids.add(source_action_id)
     return action_ids
+
+
+def _filter_prompt_running_actions(
+    actions: list[ActionRecord],
+    recent_action_echoes: list[Stimulus],
+    prompt_echoes: list[Stimulus],
+) -> list[ActionRecord]:
+    echoed_action_ids = _action_echo_action_ids([*recent_action_echoes, *prompt_echoes])
+    if not echoed_action_ids:
+        return actions
+    return [action for action in actions if action.action_id not in echoed_action_ids]
+
+
+def _resolve_prompt_action_state(
+    action_manager: ActionManager,
+    prompt_echoes: list[Stimulus],
+    recent_action_echo_loader: Callable[[], list[Stimulus]],
+) -> tuple[list[ActionRecord], list[Stimulus]]:
+    running_actions = action_manager.running_actions()
+    recent_action_echoes = recent_action_echo_loader()
+    running_actions = _filter_prompt_running_actions(running_actions, recent_action_echoes, prompt_echoes)
+    return running_actions, recent_action_echoes
 
 
 def _failed_action_echo_count(stimuli: list[Stimulus]) -> int:

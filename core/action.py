@@ -24,6 +24,7 @@ from core.stimulus import (
     StimulusQueue,
     append_action_result_history,
     append_conversation_history,
+    remember_recent_action_echoes,
 )
 from core.thought_parser import Thought, thought_action_requests
 from core.types import (
@@ -135,6 +136,7 @@ TELEGRAM_SEND_EXCEPTIONS = (
 )
 logger = logging.getLogger(__name__)
 ACTION_MARKER_PATTERN = re.compile(r"\s*\{action:[^}]+\}", re.DOTALL)
+THOUGHT_CYCLE_ID_PATTERN = re.compile(r"^C(?P<cycle_id>\d+)-\d+$")
 type ActionUpdateValue = JsonValue | datetime | ActionResultEnvelope | None
 
 
@@ -364,9 +366,15 @@ class ActionManager:
             )
 
     def running_actions(self) -> list[ActionRecord]:
+        """Return snapshot copies of pending/running actions.
+
+        Uses dataclasses.replace to freeze status at capture time,
+        preventing race conditions where an action completes between
+        capture and prompt rendering.
+        """
         with self._lock:
             actions = [
-                action
+                replace(action)
                 for action in self._actions.values()
                 if action.status in {"pending", "running"}
             ]
@@ -607,6 +615,7 @@ class ActionManager:
         stimulus_payload = _build_result_stimulus(action, status, result)
         history_stimulus = _stimulus_from_payload(action.action_id, stimulus_payload)
         append_action_result_history(self._redis, history_stimulus)  # type: ignore[arg-type]
+        self._remember_recent_action_echo(action, history_stimulus)
         if not should_emit_stimulus:
             return
         stimulus = stimulus_payload
@@ -805,6 +814,22 @@ class ActionManager:
             })
         except Exception as exc:
             logger.exception("unexpected native message event failure for %s: %s", action.action_id, exc)
+
+    def _remember_recent_action_echo(self, action: ActionRecord, stimulus: Stimulus) -> None:
+        cycle_id = _thought_cycle_id(action.source_thought_id)
+        if cycle_id is None:
+            return
+        try:
+            remember_recent_action_echoes(
+                self._redis,  # type: ignore[arg-type]
+                cycle_id,
+                [stimulus],
+            )
+        except ACTION_REDIS_EXCEPTIONS as exc:
+            logger.warning("failed to persist recent action echo for %s: %s", action.action_id, exc)
+            self._redis = None
+        except Exception as exc:
+            logger.exception("unexpected recent action echo failure for %s: %s", action.action_id, exc)
 
     def _snapshot_futures(self) -> list[Future]:
         with self._lock:
@@ -3370,6 +3395,13 @@ def _action_result_to_json_object(result: ActionResultEnvelope) -> JsonObject:
     for key, value in result.items():
         payload[key] = coerce_json_value(value)
     return payload
+
+
+def _thought_cycle_id(thought_id: str) -> int | None:
+    match = THOUGHT_CYCLE_ID_PATTERN.match(thought_id.strip())
+    if not match:
+        return None
+    return int(match.group("cycle_id"))
 
 
 def _coerce_json_object(value: JsonValue) -> JsonObject:

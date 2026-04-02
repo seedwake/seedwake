@@ -476,7 +476,7 @@ def _format_long_term(memories: list[str]) -> str:
 
 def _format_impressions(impressions: list[str]) -> str:
     lines = [f"- {_compact_prompt_text(impression)}" for impression in impressions]
-    return _render_section("当前人物印象", lines)
+    return _render_section("我对他们的印象", lines)
 
 
 def _format_note(note_text: str) -> str:
@@ -635,7 +635,7 @@ def _stagnation_sources(
     if recent_action_echoes or action_echoes:
         sources.append("行动有了回音")
     if pending_actions:
-        sources.append("正在受理中的行动")
+        sources.append("我已发起、在等执行的事")
     if running_actions:
         sources.append("我已经发起、正在等回音的事")
     if passive:
@@ -756,7 +756,7 @@ def _format_pending_actions(actions: list[ActionRecord], conversation_labels: di
         lines.append(
             f"- [{action.type}/{action.status}] {_pending_action_summary(action, conversation_labels)}"
         )
-    return _render_section("正在受理中的行动", lines)
+    return _render_section("我已发起、在等执行的事", lines)
 
 
 def _visible_pending_actions(actions: list[ActionRecord] | None) -> list[ActionRecord]:

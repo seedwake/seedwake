@@ -2,7 +2,7 @@ import json
 import io
 import unittest
 from concurrent.futures import wait
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from email.message import Message
 from threading import Barrier
 from typing import cast
@@ -37,6 +37,8 @@ from core.emotion import _llm_fusion_weight
 # noinspection PyProtectedMember
 from core.main import (
     _print_stimuli,
+    _filter_prompt_running_actions,
+    _resolve_prompt_action_state,
     RECENT_CONVERSATION_SUMMARY_BATCH_MAX_CHARS,
     _recent_conversation_summary_batches,
     _sanitize_cycle_trigger_refs,
@@ -1057,7 +1059,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("## 浮上来的记忆", prompt)
         self.assertIn("## 我的笔记", prompt)
         self.assertIn("## 好像有一阵子没有……", prompt)
-        self.assertIn("## 正在受理中的行动", prompt)
+        self.assertIn("## 我已发起、在等执行的事", prompt)
         self.assertIn("## 我已经发起、正在等回音的事", prompt)
         self.assertIn("## 此刻我注意到", prompt)
         self.assertIn("## 行动有了回音", prompt)
@@ -1068,8 +1070,8 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertLess(prompt.index("## 好像有一阵子没有……"), prompt.index("## 最近的念头"))
         self.assertLess(prompt.index("## 最近的念头"), prompt.index("## 浮上来的记忆"))
         self.assertLess(prompt.index("## 浮上来的记忆"), prompt.index("## 行动有了回音"))
-        self.assertLess(prompt.index("## 行动有了回音"), prompt.index("## 正在受理中的行动"))
-        self.assertLess(prompt.index("## 正在受理中的行动"), prompt.index("## 我已经发起、正在等回音的事"))
+        self.assertLess(prompt.index("## 行动有了回音"), prompt.index("## 我已发起、在等执行的事"))
+        self.assertLess(prompt.index("## 我已发起、在等执行的事"), prompt.index("## 我已经发起、正在等回音的事"))
         self.assertLess(prompt.index("## 我已经发起、正在等回音的事"), prompt.index("## 此刻我注意到"))
         self.assertLess(prompt.index("## 此刻我注意到"), prompt.index("## 最近的对话"))
         self.assertLess(prompt.index("## 最近的对话"), prompt.index("## 有人对我说话了"))
@@ -1315,9 +1317,9 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             ),
         )
 
-        self.assertIn("## 当前人物印象", prompt)
+        self.assertIn("## 我对他们的印象", prompt)
         self.assertIn("联系方式: telegram:1", prompt)
-        self.assertLess(prompt.index("## 当前人物印象"), prompt.index("## 接下来的念头"))
+        self.assertLess(prompt.index("## 我对他们的印象"), prompt.index("## 接下来的念头"))
 
     def test_prompt_warns_about_stagnation_without_forcing_full_topic_switch_during_conversation(self) -> None:
         repeated_thoughts = [
@@ -2286,6 +2288,118 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertEqual([stimulus.action_id for stimulus in recent], ["act_send"])
         self.assertEqual(recent[0].metadata["action_type"], "send_message")
 
+    def test_recent_action_echo_cache_keeps_fresh_completion_from_older_cycle(self) -> None:
+        redis_client = ListRedisStub()
+        send_echo = Stimulus(
+            stimulus_id="stim_send",
+            type="action_result",
+            priority=2,
+            source="action:act_send",
+            content='已成功发送给 telegram:1：“我在。”',
+            timestamp=datetime.now(timezone.utc),
+            action_id="act_send",
+            metadata={
+                "origin": "action",
+                "action_type": "send_message",
+                "status": "succeeded",
+            },
+        )
+        remember_recent_action_echoes(_as_conversation_redis(redis_client), 1, [send_echo])
+
+        recent = load_recent_action_echoes(
+            _as_conversation_redis(redis_client),
+            current_cycle_id=10,
+            exclude_action_ids=set(),
+        )
+
+        self.assertEqual([stimulus.action_id for stimulus in recent], ["act_send"])
+
+    def test_recent_action_echo_cache_hides_stale_completion_from_older_cycle(self) -> None:
+        redis_client = ListRedisStub()
+        send_echo = Stimulus(
+            stimulus_id="stim_send",
+            type="action_result",
+            priority=2,
+            source="action:act_send",
+            content='已成功发送给 telegram:1：“我在。”',
+            timestamp=datetime.now(timezone.utc) - timedelta(seconds=601),
+            action_id="act_send",
+            metadata={
+                "origin": "action",
+                "action_type": "send_message",
+                "status": "succeeded",
+            },
+        )
+        remember_recent_action_echoes(_as_conversation_redis(redis_client), 1, [send_echo])
+
+        recent = load_recent_action_echoes(
+            _as_conversation_redis(redis_client),
+            current_cycle_id=10,
+            exclude_action_ids=set(),
+        )
+
+        self.assertEqual(recent, [])
+
+    def test_filter_prompt_running_actions_excludes_echoed_action_ids(self) -> None:
+        running_action = MagicMock()
+        running_action.action_id = "act_send"
+        untouched_action = MagicMock()
+        untouched_action.action_id = "act_other"
+        recent_echo = Stimulus(
+            stimulus_id="stim_send",
+            type="action_result",
+            priority=2,
+            source="action:act_send",
+            content='已成功发送给 telegram:1：“我在。”',
+            action_id="act_send",
+            metadata={"origin": "action", "action_type": "send_message", "status": "succeeded"},
+        )
+
+        filtered = _filter_prompt_running_actions(
+            [running_action, untouched_action],
+            [recent_echo],
+            [],
+        )
+
+        self.assertEqual([action.action_id for action in filtered], ["act_other"])
+
+    def test_resolve_prompt_action_state_snapshots_waiting_before_loading_recent_echoes(self) -> None:
+        running_action = MagicMock()
+        running_action.action_id = "act_send"
+        recent_echo = Stimulus(
+            stimulus_id="stim_send",
+            type="action_result",
+            priority=2,
+            source="action:act_send",
+            content='已成功发送给 telegram:1：“我在。”',
+            action_id="act_send",
+            metadata={"origin": "action", "action_type": "send_message", "status": "succeeded"},
+        )
+
+        class _FakeActionManager:
+            def __init__(self) -> None:
+                self.snapshot_taken = False
+
+            def running_actions(self) -> list[MagicMock]:
+                self.snapshot_taken = True
+                return [running_action]
+
+        fake_manager = _FakeActionManager()
+
+        def _load_recent_action_echoes() -> list[Stimulus]:
+            if not fake_manager.snapshot_taken:
+                return []
+            return [recent_echo]
+
+        filtered_actions, recent_action_echoes = _resolve_prompt_action_state(
+            fake_manager,  # type: ignore[arg-type]
+            [],
+            _load_recent_action_echoes,
+        )
+
+        self.assertEqual(recent_action_echoes, [recent_echo])
+        self.assertEqual(filtered_actions, [])
+
     def test_load_recent_conversations_skips_empty_recent_block_for_current_only_source(self) -> None:
         redis_client = ListRedisStub()
         append_conversation_history(
@@ -2593,7 +2707,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             prompt_context=PromptBuildContext(running_actions=[action]),
         )
 
-        self.assertIn("## 正在受理中的行动", prompt)
+        self.assertIn("## 我已发起、在等执行的事", prompt)
         self.assertNotIn("## 我已经发起、正在等回音的事", prompt)
         self.assertIn('[send_message/pending] 已受理，等待执行：给 telegram:1 发送消息：“我在。”', prompt)
         self.assertNotIn("你怎么不说话", prompt)
@@ -4207,6 +4321,36 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(created[0].status, "succeeded")
         self.assertEqual(events[-1][0], "reply")
         self.assertNotIn(CONVERSATION_HISTORY_KEY, redis_stub.lists)
+
+    def test_native_send_message_completion_populates_recent_action_echo_cache(self) -> None:
+        redis_stub = ListRedisStub()
+        queue = StimulusQueue(redis_client=None)
+        manager = _build_action_manager(
+            queue,
+            _Planner(ActionPlan("send_message", "native", "发送消息", 30, "测试", message_text="我在。")),
+            redis_client=redis_stub,
+            auto_execute=["send_message"],
+        )
+
+        created = _submit_and_shutdown_with_stimuli(
+            manager,
+            [
+                _make_thought(
+                    action_request={"type": "send_message", "params": 'message:"我在。"'}
+                )
+            ],
+            stimuli=[_conversation_stimulus()],
+        )
+
+        recent = load_recent_action_echoes(
+            _as_conversation_redis(redis_stub),
+            current_cycle_id=2,
+            exclude_action_ids=set(),
+        )
+
+        self.assertEqual(created[0].status, "succeeded")
+        self.assertEqual([stimulus.action_id for stimulus in recent], [created[0].action_id])
+        self.assertEqual(recent[0].metadata["action_type"], "send_message")
 
     def test_native_send_message_dedup_allows_same_text_with_different_reply_to(self) -> None:
         queue = StimulusQueue(redis_client=None)

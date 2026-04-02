@@ -785,7 +785,7 @@ def _summarize_impression(
     message = response.get("message")
     if not isinstance(message, dict):
         return ""
-    summary = _trim_generated_text(message.get("content"), 180)
+    summary = _trim_generated_text(message.get("content"), 300)
     return _ensure_impression_contact(summary, contact_hint)
 
 
@@ -816,7 +816,7 @@ def _ensure_impression_contact(summary: str, contact_hint: str) -> str:
         return compact
     if contact_hint in compact:
         return compact
-    return _trim_generated_text(f"联系方式: {contact_hint}。{compact}", 180)
+    return _trim_generated_text(f"联系方式: {contact_hint}。{compact}", 300)
 
 
 def _impression_entry_line(entry: ConversationEntry, subject_name: str) -> str:
