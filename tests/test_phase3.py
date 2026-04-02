@@ -1100,6 +1100,29 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("[搜索结果] 搜索完成 1. 旧结果", prompt)
         self.assertIn("[外界消息] 已查看 RSS，没有新的新闻条目", prompt)
 
+    def test_action_echo_section_shows_empty_current_group_when_only_recent_exists(self) -> None:
+        recent_echo = Stimulus(
+            stimulus_id="stim_recent_search",
+            type="action_result",
+            priority=2,
+            source="action:act_old",
+            content="搜索完成\n1. 旧结果",
+            action_id="act_old",
+            metadata={"origin": "action", "action_type": "search", "status": "succeeded"},
+        )
+
+        prompt = build_prompt(
+            3,
+            {"self_description": "我是 Seedwake。"},
+            [],
+            30,
+            recent_action_echoes=[recent_echo],
+        )
+
+        self.assertIn("最近的行动回音：", prompt)
+        self.assertIn("刚刚收到的行动回音：", prompt)
+        self.assertIn("- 无", prompt)
+
     def test_load_recent_conversations_builds_summary_and_keeps_recent_raw_lines(self) -> None:
         redis_client = ListRedisStub()
         for index in range(12):

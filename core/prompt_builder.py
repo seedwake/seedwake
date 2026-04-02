@@ -274,11 +274,14 @@ def _format_action_echoes(
     if recent_stimuli:
         lines.append("最近的行动回音：")
         lines.extend(_action_echo_lines(recent_stimuli, conversation_labels))
-    if current_stimuli:
+    if recent_stimuli or current_stimuli:
         if lines:
             lines.append("")
         lines.append("刚刚收到的行动回音：")
-        lines.extend(_action_echo_lines(current_stimuli, conversation_labels))
+        if current_stimuli:
+            lines.extend(_action_echo_lines(current_stimuli, conversation_labels))
+        else:
+            lines.append("- 无")
     return _render_section("行动有了回音", lines)
 
 
