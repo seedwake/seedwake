@@ -4,8 +4,8 @@ Handles semantic vector retrieval and memory lifecycle.
 Gracefully degrades when PostgreSQL is unavailable.
 """
 
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import logging
 import re
 import time
@@ -13,7 +13,7 @@ import time
 import psycopg
 from psycopg import sql
 
-from core.types import elapsed_ms
+from core.types import JsonObject, coerce_json_object, elapsed_ms
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +27,27 @@ class LongTermEntry:
     importance: float
     created_at: datetime
     similarity: float = 0.0
+    entity_tags: list[str] = field(default_factory=list)
+    emotion_context: JsonObject | None = None
+    access_count: int = 0
+    last_accessed: datetime | None = None
+    weighted_score: float = 0.0
 
 
 class LongTermMemory:
     """Long-term memory backed by PostgreSQL + pgvector."""
 
-    def __init__(self, pg_conn: psycopg.Connection | None, retrieval_top_k: int = 5) -> None:
+    def __init__(
+        self,
+        pg_conn: psycopg.Connection | None,
+        retrieval_top_k: int = 5,
+        time_decay_factor: float = 0.95,
+        importance_threshold: float = 0.1,
+    ) -> None:
         self._conn = pg_conn
         self._top_k = retrieval_top_k
+        self._time_decay_factor = time_decay_factor
+        self._importance_threshold = importance_threshold
 
     @property
     def available(self) -> bool:
@@ -43,6 +56,14 @@ class LongTermMemory:
     @property
     def retrieval_top_k(self) -> int:
         return self._top_k
+
+    @property
+    def time_decay_factor(self) -> float:
+        return self._time_decay_factor
+
+    @property
+    def importance_threshold(self) -> float:
+        return self._importance_threshold
 
     def store(
         self,
@@ -112,9 +133,6 @@ class LongTermMemory:
                 len(normalized_content),
             )
 
-    # NOTE: SPECS §4.2 requires ranking by similarity × importance × time_decay.
-    # Current implementation uses pure vector distance. Weighted sorting deferred
-    # until Phase 4 (sleep mechanism) makes importance/time_decay meaningful.
     def search(
         self,
         query_embedding: list[float],
@@ -142,7 +160,8 @@ class LongTermMemory:
         query = sql.SQL("""
             SELECT id, content, memory_type, source_cycle_id,
                    importance, created_at,
-                   1 - (embedding <=> %s::vector) AS similarity
+                   1 - (embedding <=> %s::vector) AS similarity,
+                   entity_tags, emotion_context, access_count, last_accessed
             FROM long_term_memory
             WHERE {filters}
             ORDER BY embedding <=> %s::vector
@@ -171,14 +190,31 @@ class LongTermMemory:
                 len(exclude_cycle_ids or []),
             )
 
-        return [
+        entries = [
             LongTermEntry(
-                id=r[0], content=r[1], memory_type=r[2],
-                source_cycle_id=r[3], importance=r[4],
-                created_at=r[5], similarity=r[6],
+                id=r[0],
+                content=r[1],
+                memory_type=r[2],
+                source_cycle_id=r[3],
+                importance=r[4],
+                created_at=r[5],
+                similarity=r[6],
+                entity_tags=list(r[7] or []),
+                emotion_context=coerce_json_object(r[8]),
+                access_count=int(r[9] or 0),
+                last_accessed=r[10],
             )
             for r in rows
         ]
+        for entry in entries:
+            entry.weighted_score = _weighted_memory_score(
+                entry.similarity,
+                entry.importance,
+                entry.created_at,
+                self._time_decay_factor,
+            )
+        entries.sort(key=lambda entry: entry.weighted_score, reverse=True)
+        return entries
 
     def mark_accessed(self, memory_ids: list[int]) -> None:
         """Bump access_count and last_accessed for retrieved memories."""
@@ -259,6 +295,113 @@ class LongTermMemory:
             pass
         self._conn = None
 
+    def cool_inactive_memories(self, cooling_rate: float = 0.03) -> int:
+        if not self.available:
+            return 0
+        conn = self._conn
+        if conn is None:
+            return 0
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE long_term_memory
+                    SET importance = GREATEST(0.0, importance - %s),
+                        updated_at = NOW()
+                    WHERE is_active = TRUE
+                      AND COALESCE(last_accessed, created_at) < NOW() - INTERVAL '7 days'
+                    """,
+                    (cooling_rate,),
+                )
+                affected = cur.rowcount
+            conn.commit()
+            return int(affected or 0)
+        except psycopg.Error:
+            conn.rollback()
+            raise
+
+    def merge_exact_duplicates(self) -> int:
+        if not self.available:
+            return 0
+        conn = self._conn
+        if conn is None:
+            return 0
+        try:
+            merged = 0
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT content, ARRAY_AGG(id ORDER BY id) AS ids
+                    FROM long_term_memory
+                    WHERE is_active = TRUE
+                    GROUP BY content
+                    HAVING COUNT(*) > 1
+                    """
+                )
+                rows = cur.fetchall()
+                for content, ids in rows:
+                    if not isinstance(ids, list) or len(ids) < 2:
+                        continue
+                    keep_id = int(ids[0])
+                    duplicate_ids = [int(item) for item in ids[1:]]
+                    cur.execute(
+                        """
+                        UPDATE long_term_memory
+                        SET importance = LEAST(
+                                1.0,
+                                importance + COALESCE(
+                                    (SELECT SUM(importance) FROM long_term_memory WHERE id = ANY(%s)),
+                                    0.0
+                                ) * 0.5
+                            ),
+                            updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (duplicate_ids, keep_id),
+                    )
+                    cur.execute(
+                        """
+                        UPDATE long_term_memory
+                        SET is_active = FALSE,
+                            updated_at = NOW()
+                        WHERE id = ANY(%s)
+                        """,
+                        (duplicate_ids,),
+                    )
+                    merged += len(duplicate_ids)
+                    _ = content
+            conn.commit()
+            return merged
+        except psycopg.Error:
+            conn.rollback()
+            raise
+
+    def prune_low_importance(self) -> int:
+        if not self.available:
+            return 0
+        conn = self._conn
+        if conn is None:
+            return 0
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE long_term_memory
+                    SET is_active = FALSE,
+                        updated_at = NOW()
+                    WHERE is_active = TRUE
+                      AND importance < %s
+                      AND created_at < NOW() - INTERVAL '14 days'
+                    """,
+                    (self._importance_threshold,),
+                )
+                affected = cur.rowcount
+            conn.commit()
+            return int(affected or 0)
+        except psycopg.Error:
+            conn.rollback()
+            raise
+
 
 def _format_vector(vec: list[float]) -> str:
     """Format a Python list as a pgvector literal '[0.1,0.2,...]'."""
@@ -292,6 +435,18 @@ def _row_first_int(row: tuple[int | None, ...] | list[int | None] | None) -> int
         return None
     value = row[0]
     return value if isinstance(value, int) else None
+
+
+def _weighted_memory_score(
+    similarity: float,
+    importance: float,
+    created_at: datetime,
+    time_decay_factor: float,
+) -> float:
+    created = created_at.astimezone(timezone.utc) if created_at.tzinfo is not None else created_at.replace(tzinfo=timezone.utc)
+    age_days = max(0.0, (datetime.now(timezone.utc) - created).total_seconds() / 86400.0)
+    time_decay = time_decay_factor ** age_days
+    return round(max(0.0, similarity) * max(0.0, importance) * time_decay, 6)
 
 
 TELEGRAM_TARGET_PATTERNS = (

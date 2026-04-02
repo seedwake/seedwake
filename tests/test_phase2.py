@@ -13,6 +13,7 @@ import redis as redis_lib
 from core.main import (
     EngineRuntime,
     _execute_cycle,
+    _post_cycle_phase4,
     _run_engine_loop,
     _maybe_reconnect_pg,
     _maybe_reconnect_redis,
@@ -293,7 +294,7 @@ class LongTermMemoryPromptNormalizationTests(unittest.TestCase):
         stm = _build_association_stm()
 
         with patch("core.main.embed_text", return_value=[0.1, 0.2]):
-            memories = _retrieve_associations(ltm, MagicMock(), stm, "embed-model")
+            memories = _retrieve_associations(ltm, MagicMock(), stm.get_context(), "embed-model")
 
         self.assertEqual(memories, ["读过一段材料", "另一段记忆"])
         ltm.search.assert_called_once_with([0.1, 0.2], top_k=15, exclude_cycle_ids=[1])
@@ -316,7 +317,7 @@ class LongTermMemoryPromptNormalizationTests(unittest.TestCase):
         ]
         stm = _build_association_stm()
         with patch("core.main.embed_text", return_value=[0.1, 0.2]):
-            memories = _retrieve_associations(ltm, MagicMock(), stm, "embed-model")
+            memories = _retrieve_associations(ltm, MagicMock(), stm.get_context(), "embed-model")
         return memories, ltm
 
     def test_retrieve_associations_overfetches_to_preserve_distinct_memories(self) -> None:
@@ -352,7 +353,7 @@ class LongTermMemoryPromptNormalizationTests(unittest.TestCase):
         ])
 
         with patch("core.main.embed_text", return_value=[0.1, 0.2]):
-            _retrieve_associations(ltm, MagicMock(), stm, "embed-model")
+            _retrieve_associations(ltm, MagicMock(), stm.get_context(), "embed-model")
 
         ltm.search.assert_called_once_with([0.1, 0.2], top_k=6, exclude_cycle_ids=[4, 5])
 
@@ -425,22 +426,57 @@ class CycleTimingLogTests(unittest.TestCase):
         runtime = SimpleNamespace(
             stm=MagicMock(),
             ltm=MagicMock(),
+            habit_memory=MagicMock(),
             embedding_client=MagicMock(),
+            auxiliary_client=MagicMock(),
             embedding_model="embed-model",
             primary_client=MagicMock(),
             context_window=30,
             model_config={"name": "test-model"},
+            auxiliary_model_config={"name": "aux-model"},
             action_manager=MagicMock(),
+            emotion=MagicMock(),
+            sleep=MagicMock(),
+            prefrontal=MagicMock(),
+            metacognition=MagicMock(),
         )
         runtime.stm.get_context.return_value = []
         runtime.stm.redis_client = None
         runtime.ltm.available = False
+        runtime.action_manager.current_note.return_value = ""
+        runtime.action_manager.pop_prompt_echoes.return_value = []
+        runtime.action_manager.submit_from_thoughts.return_value = []
+        runtime.habit_memory.activate_for_cycle.return_value = []
+        runtime.emotion.current.return_value = {
+            "dimensions": {"curiosity": 0.0},
+            "dominant": "curiosity",
+            "summary": "情绪平稳，波动很轻。",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        }
+        runtime.emotion.apply_cycle.return_value = runtime.emotion.current.return_value
+        runtime.sleep.current.return_value = {
+            "energy": 100.0,
+            "mode": "awake",
+            "last_light_sleep_cycle": 0,
+            "last_deep_sleep_cycle": 0,
+            "last_deep_sleep_at": "",
+            "summary": "精力 100.0/100，当前仍清醒。",
+        }
+        runtime.prefrontal.current_state.return_value = {
+            "goal_stack": [],
+            "guidance": [],
+            "inhibition_notes": [],
+            "plan_mode": False,
+        }
+        runtime.prefrontal.review_thoughts.return_value = ([], [])
+        runtime.metacognition.recent_reflections.return_value = []
+        runtime.metacognition.should_reflect.return_value = False
 
         with self.assertLogs("core.main", level="INFO") as logs:
             with self.assertRaises(RuntimeError):
-                _execute_cycle(
-                    _as_runtime(runtime),
-                    cycle_id=42,
+                    _execute_cycle(
+                        _as_runtime(runtime),
+                        cycle_id=42,
                     identity={"self_description": "我"},
                     stimuli=[],
                     running_actions=[],
@@ -469,16 +505,50 @@ class CycleTimingLogTests(unittest.TestCase):
         runtime = SimpleNamespace(
             stm=MagicMock(),
             ltm=MagicMock(),
+            habit_memory=MagicMock(),
             embedding_client=MagicMock(),
+            auxiliary_client=MagicMock(),
             embedding_model="embed-model",
             primary_client=MagicMock(),
             context_window=30,
             model_config={"name": "test-model"},
+            auxiliary_model_config={"name": "aux-model"},
             action_manager=action_manager,
+            emotion=MagicMock(),
+            sleep=MagicMock(),
+            prefrontal=MagicMock(),
+            metacognition=MagicMock(),
         )
         runtime.stm.get_context.return_value = []
         runtime.stm.redis_client = None
         runtime.ltm.available = False
+        runtime.action_manager.current_note.return_value = ""
+        runtime.action_manager.submit_from_thoughts.return_value = []
+        runtime.habit_memory.activate_for_cycle.return_value = []
+        runtime.emotion.current.return_value = {
+            "dimensions": {"curiosity": 0.0},
+            "dominant": "curiosity",
+            "summary": "情绪平稳，波动很轻。",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        }
+        runtime.emotion.apply_cycle.return_value = runtime.emotion.current.return_value
+        runtime.sleep.current.return_value = {
+            "energy": 100.0,
+            "mode": "awake",
+            "last_light_sleep_cycle": 0,
+            "last_deep_sleep_cycle": 0,
+            "last_deep_sleep_at": "",
+            "summary": "精力 100.0/100，当前仍清醒。",
+        }
+        runtime.prefrontal.current_state.return_value = {
+            "goal_stack": [],
+            "guidance": [],
+            "inhibition_notes": [],
+            "plan_mode": False,
+        }
+        runtime.prefrontal.review_thoughts.return_value = ([], [])
+        runtime.metacognition.recent_reflections.return_value = []
+        runtime.metacognition.should_reflect.return_value = False
 
         with self.assertRaises(RuntimeError):
             _execute_cycle(
@@ -492,6 +562,69 @@ class CycleTimingLogTests(unittest.TestCase):
             )
 
         action_manager.requeue_prompt_echoes.assert_called_once_with([pending_echo])
+
+
+class Phase4RuntimeTests(unittest.TestCase):
+    @patch("core.main.embed_text", return_value=[0.1, 0.2])
+    def test_retrieve_associations_prefers_highest_attention_anchor(self, mock_embed) -> None:
+        stm = ShortTermMemory(redis_client=None, context_window=2)
+        low = _make_thought(1, 1, "较弱的念头")
+        low.attention_weight = 0.1
+        high = _make_thought(1, 2, "更牵引我的念头")
+        high.attention_weight = 0.9
+        stm.append([low, high])
+        ltm = MagicMock()
+        ltm.available = True
+        ltm.retrieval_top_k = 5
+        ltm.search.return_value = []
+
+        _retrieve_associations(ltm, MagicMock(), stm.get_context(), "embed-model")
+
+        mock_embed.assert_called_once()
+        self.assertEqual(mock_embed.call_args.args[1], "更牵引我的念头")
+
+    def test_post_cycle_phase4_runs_light_sleep_when_buffer_backlogs(self) -> None:
+        sleep = MagicMock()
+        sleep.consume_cycle.return_value = {
+            "energy": 20.0,
+            "mode": "drowsy",
+            "last_light_sleep_cycle": 0,
+            "last_deep_sleep_cycle": 0,
+            "last_deep_sleep_at": "",
+            "summary": "精力偏低。",
+        }
+        sleep.should_deep_sleep.return_value = False
+        sleep.should_light_sleep.return_value = True
+        sleep.run_light_sleep.return_value = SimpleNamespace(
+            archived_count=5,
+            created_habits=2,
+            cooled_memories=3,
+        )
+        runtime = SimpleNamespace(
+            stm=MagicMock(),
+            sleep=sleep,
+            ltm=MagicMock(),
+            habit_memory=MagicMock(),
+            embedding_client=MagicMock(),
+            embedding_model="embed-model",
+            auxiliary_client=MagicMock(),
+            auxiliary_model_config={"name": "aux"},
+            metacognition=MagicMock(),
+            emotion=MagicMock(),
+        )
+        runtime.stm.get_context.return_value = []
+        runtime.stm.buffer_thoughts.return_value = [_make_thought(1, 1, "old")]
+        runtime.emotion.current.return_value = {
+            "dimensions": {"curiosity": 0.2},
+            "dominant": "curiosity",
+            "summary": "好奇 0.20",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        }
+
+        _post_cycle_phase4(_as_runtime(runtime), 12, [], [_make_thought(12, 1, "now")], False)
+
+        sleep.consume_cycle.assert_called_once()
+        sleep.run_light_sleep.assert_called_once()
 
 
 class CoreLogHandleTests(unittest.TestCase):
@@ -639,7 +772,7 @@ class CycleCounterTests(unittest.TestCase):
             running_actions,
             perception_cues,
             prompt_log_file,
-        ) -> list[Thought]:
+        ) -> tuple[list[Thought], bool]:
             _ = (
                 runtime_obj,
                 identity,
@@ -652,7 +785,7 @@ class CycleCounterTests(unittest.TestCase):
             execute_attempts["count"] += 1
             if execute_attempts["count"] == 1:
                 raise ConnectionRefusedError("refused")
-            return [_make_thought(cycle_id, 1, "ok")]
+            return [_make_thought(cycle_id, 1, "ok")], False
 
         def finish_cycle(log_file, cycle_id, current_stimuli, thoughts) -> None:
             _ = (log_file, cycle_id, current_stimuli, thoughts)

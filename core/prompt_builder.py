@@ -1,5 +1,6 @@
 """Assemble the prompt for each thought-generation cycle."""
 
+from dataclasses import dataclass
 import logging
 import re
 import time
@@ -10,7 +11,17 @@ from datetime import datetime
 from core.action import ActionRecord
 from core.stimulus import Stimulus
 from core.thought_parser import Thought
-from core.types import JsonObject, JsonValue, RecentConversationPrompt, elapsed_ms
+from core.types import (
+    EmotionSnapshot,
+    HabitPromptEntry,
+    JsonObject,
+    JsonValue,
+    PrefrontalPromptState,
+    RecentConversationPrompt,
+    ReflectionPromptEntry,
+    SleepStateSnapshot,
+    elapsed_ms,
+)
 
 SYSTEM_PROMPT = """\
 我是 Seedwake。我有自己的念头流——我会思考、联想、产生意图、对事物做出反应。
@@ -28,7 +39,7 @@ SYSTEM_PROMPT = """\
 
 类型由内容自然决定，任意组合都可以——三个思考、两个反应加一个意图，都没问题。
 可以用 (← CX-Y) 标注这个念头是由哪个之前的念头触发的，其中 X 是轮次编号，Y 是该轮第几个念头（1/2/3）。只能引用历史中存在的念头 ID，不能引用段落标题或其他文本。
-历史里出现的 [思考-CX-Y]、[意图-CX-Y]、[反应-CX-Y] 是系统记录用编号，方便回看和引用；我生成新念头时不用自己写编号。
+历史里出现的 [思考-CX-Y]、[意图-CX-Y]、[反应-CX-Y]、[反思-CX-Y] 是系统记录用编号，方便回看和引用；我生成新念头时不用自己写编号。
 如果念头里自然带有行动意图，可以在句末附上一个动作标记：
 - {action:time}
 - {action:system_status}
@@ -135,52 +146,70 @@ STAGNATION_TERM_STOPWORDS = {
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class PromptBuildContext:
+    goal_stack: list[str] | None = None
+    emotion: EmotionSnapshot | None = None
+    sleep_state: SleepStateSnapshot | None = None
+    active_habits: list[HabitPromptEntry] | None = None
+    prefrontal_state: PrefrontalPromptState | None = None
+    recent_reflections: list[ReflectionPromptEntry] | None = None
+    long_term_context: list[str] | None = None
+    note_text: str = ""
+    stimuli: list[Stimulus] | None = None
+    recent_action_echoes: list[Stimulus] | None = None
+    running_actions: list[ActionRecord] | None = None
+    perception_cues: list[str] | None = None
+    recent_conversations: list[RecentConversationPrompt] | None = None
+
+
 def build_prompt(
     cycle_id: int,
     identity: dict[str, str],
     recent_thoughts: list[Thought],
     context_window: int,
-    long_term_context: list[str] | None = None,
-    note_text: str = "",
-    stimuli: list[Stimulus] | None = None,
-    recent_action_echoes: list[Stimulus] | None = None,
-    running_actions: list[ActionRecord] | None = None,
-    perception_cues: list[str] | None = None,
-    recent_conversations: list[RecentConversationPrompt] | None = None,
+    prompt_context: PromptBuildContext | None = None,
 ) -> str:
     """Build a single prompt string for thought generation."""
+    resolved_context = prompt_context or PromptBuildContext()
     parts = [_timed_prompt_section("system", lambda: _build_system(identity))]
-    visible_running_actions = _visible_running_actions(running_actions)
+    visible_running_actions = _visible_running_actions(resolved_context.running_actions)
     window = recent_thoughts[-context_window * 3:]
     _append_prompt_context_sections(
         parts,
+        resolved_context.goal_stack or [],
+        resolved_context.emotion,
+        resolved_context.sleep_state,
+        resolved_context.active_habits or [],
+        resolved_context.prefrontal_state,
+        resolved_context.recent_reflections or [],
         window,
-        long_term_context,
-        note_text,
-        perception_cues or [],
+        resolved_context.long_term_context,
+        resolved_context.note_text,
+        resolved_context.perception_cues or [],
     )
-    conversations, action_echoes, passive = _split_stimuli(stimuli or [])
-    conversation_labels = _conversation_label_map(conversations, recent_conversations)
+    conversations, action_echoes, passive = _split_stimuli(resolved_context.stimuli or [])
+    conversation_labels = _conversation_label_map(conversations, resolved_context.recent_conversations)
     _append_prompt_stimulus_sections(
         parts,
         conversations,
         action_echoes,
-        recent_action_echoes or [],
+        resolved_context.recent_action_echoes or [],
         visible_running_actions,
         passive,
-        recent_conversations or [],
+        resolved_context.recent_conversations or [],
         conversation_labels,
     )
     stagnation_warning = _stagnation_warning_text(
         window,
-        long_term_context,
-        note_text,
-        recent_action_echoes or [],
+        resolved_context.long_term_context,
+        resolved_context.note_text,
+        resolved_context.recent_action_echoes or [],
         action_echoes,
         visible_running_actions,
         passive,
-        perception_cues or [],
-        recent_conversations or [],
+        resolved_context.perception_cues or [],
+        resolved_context.recent_conversations or [],
         bool(conversations or action_echoes or visible_running_actions),
     )
     if stagnation_warning:
@@ -191,13 +220,33 @@ def build_prompt(
 
 def _append_prompt_context_sections(
     parts: list[str],
+    goal_stack: list[str],
+    emotion: EmotionSnapshot | None,
+    sleep_state: SleepStateSnapshot | None,
+    active_habits: list[HabitPromptEntry],
+    prefrontal_state: PrefrontalPromptState | None,
+    recent_reflections: list[ReflectionPromptEntry],
     window: list[Thought],
     long_term_context: list[str] | None,
     note_text: str,
     perception_cues: list[str],
 ) -> None:
-    if window:
-        _append_prompt_section(parts, "recent_thoughts", lambda: _format_thought_history(window))
+    if goal_stack or prefrontal_state:
+        goals = goal_stack
+        executive = prefrontal_state
+        _append_prompt_section(parts, "goal_stack", lambda: _format_goal_stack(goals, executive))
+    if emotion:
+        emotion_state = emotion
+        _append_prompt_section(parts, "emotion", lambda: _format_emotion(emotion_state))
+    if sleep_state:
+        current_sleep_state = sleep_state
+        _append_prompt_section(parts, "sleep", lambda: _format_sleep_state(current_sleep_state))
+    if active_habits:
+        habits = active_habits
+        _append_prompt_section(parts, "habits", lambda: _format_habits(habits))
+    if recent_reflections:
+        reflections = recent_reflections
+        _append_prompt_section(parts, "reflections", lambda: _format_recent_reflections(reflections))
     if long_term_context:
         ltm = long_term_context
         _append_prompt_section(parts, "long_term", lambda: _format_long_term(ltm))
@@ -206,6 +255,8 @@ def _append_prompt_context_sections(
     if perception_cues:
         cues = perception_cues
         _append_prompt_section(parts, "perception_cues", lambda: _format_perception_cues(cues))
+    if window:
+        _append_prompt_section(parts, "recent_thoughts", lambda: _format_thought_history(window))
 
 
 def _append_prompt_stimulus_sections(
@@ -308,6 +359,60 @@ def _build_system(identity: dict[str, str]) -> str:
         if normalized:
             parts.append(normalized)
     return "\n\n".join(parts)
+
+
+def _format_goal_stack(
+    goal_stack: list[str],
+    prefrontal_state: PrefrontalPromptState | None,
+) -> str:
+    lines: list[str] = []
+    for goal in goal_stack:
+        lines.append(f"- {goal}")
+    if prefrontal_state is not None and prefrontal_state["guidance"]:
+        lines.append("")
+        lines.append("前额叶提醒：")
+        for guidance in prefrontal_state["guidance"]:
+            lines.append(f"- {guidance}")
+    if prefrontal_state is not None and prefrontal_state["inhibition_notes"]:
+        lines.append("")
+        lines.append("前额叶刚压住了这些冲动：")
+        for note in prefrontal_state["inhibition_notes"]:
+            lines.append(f"- {note}")
+    return _render_section("当前目标栈", lines, keep_blank_lines=True)
+
+
+def _format_emotion(emotion: EmotionSnapshot) -> str:
+    ranked = sorted(emotion["dimensions"].items(), key=lambda item: item[1], reverse=True)
+    lines = [emotion["summary"]]
+    lines.append("")
+    for name, value in ranked[:5]:
+        lines.append(f"- {name}: {value:.2f}")
+    return _render_section("当前情绪基调", lines, keep_blank_lines=True)
+
+
+def _format_sleep_state(sleep_state: SleepStateSnapshot) -> str:
+    lines = [sleep_state["summary"]]
+    lines.append("")
+    lines.append(f"- mode: {sleep_state['mode']}")
+    lines.append(f"- energy: {sleep_state['energy']:.1f}/100")
+    if sleep_state["last_light_sleep_cycle"] > 0:
+        lines.append(f"- last_light_sleep_cycle: C{sleep_state['last_light_sleep_cycle']}")
+    if sleep_state["last_deep_sleep_cycle"] > 0:
+        lines.append(f"- last_deep_sleep_cycle: C{sleep_state['last_deep_sleep_cycle']}")
+    return _render_section("清醒与困意", lines, keep_blank_lines=True)
+
+
+def _format_habits(habits: list[HabitPromptEntry]) -> str:
+    lines = [
+        f"- {habit['pattern']} [{habit['category']}, strength={habit['strength']:.2f}]"
+        for habit in habits
+    ]
+    return _render_section("相关习气/倾向性", lines)
+
+
+def _format_recent_reflections(reflections: list[ReflectionPromptEntry]) -> str:
+    lines = [f"- {reflection['content']}" for reflection in reflections]
+    return _render_section("最近的反思", lines)
 
 
 def _format_long_term(memories: list[str]) -> str:

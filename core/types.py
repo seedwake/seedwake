@@ -112,6 +112,50 @@ class RecentActionEchoRecord(TypedDict):
     stimulus: StimulusRecord
 
 
+class EmotionSnapshot(TypedDict):
+    dimensions: dict[str, float]
+    dominant: str
+    summary: str
+    updated_at: str
+
+
+class HabitPromptEntry(TypedDict):
+    id: int
+    pattern: str
+    category: str
+    strength: float
+
+
+class AttentionPromptEntry(TypedDict):
+    thought_id: str
+    weight: float
+    reason: str
+    content: str
+
+
+class PrefrontalPromptState(TypedDict):
+    goal_stack: list[str]
+    guidance: list[str]
+    inhibition_notes: list[str]
+    plan_mode: bool
+
+
+class ReflectionPromptEntry(TypedDict):
+    thought_id: str
+    cycle_id: int
+    content: str
+    created_at: str
+
+
+class SleepStateSnapshot(TypedDict):
+    energy: float
+    mode: str
+    last_light_sleep_cycle: int
+    last_deep_sleep_cycle: int
+    last_deep_sleep_at: str
+    summary: str
+
+
 class PerceptionStimulusPayload(TypedDict):
     type: str
     priority: int
@@ -218,7 +262,7 @@ def elapsed_ms(started_at: float) -> float:
     return (time.perf_counter() - started_at) * 1000.0
 
 
-def coerce_json_value(value: JsonValue) -> JsonValue:
+def coerce_json_value(value: object) -> JsonValue:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, list):
@@ -226,3 +270,9 @@ def coerce_json_value(value: JsonValue) -> JsonValue:
     if isinstance(value, dict):
         return {str(key): coerce_json_value(item) for key, item in value.items()}
     return str(value)
+
+
+def coerce_json_object(value: object) -> JsonObject | None:
+    if not isinstance(value, dict):
+        return None
+    return {str(key): coerce_json_value(item) for key, item in value.items()}

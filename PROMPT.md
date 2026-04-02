@@ -334,3 +334,11 @@ news、reading、search 等信息类 action_result 被选入本轮 prompt 后即
 ```
 
 不需要"笔记"行。外部程序只提供信息，不输出观点。
+
+## 36. 一个念头里的多个 action 只有第一个被执行，后续的被丢弃
+
+`_parse_action` 用 `ACTION_PATTERN.search()` 只匹配第一个 `{action:...}`。当模型在一个念头里写了多个 action（如先 `{action:note_rewrite, ...}` 再 `{action:send_message, ...}`），只有第一个被解析到 `Thought.action_request`，后续的被完全忽略。
+
+实际案例（C843）：模型在一个意图念头里同时写了 note_rewrite 和 send_message，只有 note_rewrite 被提交，send_message 丢失。
+
+**方案**：在 `Thought` dataclass 新增 `additional_action_requests: list[RawActionRequest]` 字段。`_parse_action` 用 `findall` 提取所有匹配，第一个放 `action_request`，其余放 `additional_action_requests`。`submit_from_thoughts` 对每个额外 action 也调用 planner 提交。下游的 planner/executor 逻辑不需要改——它们处理的仍然是单个 action。

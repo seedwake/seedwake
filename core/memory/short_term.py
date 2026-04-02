@@ -96,6 +96,32 @@ class ShortTermMemory:
                 return max(latest_from_deque, latest_from_key, latest_from_recent)
         return latest_from_deque
 
+    def buffer_thoughts(self) -> list[Thought]:
+        limit = self._context_window * 3
+        if self._redis:
+            try:
+                thoughts = self._redis_recent(self._buffer_size * 3)
+            except SHORT_TERM_REDIS_EXCEPTIONS:
+                self._redis = None
+            else:
+                return thoughts[:-limit] if len(thoughts) > limit else []
+        thoughts = list(self._deque)
+        return thoughts[:-limit] if len(thoughts) > limit else []
+
+    def forget_thought_ids(self, thought_ids: list[str]) -> None:
+        if not thought_ids:
+            return
+        forget = set(thought_ids)
+        self._deque = deque(
+            (thought for thought in self._deque if thought.thought_id not in forget),
+            maxlen=self._buffer_size * 3,
+        )
+        if self._redis:
+            try:
+                self._forget_redis_thought_ids(forget)
+            except SHORT_TERM_REDIS_EXCEPTIONS:
+                self._redis = None
+
     @property
     def redis_available(self) -> bool:
         return self._redis is not None
@@ -187,6 +213,19 @@ class ShortTermMemory:
         if self._deque:
             self._update_latest_cycle_id(max(t.cycle_id for t in self._deque))
         self._trim()
+
+    def _forget_redis_thought_ids(self, thought_ids: set[str]) -> None:
+        redis_client = self._redis
+        assert redis_client is not None
+        raw_items = _redis_payloads(redis_client.zrange(REDIS_KEY, 0, -1))  # type: ignore[arg-type]
+        to_remove: list[str | bytes | bytearray] = []
+        for raw_item in raw_items:
+            item = raw_item.decode("utf-8") if isinstance(raw_item, (bytes, bytearray)) else raw_item
+            payload = json.loads(item)
+            if str(payload.get("thought_id") or "") in thought_ids:
+                to_remove.append(raw_item)
+        if to_remove:
+            redis_client.zrem(REDIS_KEY, *to_remove)
 
     def _update_latest_cycle_id(self, cycle_id: int) -> None:
         redis_client = self._redis

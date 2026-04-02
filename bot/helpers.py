@@ -14,10 +14,10 @@ def load_admin_user_ids(config: dict) -> list[int]:
 
 def load_notification_chat_ids(config: dict, default_chat_ids: list[int]) -> list[int]:
     raw_chat_id = config.get("telegram", {}).get("notification_channel_id")
-    if raw_chat_id in (None, ""):
+    if raw_chat_id is None or raw_chat_id == "":
         return list(default_chat_ids)
     try:
-        return [int(raw_chat_id)]
+        return [int(str(raw_chat_id))]
     except (TypeError, ValueError):
         return list(default_chat_ids)
 

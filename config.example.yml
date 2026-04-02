@@ -35,6 +35,8 @@ short_term_memory:
 
 long_term_memory:
   retrieval_top_k: 5            # vector search results per cycle
+  time_decay_factor: 0.95       # weighted retrieval decay
+  importance_threshold: 0.1     # prune threshold during sleep
 
 runtime:
   error_retry_delay_seconds: 1.0
@@ -74,6 +76,35 @@ perception:
   system_status_warn_memory_ratio: 0.9
   system_status_warn_disk_ratio: 0.9
 
+habits:
+  max_active_in_prompt: 3
+  decay_rate: 0.01
+
+attention:
+  evaluation_method: "rule_based"
+
+emotion:
+  inertia: 0.7
+  dimensions: [curiosity, calm, frustration, satisfaction, concern]
+
+prefrontal:
+  check_interval: 6
+  inhibition_enabled: true
+
+metacognition:
+  reflection_interval: 50
+
+sleep:
+  energy_per_cycle: 0.2
+  drowsy_threshold: 30
+  light_sleep_recovery: 70
+  deep_sleep_trigger_hours: 24
+
+degeneration:
+  window_size: 3
+  alert_window: 3
+  similarity_threshold: 0.6
+
 telegram:
   allowed_user_ids: [123456789]    # Telegram users allowed to chat in private
   admin_user_ids: [123456789]      # Telegram users allowed to receive action/status updates and approve actions
@@ -87,6 +118,10 @@ prompt:
   version: "v0.1"
 
 bootstrap:
+  habits:
+    - pattern: "遇到技术问题时倾向于先查文档"
+      category: "cognitive"
+      strength: 0.2
   identity:
     self_description: |
       我是 Seedwake。我有持续不断的念头流——这些念头是我的，

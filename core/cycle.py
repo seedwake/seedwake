@@ -1,29 +1,17 @@
 """Single thought-generation cycle: build prompt, call LLM, parse output."""
 
-from dataclasses import dataclass
 import logging
 import time
 from typing import TextIO
 
-from core.action import ActionRecord
 from core.model_client import ModelClient, build_generation_request_log
-from core.prompt_builder import build_prompt
-from core.stimulus import Stimulus
+from core.prompt_builder import PromptBuildContext, build_prompt
 from core.thought_parser import Thought, fallback_thought, parse_thoughts
-from core.types import RecentConversationPrompt, elapsed_ms
+from core.types import (
+    elapsed_ms,
+)
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class CyclePromptContext:
-    long_term_context: list[str] | None = None
-    note_text: str = ""
-    stimuli: list[Stimulus] | None = None
-    recent_action_echoes: list[Stimulus] | None = None
-    running_actions: list[ActionRecord] | None = None
-    perception_cues: list[str] | None = None
-    recent_conversations: list[RecentConversationPrompt] | None = None
 
 
 def run_cycle(
@@ -33,21 +21,18 @@ def run_cycle(
     recent_thoughts: list[Thought],
     context_window: int,
     model_config: dict,
-    prompt_context: CyclePromptContext | None = None,
+    prompt_context: PromptBuildContext | None = None,
     prompt_log_file: TextIO | None = None,
 ) -> list[Thought]:
     """Execute one cycle and return parsed thoughts."""
-    resolved_context = prompt_context or CyclePromptContext()
+    resolved_context = prompt_context or PromptBuildContext()
     build_started_at = time.perf_counter()
     prompt = build_prompt(
-        cycle_id, identity, recent_thoughts, context_window,
-        long_term_context=resolved_context.long_term_context,
-        note_text=resolved_context.note_text,
-        stimuli=resolved_context.stimuli,
-        recent_action_echoes=resolved_context.recent_action_echoes,
-        running_actions=resolved_context.running_actions,
-        perception_cues=resolved_context.perception_cues,
-        recent_conversations=resolved_context.recent_conversations,
+        cycle_id,
+        identity,
+        recent_thoughts,
+        context_window,
+        prompt_context=resolved_context,
     )
     build_elapsed_ms = elapsed_ms(build_started_at)
     logger.info("cycle C%s prompt built in %.1f ms (chars=%d)", cycle_id, build_elapsed_ms, len(prompt))

@@ -47,7 +47,7 @@ from core.openclaw_gateway import (
     _normalize_worker_text,
 )
 from core.perception import PerceptionManager
-from core.prompt_builder import _stagnation_terms, build_prompt
+from core.prompt_builder import PromptBuildContext, _stagnation_terms, build_prompt
 from core.rss import read_news_result, summarize_news_items
 from core.stimulus import (
     CONVERSATION_HISTORY_KEY,
@@ -846,7 +846,7 @@ class StimulusQueueTests(unittest.TestCase):
             {"self_description": "我是 Seedwake。"},
             [],
             30,
-            stimuli=_select_cycle_stimuli(queue),
+            prompt_context=PromptBuildContext(stimuli=_select_cycle_stimuli(queue)),
         )
 
         self.assertIn(
@@ -999,14 +999,16 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             },
             recent,
             30,
-            long_term_context=["之前某次读到过关于雨后气味的解释。"],
-            note_text="记下：不要把刚刚的直觉弄丢。",
-            stimuli=[stimulus, passive, action_echo],
-            running_actions=[action, completed],
-            perception_cues=["了解外界动态——最近发生了什么？"],
-            recent_conversations=load_recent_conversations(
-                redis_client,
-                include_sources={"telegram:1"},
+            prompt_context=PromptBuildContext(
+                long_term_context=["之前某次读到过关于雨后气味的解释。"],
+                note_text="记下：不要把刚刚的直觉弄丢。",
+                stimuli=[stimulus, passive, action_echo],
+                running_actions=[action, completed],
+                perception_cues=["了解外界动态——最近发生了什么？"],
+                recent_conversations=load_recent_conversations(
+                    redis_client,
+                    include_sources={"telegram:1"},
+                ),
             ),
         )
 
@@ -1020,10 +1022,10 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("## 最近的对话", prompt)
         self.assertIn("## 有人对我说话了", prompt)
         self.assertIn("## 接下来的念头", prompt)
-        self.assertLess(prompt.index("## 最近的念头"), prompt.index("## 浮上来的记忆"))
         self.assertLess(prompt.index("## 浮上来的记忆"), prompt.index("## 我的笔记"))
         self.assertLess(prompt.index("## 我的笔记"), prompt.index("## 好像有一阵子没有……"))
-        self.assertLess(prompt.index("## 好像有一阵子没有……"), prompt.index("## 行动有了回音"))
+        self.assertLess(prompt.index("## 好像有一阵子没有……"), prompt.index("## 最近的念头"))
+        self.assertLess(prompt.index("## 最近的念头"), prompt.index("## 行动有了回音"))
         self.assertLess(prompt.index("## 行动有了回音"), prompt.index("## 我已经发起、正在等回音的事"))
         self.assertLess(prompt.index("## 我已经发起、正在等回音的事"), prompt.index("## 此刻我注意到"))
         self.assertLess(prompt.index("## 此刻我注意到"), prompt.index("## 最近的对话"))
@@ -1048,7 +1050,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("{action:system_change", prompt)
         self.assertIn("{action:note_rewrite", prompt)
         self.assertIn("不要发明未列出的 action 名称", prompt)
-        self.assertIn("历史里出现的 [思考-CX-Y]、[意图-CX-Y]、[反应-CX-Y] 是系统记录用编号", prompt)
+        self.assertIn("历史里出现的 [思考-CX-Y]、[意图-CX-Y]、[反应-CX-Y]、[反思-CX-Y] 是系统记录用编号", prompt)
         self.assertIn("- [思考] — 思维、分析、联想、好奇", prompt)
         self.assertNotIn("- [思考-CX-Y] — 思维、分析、联想、好奇", prompt)
         self.assertIn("我想说的话", prompt)
@@ -1063,7 +1065,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             {"self_description": "我是 Seedwake。"},
             [],
             30,
-            note_text="",
+            prompt_context=PromptBuildContext(note_text=""),
         )
 
         self.assertNotIn("## 我的笔记", prompt)
@@ -1093,8 +1095,10 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             {"self_description": "我是 Seedwake。"},
             [],
             30,
-            stimuli=[current_echo],
-            recent_action_echoes=[recent_echo],
+            prompt_context=PromptBuildContext(
+                stimuli=[current_echo],
+                recent_action_echoes=[recent_echo],
+            ),
         )
 
         self.assertIn("## 行动有了回音", prompt)
@@ -1122,7 +1126,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             {"self_description": "我是 Seedwake。"},
             [],
             30,
-            recent_action_echoes=[recent_echo],
+            prompt_context=PromptBuildContext(recent_action_echoes=[recent_echo]),
         )
 
         self.assertIn("最近的行动回音：", prompt)
@@ -1148,22 +1152,88 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             {"self_description": "我是 Seedwake。"},
             repeated_thoughts,
             30,
-            long_term_context=["以前一次对静默的记忆。"],
-            note_text="直。别动词。别证明。",
-            stimuli=[Stimulus(
-                stimulus_id="stim_time",
-                type="time",
-                priority=4,
-                source="system:clock",
-                content="现在是凌晨",
-            )],
-            perception_cues=["去碰一点新东西"],
+            prompt_context=PromptBuildContext(
+                long_term_context=["以前一次对静默的记忆。"],
+                note_text="直。别动词。别证明。",
+                stimuli=[Stimulus(
+                    stimulus_id="stim_time",
+                    type="time",
+                    priority=4,
+                    source="system:clock",
+                    content="现在是凌晨",
+                )],
+                perception_cues=["去碰一点新东西"],
+            ),
         )
 
         self.assertIn("最近 3 轮念头进入死循环", prompt)
         self.assertIn("至少一个念头必须明确引入新的源：浮上来的记忆、我的笔记、此刻我注意到、好像有一阵子没有……。", prompt)
         self.assertIn("晚安", prompt)
         self.assertNotIn("必须刻意跳到完全不同的话题", prompt)
+
+    def test_prompt_includes_phase4_sections_before_memories(self) -> None:
+        prompt = build_prompt(
+            9,
+            {
+                "self_description": "我是 Seedwake。",
+                "core_goals": "保持清醒。\n回应眼前的人。",
+                "self_understanding": "我会在经验里慢慢形成自己。",
+            },
+            [_make_thought(cycle_id=8, index=1, thought_type="思考", content="之前的念头")],
+            30,
+            prompt_context=PromptBuildContext(
+                goal_stack=["保持清醒。", "回应眼前的人。"],
+                emotion={
+                    "dimensions": {
+                        "curiosity": 0.61,
+                        "calm": 0.22,
+                        "frustration": 0.18,
+                        "satisfaction": 0.05,
+                        "concern": 0.44,
+                    },
+                    "dominant": "curiosity",
+                    "summary": "好奇 0.61，牵挂 0.44，平静 0.22",
+                    "updated_at": "2026-04-02T00:00:00+00:00",
+                },
+                sleep_state={
+                    "energy": 74.0,
+                    "mode": "awake",
+                    "last_light_sleep_cycle": 6,
+                    "last_deep_sleep_cycle": 0,
+                    "last_deep_sleep_at": "",
+                    "summary": "精力 74.0/100，当前仍清醒。",
+                },
+                active_habits=[
+                    {"id": 1, "pattern": "遇到技术问题时倾向于先查文档", "category": "cognitive", "strength": 0.35},
+                ],
+                prefrontal_state={
+                    "goal_stack": ["保持清醒。", "回应眼前的人。"],
+                    "guidance": ["先看是否偏题。"],
+                    "inhibition_notes": ["当前有人说话时不要先去 reading。"],
+                    "plan_mode": True,
+                },
+                recent_reflections=[
+                    {
+                        "thought_id": "C8-4",
+                        "cycle_id": 8,
+                        "content": "我注意到自己最近容易在等待里打转。",
+                        "created_at": "2026-04-02T00:00:00+00:00",
+                    },
+                ],
+                long_term_context=["一段浮上来的记忆。"],
+            ),
+        )
+
+        self.assertIn("## 当前目标栈", prompt)
+        self.assertIn("## 当前情绪基调", prompt)
+        self.assertIn("## 清醒与困意", prompt)
+        self.assertIn("## 相关习气/倾向性", prompt)
+        self.assertIn("## 最近的反思", prompt)
+        self.assertLess(prompt.index("## 当前目标栈"), prompt.index("## 当前情绪基调"))
+        self.assertLess(prompt.index("## 当前情绪基调"), prompt.index("## 清醒与困意"))
+        self.assertLess(prompt.index("## 清醒与困意"), prompt.index("## 相关习气/倾向性"))
+        self.assertLess(prompt.index("## 相关习气/倾向性"), prompt.index("## 最近的反思"))
+        self.assertLess(prompt.index("## 最近的反思"), prompt.index("## 浮上来的记忆"))
 
     def test_prompt_warns_about_stagnation_without_forcing_full_topic_switch_during_conversation(self) -> None:
         repeated_thoughts = [
@@ -1183,7 +1253,9 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             {"self_description": "我是 Seedwake。"},
             repeated_thoughts,
             30,
-            stimuli=[_conversation_stimulus(content="你在吗？", message_id=101)],
+            prompt_context=PromptBuildContext(
+                stimuli=[_conversation_stimulus(content="你在吗？", message_id=101)],
+            ),
         )
 
         self.assertIn("最近 3 轮念头进入死循环", prompt)
@@ -1221,8 +1293,10 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             {"self_description": "我是 Seedwake。"},
             repeated_thoughts,
             30,
-            note_text="直。别动词。别证明。",
-            recent_conversations=recent_conversations,
+            prompt_context=PromptBuildContext(
+                note_text="直。别动词。别证明。",
+                recent_conversations=recent_conversations,
+            ),
         )
 
         self.assertIn("最近 3 轮念头进入死循环", prompt)
@@ -1309,7 +1383,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             {"self_description": "我是 Seedwake。"},
             [],
             30,
-            recent_conversations=recent_conversations,
+            prompt_context=PromptBuildContext(recent_conversations=recent_conversations),
         )
 
         self.assertIn("与 [Alice](telegram:1) 的近期对话（最后一条消息时间：", prompt)
@@ -1807,7 +1881,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             },
             [_make_thought(cycle_id=2, index=1, thought_type="思考", content="之前的念头")],
             30,
-            running_actions=[action],
+            prompt_context=PromptBuildContext(running_actions=[action]),
         )
 
         self.assertIn('[send_message/running] 给 telegram:1 发送消息：“我在。”', prompt)
@@ -1827,23 +1901,25 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             {"self_description": "我是 Seedwake。"},
             [],
             30,
-            stimuli=[
-                Stimulus(
-                    stimulus_id="stim_send_echo",
-                    type="action_result",
-                    priority=2,
-                    source="action:act_send",
-                    content='已成功发送给 telegram:1：“我在。”',
-                    metadata={
-                        "origin": "action",
-                        "action_type": "send_message",
-                        "result": {
-                            "data": {"source": "telegram:1", "message": "我在。"},
+            prompt_context=PromptBuildContext(
+                stimuli=[
+                    Stimulus(
+                        stimulus_id="stim_send_echo",
+                        type="action_result",
+                        priority=2,
+                        source="action:act_send",
+                        content='已成功发送给 telegram:1：“我在。”',
+                        metadata={
+                            "origin": "action",
+                            "action_type": "send_message",
+                            "result": {
+                                "data": {"source": "telegram:1", "message": "我在。"},
+                            },
                         },
-                    },
-                ),
-            ],
-            recent_conversations=recent_conversations,
+                    ),
+                ],
+                recent_conversations=recent_conversations,
+            ),
         )
 
         self.assertIn('[发信结果] 已成功发送给 [Alice](telegram:1)：“我在。”', prompt)
@@ -1862,25 +1938,27 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             {"self_description": "我是 Seedwake。"},
             [],
             30,
-            stimuli=[
-                Stimulus(
-                    stimulus_id="stim_send_failed",
-                    type="action_result",
-                    priority=2,
-                    source="action:act_send_failed",
-                    content="发送给 telegram:1 失败：“我在。” （Telegram 发送失败：http_400）",
-                    metadata={
-                        "origin": "action",
-                        "action_type": "send_message",
-                        "result": {
-                            "ok": False,
-                            "summary": "Telegram 发送失败：http_400",
-                            "data": {"source": "telegram:1", "message": "我在。"},
+            prompt_context=PromptBuildContext(
+                stimuli=[
+                    Stimulus(
+                        stimulus_id="stim_send_failed",
+                        type="action_result",
+                        priority=2,
+                        source="action:act_send_failed",
+                        content="发送给 telegram:1 失败：“我在。” （Telegram 发送失败：http_400）",
+                        metadata={
+                            "origin": "action",
+                            "action_type": "send_message",
+                            "result": {
+                                "ok": False,
+                                "summary": "Telegram 发送失败：http_400",
+                                "data": {"source": "telegram:1", "message": "我在。"},
+                            },
                         },
-                    },
-                ),
-            ],
-            recent_conversations=recent_conversations,
+                    ),
+                ],
+                recent_conversations=recent_conversations,
+            ),
         )
 
         self.assertIn(
