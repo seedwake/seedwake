@@ -9,8 +9,6 @@ from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib import error
 
-import redis as redis_lib
-
 # noinspection PyProtectedMember
 from core.action import (
     ACTION_REDIS_KEY,
@@ -58,9 +56,9 @@ from core.memory.habit import (
     _activation_patterns_from_thoughts,
     _extract_habit_patterns,
 )
+from core.manas import MANAS_STATE_KEY, ManasManager, ManasRedisLike
 from core.metacognition import MetacognitionManager
 from core.model_client import ModelClient
-from core.manas import MANAS_STATE_KEY, ManasManager
 # noinspection PyProtectedMember
 from core.openclaw_gateway import (
     OpenClawGatewayExecutor,
@@ -82,7 +80,7 @@ from core.prefrontal import (
 from core.prompt_builder import PromptBuildContext, _stagnation_terms, build_prompt
 from core.rss import read_news_result, summarize_news_items
 # noinspection PyProtectedMember
-from core.sleep import _ensure_impression_contact, _impression_needs_refresh
+from core.sleep import SleepRedisLike, _ensure_impression_contact, _impression_needs_refresh
 from core.stimulus import (
     CONVERSATION_HISTORY_KEY,
     RECENT_ACTION_ECHO_KEY,
@@ -344,14 +342,22 @@ class _UnavailableOpenClawExecutor:
 
 
 def _as_action_redis(
-    value: "redis_lib.Redis | ListRedisStub | _RedisNewsSeenStub | None",
+    value: ActionRedisLike | None,
 ) -> ActionRedisLike | None:
     return value  # type: ignore[return-value]
 
 
 def _as_conversation_redis(
-    value: "redis_lib.Redis | ListRedisStub | _RedisNewsSeenStub | None",
+    value: ConversationRedisLike | None,
 ) -> ConversationRedisLike | None:
+    return value  # type: ignore[return-value]
+
+
+def _as_manas_redis(value: ListRedisStub | None) -> ManasRedisLike | None:
+    return value  # type: ignore[return-value]
+
+
+def _as_sleep_redis(value: ListRedisStub | None) -> SleepRedisLike | None:
     return value  # type: ignore[return-value]
 
 
@@ -579,7 +585,7 @@ def _build_action_manager(
     queue: StimulusQueue,
     planner: PlannerLike,
     *,
-    redis_client: "redis_lib.Redis | ListRedisStub | _RedisNewsSeenStub | None" = None,
+    redis_client: ActionRedisLike | None = None,
     openclaw_executor: _OpenClawExecutor | _UnavailableOpenClawExecutor | None = None,
     news_reader=None,
     contact_resolver=None,
@@ -2221,7 +2227,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         )
         self.assertEqual(prompt_state["session_context"], "断线期间形成的新会话上下文")
 
-        self.assertTrue(manager.attach_redis(cast(redis_lib.Redis, redis_stub)))
+        self.assertTrue(manager.attach_redis(_as_manas_redis(redis_stub)))
         raw = redis_stub.get(MANAS_STATE_KEY)
         self.assertIsNotNone(raw)
         payload = json.loads(str(raw))
@@ -2259,7 +2265,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             identity={"self_description": "我仍在这里。", "core_goals": "继续回应。"},
         )
 
-        self.assertTrue(manager.attach_redis(cast(redis_lib.Redis, redis_stub)))
+        self.assertTrue(manager.attach_redis(_as_manas_redis(redis_stub)))
         raw = redis_stub.get(MANAS_STATE_KEY)
         self.assertIsNotNone(raw)
         payload = json.loads(str(raw))
@@ -2285,7 +2291,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         )
 
         manager = ManasManager(
-            redis_client=cast(redis_lib.Redis, redis_stub),
+            redis_client=_as_manas_redis(redis_stub),
             warning_threshold=2,
             reflection_threshold=3,
             stable_window=3,

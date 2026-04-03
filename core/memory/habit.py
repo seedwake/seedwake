@@ -683,7 +683,16 @@ class HabitMemory:
 def _row_first_int(row: tuple[object, ...] | None) -> int | None:
     if row is None or not row:
         return None
-    return int(row[0])
+    first = row[0]
+    if isinstance(first, bool):
+        return int(first)
+    if isinstance(first, int):
+        return first
+    if isinstance(first, float):
+        return int(first)
+    if isinstance(first, str):
+        return int(first)
+    raise TypeError(f"expected integer-like row value, got {type(first).__name__}")
 
 
 def _extract_habit_patterns(thoughts: list[Thought]) -> list[HabitSeedCandidate]:

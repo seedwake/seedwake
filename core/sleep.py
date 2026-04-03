@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 import re
-from typing import cast
+from typing import Protocol
 
 import redis as redis_lib
 
@@ -42,6 +42,11 @@ SLEEP_REDIS_EXCEPTIONS = (
 logger = logging.getLogger(__name__)
 
 
+class SleepRedisLike(ConversationRedisLike, Protocol):
+    def get(self, key: str) -> str | bytes | None: ...
+    def set(self, key: str, value: str) -> bool: ...
+
+
 @dataclass(frozen=True)
 class SleepRunResult:
     state: SleepStateSnapshot
@@ -71,7 +76,7 @@ class LightSleepArchivePreparation:
 class SleepManager:
     def __init__(
         self,
-        redis_client: redis_lib.Redis | None,
+        redis_client: SleepRedisLike | None,
         *,
         energy_per_cycle: float,
         drowsy_threshold: float,
@@ -96,7 +101,7 @@ class SleepManager:
         self._shadow = self._default_state()
         self._restore_from_redis()
 
-    def attach_redis(self, redis_client: redis_lib.Redis | None) -> bool:
+    def attach_redis(self, redis_client: SleepRedisLike | None) -> bool:
         self._redis = redis_client
         self._sync_to_redis()
         return self._redis is not None
@@ -250,8 +255,7 @@ class SleepManager:
 
         # -- 2. action result archive --
         action_result_started_at = time.perf_counter()
-        conversation_redis = _conversation_redis(self._redis)
-        action_result_stimuli = load_action_result_history(conversation_redis, limit=LIGHT_SLEEP_ACTION_RESULT_LIMIT)
+        action_result_stimuli = load_action_result_history(self._redis, limit=LIGHT_SLEEP_ACTION_RESULT_LIMIT)
         archived_action_result_ids = _archive_action_result_memories(
             ltm,
             embedding_client,
@@ -260,7 +264,7 @@ class SleepManager:
             emotion,
         )
         if archived_action_result_ids:
-            forget_action_result_history_ids(conversation_redis, archived_action_result_ids)
+            forget_action_result_history_ids(self._redis, archived_action_result_ids)
             archived_action_result_id_set = set(archived_action_result_ids)
             archived_texts.extend(
                 _light_sleep_action_result_line(stimulus)
@@ -766,7 +770,7 @@ def _summarize_light_sleep_batch(
 
 
 def _update_impression_memories(
-    redis_client: redis_lib.Redis | None,
+    redis_client: SleepRedisLike | None,
     ltm: LongTermMemory,
     embedding_client: ModelClient,
     embedding_model: str,
@@ -776,7 +780,7 @@ def _update_impression_memories(
     cycle_id: int,
     emotion: EmotionSnapshot,
 ) -> int:
-    history = load_conversation_history(_conversation_redis(redis_client), limit=240)
+    history = load_conversation_history(redis_client, limit=240)
     if not history:
         return 0
     grouped = _recent_impression_groups(history)
@@ -1100,12 +1104,6 @@ def _decode_redis_value(value: object) -> str | None:
     if isinstance(value, str):
         return value
     return None
-
-
-def _conversation_redis(redis_client: redis_lib.Redis | None) -> ConversationRedisLike | None:
-    if redis_client is None:
-        return None
-    return cast(ConversationRedisLike, redis_client)
 
 
 def _copy_sleep_state(state: SleepStateSnapshot) -> SleepStateSnapshot:

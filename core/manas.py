@@ -5,6 +5,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from typing import Protocol
 
 import redis as redis_lib
 
@@ -26,6 +27,11 @@ EXTERNALIZED_SELF_ANCHOR = "这个系统只是被外部观察的对象，与当�
 logger = logging.getLogger(__name__)
 
 
+class ManasRedisLike(Protocol):
+    def get(self, key: str) -> str | bytes | None: ...
+    def set(self, key: str, value: str) -> bool: ...
+
+
 @dataclass
 class _ManasState:
     self_coherence_score: float = 1.0
@@ -41,7 +47,7 @@ class _ManasState:
 class ManasManager:
     def __init__(
         self,
-        redis_client: redis_lib.Redis | None,
+        redis_client: ManasRedisLike | None,
         *,
         warning_threshold: int,
         reflection_threshold: int,
@@ -55,7 +61,7 @@ class ManasManager:
         self._state_dirty = False
         self._restore_state(notify_restart=True)
 
-    def attach_redis(self, redis_client: redis_lib.Redis | None) -> bool:
+    def attach_redis(self, redis_client: ManasRedisLike | None) -> bool:
         self._redis = redis_client
         if not self._state_dirty:
             self._restore_state(notify_restart=False)

@@ -3405,39 +3405,39 @@ def _coerce_action_request_payload(value: JsonObject, source_content: str) -> Ac
 
 
 def _request_payload_with_submitted_at(
-    request: ActionRequestPayload,
+    request_payload: ActionRequestPayload,
     submitted_at: datetime,
 ) -> ActionRequestPayload:
-    payload = _clone_action_request_payload(request)
+    payload = _clone_action_request_payload(request_payload)
     payload["submitted_at"] = submitted_at.isoformat()
     return payload
 
 
-def _clone_action_request_payload(request: ActionRequestPayload) -> ActionRequestPayload:
+def _clone_action_request_payload(request_payload: ActionRequestPayload) -> ActionRequestPayload:
     payload: ActionRequestPayload = {
-        "task": request["task"],
-        "reason": request["reason"],
-        "raw_action": request["raw_action"],
+        "task": request_payload["task"],
+        "reason": request_payload["reason"],
+        "raw_action": request_payload["raw_action"],
     }
-    news_feed_urls = request.get("news_feed_urls")
+    news_feed_urls = request_payload.get("news_feed_urls")
     if news_feed_urls:
         payload["news_feed_urls"] = list(news_feed_urls)
-    worker_agent_id = request.get("worker_agent_id")
+    worker_agent_id = request_payload.get("worker_agent_id")
     if worker_agent_id:
         payload["worker_agent_id"] = worker_agent_id
-    submitted_at = request.get("submitted_at")
+    submitted_at = request_payload.get("submitted_at")
     if submitted_at:
         payload["submitted_at"] = submitted_at
-    target_source = request.get("target_source")
+    target_source = request_payload.get("target_source")
     if target_source:
         payload["target_source"] = target_source
-    target_entity = request.get("target_entity")
+    target_entity = request_payload.get("target_entity")
     if target_entity:
         payload["target_entity"] = target_entity
-    message_text = request.get("message_text")
+    message_text = request_payload.get("message_text")
     if message_text:
         payload["message_text"] = message_text
-    reply_to_message_id = request.get("reply_to_message_id")
+    reply_to_message_id = request_payload.get("reply_to_message_id")
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
     return payload

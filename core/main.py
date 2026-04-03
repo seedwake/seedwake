@@ -38,14 +38,14 @@ from core.memory.habit import HabitMemory
 from core.memory.identity import load_identity
 from core.memory.long_term import LongTermEntry, LongTermMemory
 from core.memory.short_term import LATEST_CYCLE_KEY, ShortTermMemory
-from core.manas import ManasManager
+from core.manas import ManasManager, ManasRedisLike
 from core.metacognition import MetacognitionManager
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient, create_model_client
 from core.perception import PerceptionManager
 from core.prefrontal import PrefrontalManager, build_goal_stack
 from core.prompt_builder import PromptBuildContext
 from core.runtime import connect_redis_from_env, load_yaml_config
-from core.sleep import SleepManager
+from core.sleep import SleepManager, SleepRedisLike
 from core.stimulus import (
     ConversationRedisLike,
     RECENT_CONVERSATION_SUMMARY_MAX_CHARS,
@@ -265,7 +265,7 @@ def _build_runtime_components(
         inhibition_enabled=bool(config.get("prefrontal", {}).get("inhibition_enabled", True)),
     )
     manas = ManasManager(
-        redis_client,
+        _as_manas_redis(redis_client),
         warning_threshold=int(config.get("manas", {}).get("warning_threshold", 3)),
         reflection_threshold=int(config.get("manas", {}).get("reflection_threshold", 5)),
         stable_window=int(config.get("manas", {}).get("stable_window", 12)),
@@ -275,7 +275,7 @@ def _build_runtime_components(
         reflection_interval=int(config.get("metacognition", {}).get("reflection_interval", 50)),
     )
     sleep = SleepManager(
-        redis_client,
+        _as_sleep_redis(redis_client),
         energy_per_cycle=float(config.get("sleep", {}).get("energy_per_cycle", 0.2)),
         drowsy_threshold=float(config.get("sleep", {}).get("drowsy_threshold", 30)),
         light_sleep_recovery=float(config.get("sleep", {}).get("light_sleep_recovery", 70)),
@@ -970,9 +970,9 @@ def _redis_recovered(
     action_ok = action_manager.attach_redis(stm.redis_client)  # type: ignore[arg-type]
     emotion_ok = emotion.attach_redis(stm.redis_client)
     prefrontal_ok = prefrontal.attach_redis(stm.redis_client)
-    manas_ok = manas.attach_redis(stm.redis_client)
+    manas_ok = manas.attach_redis(_as_manas_redis(stm.redis_client))
     metacognition_ok = metacognition.attach_redis(stm.redis_client)
-    sleep_ok = sleep.attach_redis(stm.redis_client)
+    sleep_ok = sleep.attach_redis(_as_sleep_redis(stm.redis_client))
     return queue_ok and action_ok and emotion_ok and prefrontal_ok and manas_ok and metacognition_ok and sleep_ok
 
 
@@ -2014,6 +2014,14 @@ def _as_action_redis(redis_client: redis_lib.Redis | None) -> ActionRedisLike | 
 
 
 def _as_conversation_redis(redis_client: redis_lib.Redis | None) -> ConversationRedisLike | None:
+    return redis_client  # type: ignore[return-value]
+
+
+def _as_manas_redis(redis_client: redis_lib.Redis | None) -> ManasRedisLike | None:
+    return redis_client  # type: ignore[return-value]
+
+
+def _as_sleep_redis(redis_client: redis_lib.Redis | None) -> SleepRedisLike | None:
     return redis_client  # type: ignore[return-value]
 
 

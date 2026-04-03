@@ -253,7 +253,7 @@ class LongTermMemory:
                 memory.created_at,
                 self._time_decay_factor,
             )
-        entries.sort(key=lambda memory: memory.weighted_score, reverse=True)
+        entries.sort(key=lambda memory_entry: memory_entry.weighted_score, reverse=True)
         return entries
 
     def recent_by_time(
