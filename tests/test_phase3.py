@@ -1381,7 +1381,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         )
 
         self.assertIn("## 眼前的画面", prompt)
-        self.assertIn("这是我自己的眼睛此刻看到的画面，不是任何人发给我的图片", prompt)
+        self.assertIn("这是我此刻看到的画面，不是任何人发给我的图片", prompt)
         self.assertIn("如果画面里的东西自然牵引了念头，可以纳入思考", prompt)
         self.assertIn("当对话和画面同时出现时，对话仍是前景，画面只是背景", prompt)
         self.assertLess(prompt.index("## 眼前的画面"), prompt.index("## 有人对我说话了"))

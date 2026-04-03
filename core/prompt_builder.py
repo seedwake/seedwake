@@ -858,7 +858,7 @@ def _format_perception_cues(cues: list[str]) -> str:
 
 def _format_visual_input(*, has_conversation: bool) -> str:
     lines = [
-        "这是我自己的眼睛此刻看到的画面，不是任何人发给我的图片，也不是需要我去分析的任务。",
+        "这是我此刻看到的画面，不是任何人发给我的图片，也不是需要我去分析的任务。",
         "如果画面里的东西自然牵引了念头，可以纳入思考；如果没有，就不必刻意描述。",
     ]
     if has_conversation:
