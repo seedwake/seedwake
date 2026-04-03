@@ -426,7 +426,10 @@ class SleepManager:
             maintenance_count=maintenance_operations,
             expired_count=expired_count,
         )
-        logger.info("deep sleep summary generation finished in %.1f ms", elapsed_ms(summary_started_at))
+        logger.info(
+            "deep sleep summary generation finished in %.1f ms: %s",
+            elapsed_ms(summary_started_at), deep_summary or "(empty)",
+        )
 
         review_started_at = time.perf_counter()
         self_review = _generate_deep_sleep_review(
@@ -443,7 +446,10 @@ class SleepManager:
             pruned_count=pruned,
             expired_count=expired_count,
         )
-        logger.info("deep sleep self-review generation finished in %.1f ms", elapsed_ms(review_started_at))
+        logger.info(
+            "deep sleep self-review generation finished in %.1f ms: %s",
+            elapsed_ms(review_started_at), self_review or "(empty)",
+        )
 
         now = datetime.now(timezone.utc).isoformat()
         self._shadow["energy"] = 100.0
@@ -697,6 +703,7 @@ def _store_light_sleep_semantic_memories(
         )
         if not summary:
             continue
+        logger.info("light sleep semantic summary: %s", summary)
         try:
             embedding = embed_text(embedding_client, summary, embedding_model)
         except MODEL_CLIENT_EXCEPTIONS:
@@ -800,6 +807,7 @@ def _update_impression_memories(
         )
         if not impression:
             continue
+        logger.info("light sleep impression for %s: %s", source, impression)
         try:
             embedding = embed_text(embedding_client, impression, embedding_model)
         except MODEL_CLIENT_EXCEPTIONS:

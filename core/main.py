@@ -99,12 +99,11 @@ EMBEDDING_EXCEPTIONS = (
 )
 RECENT_CONVERSATION_SUMMARY_TARGET_CHARS = 280
 RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT = (
-    "你在压缩我更早的对话历史。"
-    "根据已有摘要和补充消息，写一段新的中文自然语言摘要，替换旧摘要。"
-    "只概括不会直接展示的更早消息，不要把最近会直接展示的消息再写进去。"
-    "不要逐条复读，不要项目符号，不要时间戳，不要消息编号。"
-    "对方用名字称呼，assistant 用\"我\"。"
-    f"严格控制在 {RECENT_CONVERSATION_SUMMARY_TARGET_CHARS} 字以内，只输出摘要正文。"
+    f"你在压缩我更早的对话历史。"
+    f"根据已有摘要和补充消息，写一段新的中文自然语言摘要，替换旧摘要。"
+    f"摘要的目的是总结概括，尽量保全重要信息、语义完整，但不要逐条复读。"
+    f"对方用名字称呼，assistant 称呼用\"我\"。"
+    f"新摘要字数严格控制在 {RECENT_CONVERSATION_SUMMARY_TARGET_CHARS} 字以内，只输出摘要正文。"
 )
 RECENT_CONVERSATION_SUMMARY_BATCH_MAX_CHARS = 2400
 LTM_EXCEPTIONS = (
@@ -1163,10 +1162,11 @@ def _execute_cycle(
             if reflection is not None:
                 thoughts = [*thoughts, reflection]
         logger.info(
-            "cycle C%s metacognition finished in %.1f ms (generated=%s)",
+            "cycle C%s metacognition finished in %.1f ms (generated=%s%s)",
             cycle_id,
             elapsed_ms(reflection_started_at),
             reflection is not None,
+            f", content={reflection.content}" if reflection is not None else "",
         )
         sanitize_started_at = time.perf_counter()
         _sanitize_cycle_trigger_refs(thoughts, recent_thoughts)
@@ -1317,12 +1317,14 @@ def _summarize_recent_conversation(
             return None
         current_summary = summary
     logger.info(
-        "cycle C%s recent conversation summary for %s finished in %.1f ms (batches=%d, output_chars=%d)",
+        "cycle C%s recent conversation summary for %s finished in %.1f ms"
+        " (batches=%d, output_chars=%d): %s",
         cycle_id,
         source_name,
         elapsed_ms(total_started_at),
         total_batches,
         len(current_summary),
+        current_summary,
     )
     return current_summary
 
