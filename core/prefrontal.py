@@ -100,14 +100,15 @@ class PrefrontalManager:
     ) -> PrefrontalPromptState:
         goal_stack = build_goal_stack(identity)
         guidance: list[str] = []
+        check_due = cycle_id % self._check_interval == 0
         manifested_habits = [habit for habit in active_habits if habit.get("manifested")]
         if sleep_state["mode"] != "awake":
             guidance.append(f"我现在偏{sleep_state['mode']}，需要把行动收得更谨慎。")
-        if manifested_habits:
+        if check_due and manifested_habits:
             guidance.append("此刻有旧的惯性正在浮现，留意是否在重复旧模式。")
         if degeneration_intervention is not None:
             guidance.extend(_degeneration_guidance(degeneration_intervention))
-        plan_mode = cycle_id % self._check_interval == 0 or bool(manifested_habits) or degeneration_intervention is not None
+        plan_mode = check_due or degeneration_intervention is not None
         if plan_mode:
             guidance.append("这一轮我需要多留意：是否偏题、是否重复、是否该压住冲动。")
         guidance_limit = 6 if degeneration_intervention is not None else 3

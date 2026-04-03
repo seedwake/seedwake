@@ -270,6 +270,11 @@ def _append_prompt_context_sections(
     note_text: str,
     perception_cues: list[str],
 ) -> None:
+    if window:
+        _append_prompt_section(parts, "recent_thoughts", lambda: _format_thought_history(window))
+    if long_term_context:
+        ltm = long_term_context
+        _append_prompt_section(parts, "long_term", lambda: _format_long_term(ltm))
     if prefrontal_state is not None and _prefrontal_needs_prompt(prefrontal_state):
         executive = prefrontal_state
         _append_prompt_section(parts, "goal_stack", lambda: _format_prefrontal_alert(executive))
@@ -287,11 +292,6 @@ def _append_prompt_context_sections(
     if perception_cues:
         cues = perception_cues
         _append_prompt_section(parts, "perception_cues", lambda: _format_perception_cues(cues))
-    if window:
-        _append_prompt_section(parts, "recent_thoughts", lambda: _format_thought_history(window))
-    if long_term_context:
-        ltm = long_term_context
-        _append_prompt_section(parts, "long_term", lambda: _format_long_term(ltm))
 
 
 def _append_prompt_stimulus_sections(

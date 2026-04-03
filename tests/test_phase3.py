@@ -1275,9 +1275,9 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("## 最近的对话", prompt)
         self.assertIn("## 有人对我说话了", prompt)
         self.assertIn("## 接下来的念头", prompt)
-        self.assertLess(prompt.index("## 我的笔记"), prompt.index("## 好像有一阵子没有……"))
-        self.assertLess(prompt.index("## 好像有一阵子没有……"), prompt.index("## 最近的念头"))
         self.assertLess(prompt.index("## 最近的念头"), prompt.index("## 浮上来的记忆"))
+        self.assertLess(prompt.index("## 浮上来的记忆"), prompt.index("## 我的笔记"))
+        self.assertLess(prompt.index("## 我的笔记"), prompt.index("## 好像有一阵子没有……"))
         self.assertLess(prompt.index("## 浮上来的记忆"), prompt.index("## 行动有了回音"))
         self.assertLess(prompt.index("## 行动有了回音"), prompt.index("## 我已发起、在等执行的事"))
         self.assertLess(prompt.index("## 我已发起、在等执行的事"), prompt.index("## 我已经发起、正在等回音的事"))
@@ -1524,7 +1524,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("晚安", prompt)
         self.assertNotIn("必须刻意跳到完全不同的话题", prompt)
 
-    def test_prompt_includes_phase4_sections_before_memories(self) -> None:
+    def test_prompt_includes_phase4_sections_after_recent_thoughts_and_memories(self) -> None:
         prompt = build_prompt(
             9,
             {
@@ -1564,6 +1564,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                     _reflection_prompt_entry(content="我注意到自己最近容易在等待里打转。"),
                 ],
                 long_term_context=["一段浮上来的记忆。"],
+                note_text="记下：别把刚才的直觉弄丢。",
             ),
         )
 
@@ -1573,8 +1574,11 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertNotIn("## 清醒与困意", prompt)  # awake mode doesn't render
         self.assertNotIn("## 相关习气/倾向性", prompt)  # habits no longer shown in prompt
         self.assertIn("## 最近的反思", prompt)
+        self.assertLess(prompt.index("## 最近的念头"), prompt.index("## 浮上来的记忆"))
+        self.assertLess(prompt.index("## 浮上来的记忆"), prompt.index("## 此刻需要留意"))
         self.assertLess(prompt.index("## 此刻需要留意"), prompt.index("## 此刻的自我感"))
-        self.assertLess(prompt.index("## 最近的反思"), prompt.index("## 最近的念头"))
+        self.assertLess(prompt.index("## 此刻的自我感"), prompt.index("## 最近的反思"))
+        self.assertLess(prompt.index("## 最近的反思"), prompt.index("## 我的笔记"))
 
     def test_prompt_includes_current_impressions_section(self) -> None:
         prompt = build_prompt(
@@ -1591,6 +1595,31 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("## 我对他们的印象", prompt)
         self.assertIn("联系方式: telegram:1", prompt)
         self.assertLess(prompt.index("## 我对他们的印象"), prompt.index("## 接下来的念头"))
+
+    def test_prefrontal_current_state_does_not_show_generic_repeat_guidance_every_cycle(self) -> None:
+        manager = PrefrontalManager(
+            None,
+            check_interval=6,
+            inhibition_enabled=True,
+        )
+
+        state = manager.current_state(
+            cycle_id=5,
+            identity={"core_goals": "保持清醒。"},
+            active_habits=[
+                _habit_prompt_entry(
+                    pattern="遇到技术问题时倾向于先查文档",
+                    category="cognitive",
+                    strength=0.35,
+                    manifested=True,
+                ),
+            ],
+            sleep_state=_sleep_state_snapshot(),
+        )
+
+        self.assertFalse(state["plan_mode"])
+        self.assertNotIn("此刻有旧的惯性正在浮现，留意是否在重复旧模式。", state["guidance"])
+        self.assertNotIn("这一轮我需要多留意：是否偏题、是否重复、是否该压住冲动。", state["guidance"])
 
     def test_prompt_warns_about_stagnation_without_forcing_full_topic_switch_during_conversation(self) -> None:
         repeated_thoughts = [
