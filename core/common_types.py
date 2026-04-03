@@ -1,5 +1,6 @@
 """Shared structured types and utilities."""
 
+import itertools
 import time
 from typing import NotRequired, TypedDict
 
@@ -308,3 +309,68 @@ def bigram_similarity(left: str, right: str) -> float:
     if union == 0:
         return 0.0
     return len(grams_left & grams_right) / union
+
+
+def matched_rewritten_texts(
+    left_cycle: list[str],
+    right_cycle: list[str],
+    *,
+    similarity_threshold: float,
+) -> int:
+    """Return the maximum number of aligned high-similarity matches across two cycles."""
+    if not left_cycle or not right_cycle:
+        return 0
+    smaller_cycle, larger_cycle = (
+        (left_cycle, right_cycle)
+        if len(left_cycle) <= len(right_cycle)
+        else (right_cycle, left_cycle)
+    )
+    best = 0
+    larger_indexes = range(len(larger_cycle))
+    for chosen_indexes in itertools.permutations(larger_indexes, len(smaller_cycle)):
+        matched = 0
+        for smaller_text, larger_index in zip(smaller_cycle, chosen_indexes, strict=True):
+            if bigram_similarity(smaller_text, larger_cycle[larger_index]) >= similarity_threshold:
+                matched += 1
+        if matched > best:
+            best = matched
+        if best == len(smaller_cycle):
+            break
+    return best
+
+
+def rewritten_pair_match_counts(
+    cycles: list[list[str]],
+    *,
+    similarity_threshold: float,
+) -> list[int]:
+    """Return pairwise matched-text counts for every cycle pair."""
+    counts: list[int] = []
+    for i in range(len(cycles)):
+        for j in range(i + 1, len(cycles)):
+            counts.append(
+                matched_rewritten_texts(
+                    cycles[i],
+                    cycles[j],
+                    similarity_threshold=similarity_threshold,
+                )
+            )
+    return counts
+
+
+def detect_rewritten_repetition(
+    cycles: list[list[str]],
+    *,
+    similarity_threshold: float,
+    min_matched_texts: int,
+) -> bool:
+    """Detect repeated semantic tracks across cycle pairs using per-thought matching."""
+    if len(cycles) < 2:
+        return False
+    return all(
+        matched_count >= min_matched_texts
+        for matched_count in rewritten_pair_match_counts(
+            cycles,
+            similarity_threshold=similarity_threshold,
+        )
+    )

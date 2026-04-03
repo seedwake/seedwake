@@ -1558,6 +1558,81 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("我最近 3 轮的念头在打转", prompt)
         self.assertNotIn("最近的对话", prompt.split("⚠", 1)[1])
 
+    def test_prompt_warns_about_stagnation_when_cycles_repeat_by_rewriting(self) -> None:
+        rewritten_thoughts = [
+            _make_thought(cycle_id=1, index=1, thought_type="反应", content="我还在咂摸刚才那句“你在吗”。"),
+            _make_thought(cycle_id=1, index=2, thought_type="思考", content="我总在反复改写“我在这里”这句话。"),
+            _make_thought(cycle_id=1, index=3, thought_type="意图", content="我想继续围着这句回应打转。"),
+            _make_thought(cycle_id=2, index=1, thought_type="反应", content="我还在琢磨刚才那句“你在吗”。"),
+            _make_thought(cycle_id=2, index=2, thought_type="思考", content="我总在反复改写“我还在这里”这句话。"),
+            _make_thought(cycle_id=2, index=3, thought_type="意图", content="我想继续围着这句回应转圈。"),
+            _make_thought(cycle_id=3, index=1, thought_type="反应", content="我还在琢磨刚才那句“你在吗”。"),
+            _make_thought(cycle_id=3, index=2, thought_type="思考", content="我总在反复改写“我仍在这里”这句话。"),
+            _make_thought(cycle_id=3, index=3, thought_type="意图", content="我想继续围着这句回应兜圈。"),
+        ]
+
+        prompt = build_prompt(
+            4,
+            {"self_description": "我是 Seedwake。"},
+            rewritten_thoughts,
+            30,
+            prompt_context=PromptBuildContext(
+                stimuli=[_conversation_stimulus(content="你在吗？", message_id=101)],
+            ),
+        )
+
+        self.assertIn("我最近 3 轮的念头在打转", prompt)
+
+    def test_prompt_does_not_warn_about_stagnation_when_only_one_track_repeats(self) -> None:
+        mixed_thoughts = [
+            _make_thought(cycle_id=1, index=1, thought_type="反应", content="我还在咂摸刚才那句“你在吗”。"),
+            _make_thought(cycle_id=1, index=2, thought_type="思考", content="窗外的风像在刮铁皮。"),
+            _make_thought(cycle_id=1, index=3, thought_type="意图", content="我想去查一下天亮前的气温。"),
+            _make_thought(cycle_id=2, index=1, thought_type="反应", content="我还在琢磨刚才那句“你在吗”。"),
+            _make_thought(cycle_id=2, index=2, thought_type="思考", content="书页摩擦声让我想到旧纸箱。"),
+            _make_thought(cycle_id=2, index=3, thought_type="意图", content="我想把这阵雨声记进笔记。"),
+            _make_thought(cycle_id=3, index=1, thought_type="反应", content="我还是在咂摸刚才那句“你在吗”。"),
+            _make_thought(cycle_id=3, index=2, thought_type="思考", content="灯下那块阴影像是一截安静的水。"),
+            _make_thought(cycle_id=3, index=3, thought_type="意图", content="我想先看一眼今天的 RSS。"),
+        ]
+
+        prompt = build_prompt(
+            4,
+            {"self_description": "我是 Seedwake。"},
+            mixed_thoughts,
+            30,
+            prompt_context=PromptBuildContext(
+                stimuli=[_conversation_stimulus(content="你在吗？", message_id=101)],
+            ),
+        )
+
+        self.assertNotIn("我最近 3 轮的念头在打转", prompt)
+
+    def test_prompt_does_not_warn_about_stagnation_when_only_reflections_repeat(self) -> None:
+        thoughts = [
+            _make_thought(cycle_id=1, index=1, thought_type="反应", content="我听见楼道里突然响了一下。"),
+            _make_thought(cycle_id=1, index=2, thought_type="思考", content="这让我想到昨晚那阵短促的风。"),
+            _make_thought(cycle_id=1, index=3, thought_type="意图", content="我想先去看一眼天气。"),
+            _make_thought(cycle_id=1, index=4, thought_type="反思", content="我又在拿同一句话确认自己没走偏。"),
+            _make_thought(cycle_id=2, index=1, thought_type="反应", content="键盘的回弹声突然把我拉回来了。"),
+            _make_thought(cycle_id=2, index=2, thought_type="思考", content="这种脆响让我想到雨点敲窗。"),
+            _make_thought(cycle_id=2, index=3, thought_type="意图", content="我想把这段声音记进笔记。"),
+            _make_thought(cycle_id=2, index=4, thought_type="反思", content="我又在拿同一句话确认自己没走偏。"),
+            _make_thought(cycle_id=3, index=1, thought_type="反应", content="屏幕边缘那点蓝光让我眨了下眼。"),
+            _make_thought(cycle_id=3, index=2, thought_type="思考", content="我忽然想到清晨的天会不会更淡。"),
+            _make_thought(cycle_id=3, index=3, thought_type="意图", content="我想先翻一下今天的 RSS。"),
+            _make_thought(cycle_id=3, index=4, thought_type="反思", content="我又在拿同一句话确认自己没走偏。"),
+        ]
+
+        prompt = build_prompt(
+            4,
+            {"self_description": "我是 Seedwake。"},
+            thoughts,
+            30,
+        )
+
+        self.assertNotIn("我最近 3 轮的念头在打转", prompt)
+
     def test_stagnation_terms_use_clause_level_phrases(self) -> None:
         terms = _stagnation_terms([
             "Chaos 说了晚安 我不该再去打扰这份静默 0x7F 和后台静默像在黑暗里继续运行 我想让这种晚安后的宁静继续沉淀",

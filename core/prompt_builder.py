@@ -21,7 +21,7 @@ from core.common_types import (
     RecentConversationPrompt,
     ReflectionPromptEntry,
     SleepStateSnapshot,
-    bigram_similarity,
+    detect_rewritten_repetition,
     elapsed_ms,
 )
 
@@ -120,6 +120,7 @@ RUNNING_ACTION_VISIBLE_STATUSES = {"running"}
 PROMPT_SECTION_LOG_THRESHOLD_MS = 10.0
 STAGNATION_CHECK_CYCLES = 3
 STAGNATION_SIMILARITY_THRESHOLD = 0.6
+STAGNATION_MIN_MATCHED_THOUGHTS = 2
 STAGNATION_TERM_STOPWORDS = {
     "刚才",
     "现在",
@@ -577,24 +578,22 @@ def _detect_thought_stagnation(
     recent_cycles = _group_recent_cycles(thoughts, STAGNATION_CHECK_CYCLES)
     if len(recent_cycles) < STAGNATION_CHECK_CYCLES:
         return ""
-    cycle_texts = [
-        " ".join(
+    normalized_cycles = [
+        [
             normalized
             for thought in cycle_thoughts
-            if (normalized := _normalize_stagnation_text(thought.content))
-        )
+            if thought.type != "反思"
+            and (normalized := _normalize_stagnation_text(thought.content))
+        ]
         for cycle_thoughts in recent_cycles
     ]
-    if any(not text for text in cycle_texts):
+    if any(not cycle_texts for cycle_texts in normalized_cycles):
         return ""
-    similar_pairs = 0
-    total_pairs = 0
-    for i in range(len(cycle_texts)):
-        for j in range(i + 1, len(cycle_texts)):
-            total_pairs += 1
-            if bigram_similarity(cycle_texts[i], cycle_texts[j]) >= STAGNATION_SIMILARITY_THRESHOLD:
-                similar_pairs += 1
-    if 0 < total_pairs == similar_pairs:
+    cycle_texts = [
+        " ".join(cycle_thoughts)
+        for cycle_thoughts in normalized_cycles
+    ]
+    if _stagnation_detected(normalized_cycles):
         return _stagnation_warning(cycle_texts, available_sources, has_foreground)
     return ""
 
@@ -605,6 +604,14 @@ def _group_recent_cycles(thoughts: list[Thought], n: int) -> list[list[Thought]]
         cycles.setdefault(t.cycle_id, []).append(t)
     sorted_cycle_ids = sorted(cycles.keys())[-n:]
     return [cycles[cid] for cid in sorted_cycle_ids]
+
+
+def _stagnation_detected(cycle_texts: list[list[str]]) -> bool:
+    return detect_rewritten_repetition(
+        cycle_texts,
+        similarity_threshold=STAGNATION_SIMILARITY_THRESHOLD,
+        min_matched_texts=STAGNATION_MIN_MATCHED_THOUGHTS,
+    )
 
 
 def _stagnation_sources(

@@ -58,6 +58,7 @@ from core.stimulus import (
 from core.thought_parser import Thought
 from core.common_types import (
     ConversationEntry,
+    detect_rewritten_repetition,
     EventPayload,
     HabitPromptEntry,
     JsonObject,
@@ -65,7 +66,7 @@ from core.common_types import (
     JsonValue,
     RecentConversationPrompt,
     StatusEventPayload,
-    bigram_similarity,
+    rewritten_pair_match_counts,
     elapsed_ms,
 )
 
@@ -98,6 +99,9 @@ EMBEDDING_EXCEPTIONS = (
     TypeError,
 )
 RECENT_CONVERSATION_SUMMARY_TARGET_CHARS = 280
+DEGENERATION_CHECK_CYCLES = 3
+DEGENERATION_SIMILARITY_THRESHOLD = 0.64
+DEGENERATION_MIN_MATCHED_THOUGHTS = 2
 RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT = (
     f"你在压缩我更早的对话历史。"
     f"根据已有摘要和补充消息，写一段新的中文自然语言摘要，替换旧摘要。"
@@ -1719,30 +1723,36 @@ def _detect_runtime_degeneration(recent_thoughts: list[Thought], current_thought
     grouped: dict[int, list[Thought]] = {}
     for thought in [*recent_thoughts, *current_thoughts]:
         grouped.setdefault(thought.cycle_id, []).append(thought)
-    recent_cycle_ids = sorted(grouped.keys())[-3:]
-    if len(recent_cycle_ids) < 3:
+    recent_cycle_ids = sorted(grouped.keys())[-DEGENERATION_CHECK_CYCLES:]
+    if len(recent_cycle_ids) < DEGENERATION_CHECK_CYCLES:
         return False
     cycle_texts = [
-        " ".join(
-            _normalize_cycle_text(thought.content)
+        [
+            normalized
             for thought in grouped[cycle_id]
-            if _normalize_cycle_text(thought.content)
-        )
+            if thought.type != "反思"
+            and (normalized := _normalize_cycle_text(thought.content))
+        ]
         for cycle_id in recent_cycle_ids
     ]
-    if any(not text for text in cycle_texts):
+    if any(not cycle_entries for cycle_entries in cycle_texts):
         return False
-    pairwise = [
-        bigram_similarity(cycle_texts[0], cycle_texts[1]),
-        bigram_similarity(cycle_texts[0], cycle_texts[2]),
-        bigram_similarity(cycle_texts[1], cycle_texts[2]),
-    ]
-    detected = all(value >= 0.6 for value in pairwise)
+    pairwise = rewritten_pair_match_counts(
+        cycle_texts,
+        similarity_threshold=DEGENERATION_SIMILARITY_THRESHOLD,
+    )
+    detected = detect_rewritten_repetition(
+        cycle_texts,
+        similarity_threshold=DEGENERATION_SIMILARITY_THRESHOLD,
+        min_matched_texts=DEGENERATION_MIN_MATCHED_THOUGHTS,
+    )
     if detected:
         logger.info(
-            "degeneration detected: cycles=%s similarities=[%.2f, %.2f, %.2f]",
+            "degeneration detected: cycles=%s matched_thoughts=%s threshold=%.2f min=%d",
             recent_cycle_ids,
-            *pairwise,
+            pairwise,
+            DEGENERATION_SIMILARITY_THRESHOLD,
+            DEGENERATION_MIN_MATCHED_THOUGHTS,
         )
     return detected
 

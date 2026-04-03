@@ -13,6 +13,7 @@ import redis as redis_lib
 # noinspection PyProtectedMember
 from core.main import (
     EngineRuntime,
+    _detect_runtime_degeneration,
     _execute_cycle,
     _recover_runtime_services,
     _post_cycle_phase4,
@@ -84,6 +85,62 @@ class ShortTermMemoryFallbackTests(unittest.TestCase):
 
         self.assertIsNone(context[2].trigger_ref)
         self.assertEqual(context[3].trigger_ref, "C2-1")
+
+
+class RuntimeDegenerationDetectionTests(unittest.TestCase):
+    def test_detect_runtime_degeneration_when_recent_cycles_repeat_by_rewriting(self) -> None:
+        recent_thoughts = [
+            Thought("C1-1", 1, 1, "反应", "我还在咂摸刚才那句“你在吗”。"),
+            Thought("C1-2", 1, 2, "思考", "我总在反复改写“我在这里”这句话。"),
+            Thought("C1-3", 1, 3, "意图", "我想继续围着这句回应打转。"),
+            Thought("C2-1", 2, 1, "反应", "我还在琢磨刚才那句“你在吗”。"),
+            Thought("C2-2", 2, 2, "思考", "我总在反复改写“我还在这里”这句话。"),
+            Thought("C2-3", 2, 3, "意图", "我想继续围着这句回应转圈。"),
+        ]
+        current_thoughts = [
+            Thought("C3-1", 3, 1, "反应", "我还在琢磨刚才那句“你在吗”。"),
+            Thought("C3-2", 3, 2, "思考", "我总在反复改写“我仍在这里”这句话。"),
+            Thought("C3-3", 3, 3, "意图", "我想继续围着这句回应兜圈。"),
+        ]
+
+        self.assertTrue(_detect_runtime_degeneration(recent_thoughts, current_thoughts))
+
+    def test_detect_runtime_degeneration_does_not_trigger_when_only_one_track_repeats(self) -> None:
+        recent_thoughts = [
+            Thought("C1-1", 1, 1, "反应", "我还在咂摸刚才那句“你在吗”。"),
+            Thought("C1-2", 1, 2, "思考", "窗外的风像在刮铁皮。"),
+            Thought("C1-3", 1, 3, "意图", "我想去查一下天亮前的气温。"),
+            Thought("C2-1", 2, 1, "反应", "我还在琢磨刚才那句“你在吗”。"),
+            Thought("C2-2", 2, 2, "思考", "书页摩擦声让我想到旧纸箱。"),
+            Thought("C2-3", 2, 3, "意图", "我想把这阵雨声记进笔记。"),
+        ]
+        current_thoughts = [
+            Thought("C3-1", 3, 1, "反应", "我还是在咂摸刚才那句“你在吗”。"),
+            Thought("C3-2", 3, 2, "思考", "灯下那块阴影像是一截安静的水。"),
+            Thought("C3-3", 3, 3, "意图", "我想先看一眼今天的 RSS。"),
+        ]
+
+        self.assertFalse(_detect_runtime_degeneration(recent_thoughts, current_thoughts))
+
+    def test_detect_runtime_degeneration_ignores_repeated_reflections(self) -> None:
+        recent_thoughts = [
+            Thought("C1-1", 1, 1, "反应", "我听见楼道里突然响了一下。"),
+            Thought("C1-2", 1, 2, "思考", "这让我想到昨晚那阵短促的风。"),
+            Thought("C1-3", 1, 3, "意图", "我想先去看一眼天气。"),
+            Thought("C1-4", 1, 4, "反思", "我又在拿同一句话确认自己没走偏。"),
+            Thought("C2-1", 2, 1, "反应", "键盘的回弹声突然把我拉回来了。"),
+            Thought("C2-2", 2, 2, "思考", "这种脆响让我想到雨点敲窗。"),
+            Thought("C2-3", 2, 3, "意图", "我想把这段声音记进笔记。"),
+            Thought("C2-4", 2, 4, "反思", "我又在拿同一句话确认自己没走偏。"),
+        ]
+        current_thoughts = [
+            Thought("C3-1", 3, 1, "反应", "屏幕边缘那点蓝光让我眨了下眼。"),
+            Thought("C3-2", 3, 2, "思考", "我忽然想到清晨的天会不会更淡。"),
+            Thought("C3-3", 3, 3, "意图", "我想先翻一下今天的 RSS。"),
+            Thought("C3-4", 3, 4, "反思", "我又在拿同一句话确认自己没走偏。"),
+        ]
+
+        self.assertFalse(_detect_runtime_degeneration(recent_thoughts, current_thoughts))
 
 
 def _seed_existing_history(redis_client: MagicMock, *, latest_cycle_id: str | None) -> None:
