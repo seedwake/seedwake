@@ -11,6 +11,8 @@ models:
     #   openclaw 默认 false
     #   openai_compatible 默认 true
     # 如需覆盖 provider 默认能力，可显式设为 true / false
+    # think:
+    #   仅对 ollama generate 生效；开启后会请求 thinking，但主生成仍只取结果文本，不保留 thinking 内容
     name: "qwen3.5:27b"
     num_predict: 4096
     num_ctx: 131072

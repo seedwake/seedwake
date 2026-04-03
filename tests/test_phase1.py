@@ -427,6 +427,29 @@ class ModelClientTests(unittest.TestCase):
         self.assertEqual(options["num_predict"], 180)
         self.assertNotIn("max_tokens", options)
 
+    def test_ollama_generate_disables_think_by_default(self) -> None:
+        client = create_model_client({"name": "test-model"})
+        generate_mock = MagicMock(return_value={"response": "[思考] a\n[意图] b\n[反应] c"})
+        client._client.generate = generate_mock  # type: ignore[attr-defined]
+
+        text = client.generate_text("prompt-body", {"name": "test-model"})
+
+        self.assertEqual(text, "[思考] a\n[意图] b\n[反应] c")
+        self.assertFalse(generate_mock.call_args.kwargs["think"])
+
+    def test_ollama_generate_can_enable_think_but_discards_thinking_text(self) -> None:
+        client = create_model_client({"name": "test-model"})
+        generate_mock = MagicMock(return_value={
+            "response": "[思考] a\n[意图] b\n[反应] c",
+            "thinking": "hidden chain of thought",
+        })
+        client._client.generate = generate_mock  # type: ignore[attr-defined]
+
+        text = client.generate_text("prompt-body", {"name": "test-model", "think": True})
+
+        self.assertEqual(text, "[思考] a\n[意图] b\n[反应] c")
+        self.assertTrue(generate_mock.call_args.kwargs["think"])
+
 
 if __name__ == "__main__":
     unittest.main()

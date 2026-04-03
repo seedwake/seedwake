@@ -103,6 +103,7 @@ class OllamaModelClient(ModelClient):
     def generate_text(self, prompt: str, model_config: dict) -> str:
         started_at = time.perf_counter()
         status = "failed"
+        think_enabled = _resolve_generate_think_flag(model_config.get("think"))
         try:
             response = _normalize_ollama_generate_response(self._client.generate(
                 model=model_config["name"],
@@ -112,7 +113,7 @@ class OllamaModelClient(ModelClient):
                     "num_ctx": model_config.get("num_ctx", 32768),
                     "temperature": model_config.get("temperature", 0.8),
                 },
-                think=False,
+                think=think_enabled,
             ))
             text = _ollama_generate_text(response)
             status = "ok"
@@ -124,7 +125,7 @@ class OllamaModelClient(ModelClient):
                 model=model_config["name"],
                 started_at=started_at,
                 status=status,
-                detail=f"prompt_chars={len(prompt)}",
+                detail=f"prompt_chars={len(prompt)}, think={think_enabled}",
             )
 
     def chat(
@@ -558,6 +559,19 @@ def _resolve_tool_call_capability(provider: str, raw_value: JsonValue) -> bool:
     if value in {"0", "false", "no", "off"}:
         return False
     raise RuntimeError(f"models.*.supports_tool_calls 配置无效：{raw_value}")
+
+
+def _resolve_generate_think_flag(raw_value: JsonValue) -> bool:
+    if raw_value is None:
+        return False
+    if isinstance(raw_value, bool):
+        return raw_value
+    value = str(raw_value).strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"models.*.think 配置无效：{raw_value}")
 
 
 def _normalize_openai_chat_response(body: JsonObject) -> JsonObject:
