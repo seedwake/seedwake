@@ -1,7 +1,7 @@
 import json
 import re
 
-from core.types import ActionEventPayload, StatusEventPayload
+from core.common_types import ActionEventPayload, StatusEventPayload
 
 
 def load_allowed_user_ids(config: dict) -> list[int]:

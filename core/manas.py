@@ -11,7 +11,7 @@ import redis as redis_lib
 from core.embedding import embed_texts
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient
 from core.thought_parser import Thought, strip_action_markers
-from core.types import ManasPromptState, elapsed_ms
+from core.common_types import ManasPromptState, elapsed_ms
 
 MANAS_STATE_KEY = "seedwake:manas_state"
 MANAS_REDIS_EXCEPTIONS = (

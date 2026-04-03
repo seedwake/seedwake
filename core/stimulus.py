@@ -12,7 +12,7 @@ from typing import Protocol, TypeGuard
 from redis import exceptions as redis_exceptions
 from uuid import uuid4
 
-from core.types import (
+from core.common_types import (
     ConversationEntry,
     JsonObject,
     JsonValue,

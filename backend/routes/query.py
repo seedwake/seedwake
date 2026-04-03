@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from backend.deps import require_redis, resolve_admin, resolve_api_client
 from core.action import load_action_items
 from core.memory.short_term import REDIS_KEY as THOUGHT_REDIS_KEY
-from core.types import ActionsResponse, JsonObject, ThoughtsResponse
+from core.common_types import ActionsResponse, JsonObject, ThoughtsResponse
 
 router = APIRouter(prefix="/api")
 logger = logging.getLogger(__name__)

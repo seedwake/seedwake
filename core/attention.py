@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from core.stimulus import Stimulus
 from core.thought_parser import Thought, strip_action_markers, thought_action_requests
-from core.types import AttentionPromptEntry, EmotionSnapshot, HabitPromptEntry
+from core.common_types import AttentionPromptEntry, EmotionSnapshot, HabitPromptEntry
 
 NOVELTY_WINDOW = 12
 

@@ -15,7 +15,7 @@ from ollama import (
     RequestError as OllamaRequestError,
     ResponseError as OllamaResponseError,
 )
-from core.types import JsonObject, JsonValue, elapsed_ms
+from core.common_types import JsonObject, JsonValue, elapsed_ms
 
 OPENCLAW_SCOPES_HEADER = "x-openclaw-scopes"
 OPENCLAW_DEFAULT_SCOPES = "operator.read, operator.write"

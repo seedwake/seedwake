@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from core.types import RawActionRequest
+from core.common_types import RawActionRequest
 
 THOUGHT_HEADER_PATTERN = re.compile(
     r"^\[(?P<type>思考|意图|反应)(?:-C\d+-\d+)?]\s*(?P<content>.*)$",

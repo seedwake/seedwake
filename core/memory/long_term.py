@@ -14,7 +14,7 @@ import time
 import psycopg
 from psycopg import sql
 
-from core.types import JsonObject, coerce_json_object, elapsed_ms
+from core.common_types import JsonObject, coerce_json_object, elapsed_ms
 
 logger = logging.getLogger(__name__)
 

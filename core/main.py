@@ -33,7 +33,7 @@ from core.attention import evaluate_attention, select_attention_anchor
 from core.cycle import run_cycle, write_prompt_log_block
 from core.embedding import embed_text
 from core.emotion import EmotionManager
-from core.logging import resolve_log_path, setup_logging
+from core.logging_setup import resolve_log_path, setup_logging
 from core.memory.habit import HabitMemory
 from core.memory.identity import load_identity
 from core.memory.long_term import LongTermEntry, LongTermMemory
@@ -56,7 +56,7 @@ from core.stimulus import (
     remember_recent_action_echoes,
 )
 from core.thought_parser import Thought
-from core.types import (
+from core.common_types import (
     ConversationEntry,
     EventPayload,
     JsonObject,
@@ -609,7 +609,16 @@ def _graceful_restart_core(
         prompt_log_file.close()
     if not drained:
         logger.warning("restart proceeding with running actions still active")
-    os.execv(sys.executable, [sys.executable, *sys.argv])
+    os.execv(sys.executable, _restart_argv())
+
+
+def _restart_argv() -> list[str]:
+    original = getattr(sys, "orig_argv", None)
+    if isinstance(original, list) and original:
+        argv = [str(part) for part in original]
+        argv[0] = sys.executable
+        return argv
+    return [sys.executable, *sys.argv]
 
 
 def _prepare_cycle(

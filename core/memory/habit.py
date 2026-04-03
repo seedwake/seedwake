@@ -13,7 +13,7 @@ from core.embedding import embed_text
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient
 from core.stimulus import Stimulus
 from core.thought_parser import Thought, thought_action_requests
-from core.types import HabitControlSignal, HabitPromptEntry, JsonObject, elapsed_ms
+from core.common_types import HabitControlSignal, HabitPromptEntry, JsonObject, elapsed_ms
 
 logger = logging.getLogger(__name__)
 HABIT_MIN_PATTERN_LENGTH = 4

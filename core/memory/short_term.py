@@ -15,7 +15,7 @@ from datetime import datetime
 import redis as redis_lib
 
 from core.thought_parser import Thought
-from core.types import JsonValue, elapsed_ms
+from core.common_types import JsonValue, elapsed_ms
 
 REDIS_KEY = "seedwake:thoughts"
 REDIS_CHANNEL = "seedwake:stream"

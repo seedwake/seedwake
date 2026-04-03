@@ -21,7 +21,7 @@ from core.stimulus import (
     load_conversation_history,
 )
 from core.thought_parser import Thought, strip_action_markers
-from core.types import ConversationEntry, EmotionSnapshot, JsonObject, SleepStateSnapshot, elapsed_ms
+from core.common_types import ConversationEntry, EmotionSnapshot, JsonObject, SleepStateSnapshot, elapsed_ms
 
 SLEEP_STATE_KEY = "seedwake:sleep_state"
 LIGHT_SLEEP_SEMANTIC_BATCH_MAX_CHARS = 1800

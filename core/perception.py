@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from core.stimulus import Stimulus
-from core.types import MemorySnapshot, PerceptionStimulusPayload, SystemStatusSnapshot
+from core.common_types import MemorySnapshot, PerceptionStimulusPayload, SystemStatusSnapshot
 
 if TYPE_CHECKING:
     from core.action import ActionRecord

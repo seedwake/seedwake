@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.deps import resolve_api_client
 from core.memory.short_term import REDIS_CHANNEL as THOUGHT_CHANNEL
-from core.types import EventEnvelope, EventPayload, StatusEventPayload
+from core.common_types import EventEnvelope, EventPayload, StatusEventPayload
 
 router = APIRouter(prefix="/api")
 EVENT_CHANNEL = "seedwake:events"

@@ -27,7 +27,7 @@ from core.stimulus import (
     remember_recent_action_echoes,
 )
 from core.thought_parser import Thought, thought_action_requests
-from core.types import (
+from core.common_types import (
     ActionControl,
     ActionRequestPayload,
     ActionResultEnvelope,

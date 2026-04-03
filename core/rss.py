@@ -8,7 +8,7 @@ from email.utils import parsedate_to_datetime
 from urllib import error, request
 from xml.etree import ElementTree
 
-from core.types import ActionResultEnvelope, JsonObject, JsonValue, NewsItem
+from core.common_types import ActionResultEnvelope, JsonObject, JsonValue, NewsItem
 
 FEED_TIMEOUT_SECONDS = 10
 MAX_ITEMS_PER_FEED = 10

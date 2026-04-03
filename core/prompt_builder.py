@@ -11,7 +11,7 @@ from datetime import datetime
 from core.action import ActionRecord
 from core.stimulus import Stimulus
 from core.thought_parser import Thought
-from core.types import (
+from core.common_types import (
     EmotionSnapshot,
     HabitPromptEntry,
     JsonObject,

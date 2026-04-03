@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from backend.deps import require_redis, resolve_admin, resolve_api_client
 from core.action import push_action_control
 from core.stimulus import load_conversation_history
-from core.types import ActionConfirmResponse, ConversationHistoryResponse
+from core.common_types import ActionConfirmResponse, ConversationHistoryResponse
 
 router = APIRouter(prefix="/api")
 REDIS_ROUTE_EXCEPTIONS = (

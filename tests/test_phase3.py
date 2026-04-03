@@ -39,6 +39,7 @@ from core.emotion import _llm_fusion_weight
 from core.main import (
     _print_stimuli,
     _filter_prompt_running_actions,
+    _restart_argv,
     _resolve_prompt_action_state,
     RECENT_CONVERSATION_SUMMARY_BATCH_MAX_CHARS,
     _recent_conversation_summary_batches,
@@ -88,9 +89,9 @@ from core.stimulus import (
     load_recent_conversations,
     remember_recent_action_echoes,
 )
-from core.types import ConversationEntry, JsonObject, JsonValue, RawActionRequest, RecentConversationPrompt
+from core.common_types import ConversationEntry, JsonObject, JsonValue, RawActionRequest, RecentConversationPrompt
 from core.thought_parser import Thought
-from core.types import ActionControl, ActionResultEnvelope, NewsItem
+from core.common_types import ActionControl, ActionResultEnvelope, NewsItem
 from test_support import ListRedisStub
 
 
@@ -3251,6 +3252,17 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         self.assertEqual(recent_action_echoes, [recent_echo])
         self.assertEqual(filtered_actions, [])
+
+    def test_restart_argv_preserves_module_invocation(self) -> None:
+        with patch("core.main.sys.executable", "/venv/bin/python"), patch(
+            "core.main.sys.orig_argv",
+            ["/venv/bin/python", "-m", "core.main", "--config", "config.yml"],
+            create=True,
+        ):
+            self.assertEqual(
+                _restart_argv(),
+                ["/venv/bin/python", "-m", "core.main", "--config", "config.yml"],
+            )
 
     def test_load_recent_conversations_skips_empty_recent_block_for_current_only_source(self) -> None:
         redis_client = ListRedisStub()

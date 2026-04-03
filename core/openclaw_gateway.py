@@ -17,7 +17,7 @@ from urllib import error, request
 from uuid import uuid4
 
 from ollama import RequestError as OllamaRequestError, ResponseError as OllamaResponseError
-from core.types import ActionResultEnvelope, JsonObject, JsonValue, coerce_json_value, elapsed_ms
+from core.common_types import ActionResultEnvelope, JsonObject, JsonValue, coerce_json_value, elapsed_ms
 
 if TYPE_CHECKING:
     from core.action import ActionRecord

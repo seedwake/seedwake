@@ -26,7 +26,7 @@ from bot.helpers import (
 )
 from core.action import ACTION_CONTROL_KEY
 from core.stimulus import CONVERSATION_HISTORY_KEY, REDIS_KEY as STIMULUS_REDIS_KEY
-from core.types import ActionEventPayload, EventEnvelope
+from core.common_types import ActionEventPayload, EventEnvelope
 from test_support import slice_window
 
 

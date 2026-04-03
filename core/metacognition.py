@@ -9,7 +9,7 @@ import redis as redis_lib
 
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient
 from core.thought_parser import Thought
-from core.types import EmotionSnapshot, HabitPromptEntry, ManasPromptState, PrefrontalPromptState, ReflectionPromptEntry
+from core.common_types import EmotionSnapshot, HabitPromptEntry, ManasPromptState, PrefrontalPromptState, ReflectionPromptEntry
 
 REFLECTIONS_KEY = "seedwake:reflections"
 REFLECTION_STATE_KEY = "seedwake:reflection_state"

@@ -16,7 +16,7 @@ from core.action import ActionRecord
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient
 from core.stimulus import Stimulus
 from core.thought_parser import Thought
-from core.types import EmotionSnapshot, elapsed_ms
+from core.common_types import EmotionSnapshot, elapsed_ms
 
 EMOTION_STATE_KEY = "seedwake:emotion_state"
 DEFAULT_EMOTION_DIMENSIONS = ["curiosity", "calm", "frustration", "satisfaction", "concern"]

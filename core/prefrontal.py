@@ -17,7 +17,7 @@ import redis as redis_lib
 
 from core.stimulus import Stimulus
 from core.thought_parser import Thought, thought_action_requests
-from core.types import (
+from core.common_types import (
     ActionRequestPayload,
     HabitPromptEntry,
     PrefrontalPromptState,

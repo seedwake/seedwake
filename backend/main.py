@@ -11,9 +11,9 @@ from backend.deps import resolve_api_client
 from backend.routes.conversation import router as conversation_router
 from backend.routes.query import router as query_router
 from backend.routes.stream import router as stream_router
-from core.logging import setup_logging
+from core.logging_setup import setup_logging
 from core.runtime import connect_redis_from_env, load_yaml_config
-from core.types import HealthResponse
+from core.common_types import HealthResponse
 
 logger = logging.getLogger(__name__)
 ApiClient = Annotated[str, Depends(resolve_api_client)]

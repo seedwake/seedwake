@@ -7,7 +7,7 @@ from typing import TextIO
 from core.model_client import ModelClient, build_generation_request_log
 from core.prompt_builder import PromptBuildContext, build_prompt
 from core.thought_parser import Thought, fallback_thought, parse_thoughts
-from core.types import (
+from core.common_types import (
     elapsed_ms,
 )
 
