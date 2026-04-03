@@ -1093,6 +1093,7 @@ def _execute_cycle(
             stimuli,
             current_sleep_state,
             active_habits,
+            runtime.action_manager.recent_send_message_requests(),
         )
         logger.info(
             "cycle C%s prefrontal review finished in %.1f ms (inhibited=%d)",

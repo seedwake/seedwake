@@ -70,6 +70,7 @@ SEARCH_STIMULUS_TITLE_MAX_CHARS = 120
 SEARCH_STIMULUS_URL_MAX_CHARS = 160
 SEARCH_STIMULUS_SNIPPET_MAX_CHARS = 200
 SEND_MESSAGE_SUMMARY_MAX_CHARS = 120
+RECENT_SEND_MESSAGE_WINDOW = timedelta(hours=1)
 TELEGRAM_SEND_RETRY_DELAY_SECONDS = 30.0
 TELEGRAM_SEND_RETRY_ATTEMPTS = 10
 TELEGRAM_SEND_REQUEST_TIMEOUT_SECONDS = 10
@@ -379,6 +380,20 @@ class ActionManager:
                 if action.status in {"pending", "running"}
             ]
         return sorted(actions, key=lambda action: action.submitted_at)
+
+    def recent_send_message_requests(self, limit: int = 9) -> list[ActionRequestPayload]:
+        cutoff = datetime.now(timezone.utc) - RECENT_SEND_MESSAGE_WINDOW
+        with self._lock:
+            actions = [
+                _request_payload_with_submitted_at(action.request, action.submitted_at)
+                for action in sorted(self._actions.values(), key=lambda item: item.submitted_at)
+                if (
+                    action.type == "send_message"
+                    and action.status in {"pending", "running", "succeeded"}
+                    and action.submitted_at >= cutoff
+                )
+            ]
+        return actions[-limit:]
 
     def pop_perception_observations(self) -> list[str]:
         with self._lock:
@@ -3307,6 +3322,9 @@ def _coerce_action_request_payload(value: JsonObject, source_content: str) -> Ac
     worker_agent_id = _stringify_json_field(value.get("worker_agent_id"))
     if worker_agent_id:
         payload["worker_agent_id"] = worker_agent_id
+    submitted_at = _stringify_json_field(value.get("submitted_at"))
+    if submitted_at:
+        payload["submitted_at"] = submitted_at
     target_source = _stringify_json_field(value.get("target_source"))
     if target_source:
         payload["target_source"] = target_source
@@ -3319,6 +3337,15 @@ def _coerce_action_request_payload(value: JsonObject, source_content: str) -> Ac
     reply_to = _stringify_json_field(value.get("reply_to_message_id"))
     if reply_to:
         payload["reply_to_message_id"] = reply_to
+    return payload
+
+
+def _request_payload_with_submitted_at(
+    request: ActionRequestPayload,
+    submitted_at: datetime,
+) -> ActionRequestPayload:
+    payload = dict(request)
+    payload["submitted_at"] = submitted_at.isoformat()
     return payload
 
 

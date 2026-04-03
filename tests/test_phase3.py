@@ -15,6 +15,7 @@ import redis as redis_lib
 from core.action import (
     ACTION_REDIS_KEY,
     NOTE_REDIS_KEY,
+    ActionRecord,
     ActionPlanner,
     ActionCallbacks,
     ActionManager,
@@ -61,7 +62,15 @@ from core.openclaw_gateway import (
     _normalize_worker_text,
 )
 from core.perception import PerceptionManager
-from core.prefrontal import PrefrontalManager, _canonical_params
+from core.prefrontal import (
+    ConversationSignal,
+    PrefrontalManager,
+    _canonical_params,
+    _normalize_send_message_target,
+    _recent_action_contexts,
+    _send_message_target_key,
+    _supports_foreground_reply,
+)
 from core.prompt_builder import PromptBuildContext, _stagnation_terms, build_prompt
 from core.rss import read_news_result, summarize_news_items
 from core.sleep import _ensure_impression_contact, _impression_needs_refresh
@@ -83,6 +92,14 @@ from core.types import ConversationEntry, JsonObject, JsonValue, RawActionReques
 from core.thought_parser import Thought
 from core.types import ActionControl, ActionResultEnvelope, NewsItem
 from test_support import ListRedisStub
+
+
+class _ClosableHTTPError(error.HTTPError):
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 def _make_thought(
@@ -362,7 +379,7 @@ def _telegram_http_error(
     msg: str = "forbidden",
     description: str = "Forbidden: bot was blocked by the user",
 ) -> error.HTTPError:
-    return error.HTTPError(
+    return _ClosableHTTPError(
         url="https://api.telegram.org",
         code=code,
         msg=msg,
@@ -1890,6 +1907,158 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         self.assertEqual(left, right)
 
+    def test_normalize_send_message_target_converts_chat_id_to_telegram_source(self) -> None:
+        self.assertEqual(
+            _normalize_send_message_target("42", from_chat_id=True),
+            "telegram:42",
+        )
+        self.assertEqual(
+            _normalize_send_message_target("-100123"),
+            "telegram:-100123",
+        )
+
+    def test_send_message_target_key_uses_foreground_source_only_for_current_action(self) -> None:
+        conversation_signal = ConversationSignal(source="telegram:42", urgency=0.6)
+
+        self.assertEqual(
+            _send_message_target_key({"chat_id": "42"}, conversation_signal),
+            "telegram:42",
+        )
+        self.assertEqual(
+            _send_message_target_key({}, conversation_signal),
+            "telegram:42",
+        )
+        self.assertEqual(
+            _send_message_target_key({}, None),
+            "",
+        )
+
+    def test_recent_action_contexts_sort_by_real_timestamp(self) -> None:
+        now = datetime.now(timezone.utc)
+        thought = _make_thought(
+            cycle_id=11,
+            index=1,
+            thought_type="意图",
+            content='先回一句。 {action:send_message, target:"telegram:1", message:"现在这句更近"}',
+            action_request={"type": "send_message", "params": 'target:"telegram:1", message:"现在这句更近"'},
+        )
+        thought.timestamp = now - timedelta(minutes=1)
+
+        contexts = _recent_action_contexts(
+            [thought],
+            [
+                {
+                    "task": "reply",
+                    "reason": "older",
+                    "raw_action": {"type": "send_message", "params": 'target:"telegram:1", message:"更早那句"'},
+                    "target_source": "telegram:1",
+                    "message_text": "更早那句",
+                    "submitted_at": (now - timedelta(minutes=50)).isoformat(),
+                }
+            ],
+        )
+
+        self.assertEqual(contexts[-1].params["message"], "现在这句更近")
+
+    def test_recent_action_contexts_ignore_old_thought_actions(self) -> None:
+        now = datetime.now(timezone.utc)
+        old_thought = _make_thought(
+            cycle_id=11,
+            index=1,
+            thought_type="意图",
+            content='先回一句。 {action:send_message, target:"telegram:1", message:"太早那句"}',
+            action_request={"type": "send_message", "params": 'target:"telegram:1", message:"太早那句"'},
+        )
+        old_thought.timestamp = now - timedelta(hours=2)
+
+        contexts = _recent_action_contexts(
+            [old_thought],
+            [
+                {
+                    "task": "reply",
+                    "reason": "recent",
+                    "raw_action": {"type": "send_message", "params": 'target:"telegram:1", message:"最近这句"'},
+                    "target_source": "telegram:1",
+                    "message_text": "最近这句",
+                    "submitted_at": (now - timedelta(minutes=5)).isoformat(),
+                }
+            ],
+        )
+
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual(contexts[0].params["message"], "最近这句")
+
+    def test_recent_action_contexts_deduplicate_submitted_send_message_from_thought_and_request(self) -> None:
+        now = datetime.now(timezone.utc)
+        thought = _make_thought(
+            cycle_id=11,
+            index=1,
+            thought_type="意图",
+            content='先回一句。 {action:send_message, target:"telegram:1", message:"同一条消息"}',
+            action_request={"type": "send_message", "params": 'target:"telegram:1", message:"同一条消息"'},
+        )
+        thought.timestamp = now - timedelta(minutes=2)
+
+        contexts = _recent_action_contexts(
+            [thought],
+            [
+                {
+                    "task": "reply",
+                    "reason": "recent",
+                    "raw_action": {"type": "send_message", "params": 'target:"telegram:1", message:"同一条消息"'},
+                    "target_source": "telegram:1",
+                    "message_text": "同一条消息",
+                    "submitted_at": (now - timedelta(minutes=2)).isoformat(),
+                }
+            ],
+        )
+
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual(contexts[0].params["message"], "同一条消息")
+        self.assertEqual(contexts[0].params["target_source"], "telegram:1")
+
+    def test_recent_action_contexts_deduplicate_default_send_message_from_thought_and_request(self) -> None:
+        now = datetime.now(timezone.utc)
+        thought = _make_thought(
+            cycle_id=11,
+            index=1,
+            thought_type="意图",
+            content='先回一句。 {action:send_message, message:"默认当前对话那句"}',
+            action_request={"type": "send_message", "params": 'message:"默认当前对话那句"'},
+        )
+        thought.timestamp = now - timedelta(minutes=2)
+
+        contexts = _recent_action_contexts(
+            [thought],
+            [
+                {
+                    "task": "reply",
+                    "reason": "recent",
+                    "raw_action": {"type": "send_message", "params": 'message:"默认当前对话那句"'},
+                    "target_source": "telegram:1",
+                    "message_text": "默认当前对话那句",
+                    "submitted_at": (now - timedelta(minutes=2)).isoformat(),
+                }
+            ],
+        )
+
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual(contexts[0].params["message"], "默认当前对话那句")
+        self.assertEqual(contexts[0].params["target_source"], "telegram:1")
+
+    def test_supports_foreground_reply_requires_target_to_match_foreground_when_explicit(self) -> None:
+        conversation_signal = ConversationSignal(source="telegram:1", urgency=0.6)
+
+        self.assertFalse(
+            _supports_foreground_reply(
+                {
+                    "type": "send_message",
+                    "params": 'target:"telegram:2", message:"我在", reply_to:"401"',
+                },
+                conversation_signal,
+            )
+        )
+
     def test_attach_redis_keeps_local_manas_state_written_while_disconnected(self) -> None:
         redis_stub = ListRedisStub()
         redis_stub.set(
@@ -2199,7 +2368,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertEqual(notes, [])
         self.assertIsNotNone(reviewed[0].action_request)
 
-    def test_prefrontal_suppresses_weather_under_conversation_foreground(self) -> None:
+    def test_prefrontal_does_not_suppress_weather_from_conversation_foreground_alone(self) -> None:
         manager = PrefrontalManager(
             redis_client=None,
             check_interval=3,
@@ -2227,8 +2396,435 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             active_habits=[],
         )
 
-        self.assertEqual(notes, ["有人在说话，先放下 weather，回应眼前的人。"])
+        self.assertEqual(notes, [])
+        self.assertIsNotNone(reviewed[0].action_request)
+
+    def test_prefrontal_suppresses_weather_when_foreground_and_habitual_repetition_stack(self) -> None:
+        manager = PrefrontalManager(
+            redis_client=None,
+            check_interval=3,
+            inhibition_enabled=True,
+        )
+
+        reviewed, notes = manager.review_thoughts(
+            thoughts=[
+                _make_thought(
+                    thought_type="意图",
+                    content='我再查一下天气。 {action:weather, location:"Tallinn"}',
+                    action_request={"type": "weather", "params": 'location:"Tallinn"'},
+                )
+            ],
+            recent_thoughts=[
+                _make_thought(
+                    cycle_id=11,
+                    index=1,
+                    thought_type="意图",
+                    content='先查一下天气。 {action:weather, location:"Riga"}',
+                    action_request={"type": "weather", "params": 'location:"Riga"'},
+                )
+            ],
+            stimuli=[_conversation_stimulus(content="先回我一下", message_id=302)],
+            sleep_state={
+                "energy": 0.82,
+                "mode": "awake",
+                "last_light_sleep_cycle": 0,
+                "last_deep_sleep_cycle": 0,
+                "last_deep_sleep_at": "",
+                "summary": "",
+            },
+            active_habits=[
+                {
+                    "id": 1,
+                    "pattern": "经常会冒出 weather 行动冲动",
+                    "category": "behavioral",
+                    "strength": 0.9,
+                    "activation_score": 0.9,
+                    "manifested": True,
+                    "signal": {"type": "action_impulse", "action_type": "weather"},
+                }
+            ],
+        )
+
+        self.assertEqual(
+            notes,
+            ["有人在说话，而且最近已经连续做了好几次 weather，这次先放一放。"],
+        )
         self.assertIsNone(reviewed[0].action_request)
+
+    def test_prefrontal_suppresses_exact_duplicate_send_message_even_without_habit(self) -> None:
+        manager = PrefrontalManager(
+            redis_client=None,
+            check_interval=3,
+            inhibition_enabled=True,
+        )
+
+        reviewed, notes = manager.review_thoughts(
+            thoughts=[
+                _make_thought(
+                    thought_type="意图",
+                    content='我再回一句。 {action:send_message, message:"我现在就在这里等你。"}',
+                    action_request={"type": "send_message", "params": 'message:"我现在就在这里等你。"'},
+                )
+            ],
+            recent_thoughts=[
+                _make_thought(
+                    cycle_id=11,
+                    index=1,
+                    thought_type="意图",
+                    content='先回一句。 {action:send_message, message:"我现在就在这里等你。"}',
+                    action_request={"type": "send_message", "params": 'message:"我现在就在这里等你。"'},
+                )
+            ],
+            stimuli=[],
+            sleep_state={
+                "energy": 0.82,
+                "mode": "awake",
+                "last_light_sleep_cycle": 0,
+                "last_deep_sleep_cycle": 0,
+                "last_deep_sleep_at": "",
+                "summary": "",
+            },
+            active_habits=[],
+        )
+
+        self.assertEqual(notes, ["刚做过一样的 send_message，不必再来一次。"])
+        self.assertIsNone(reviewed[0].action_request)
+
+    def test_prefrontal_suppresses_repeated_send_message_to_same_target(self) -> None:
+        manager = PrefrontalManager(
+            redis_client=None,
+            check_interval=3,
+            inhibition_enabled=True,
+        )
+
+        reviewed, notes = manager.review_thoughts(
+            thoughts=[
+                _make_thought(
+                    thought_type="意图",
+                    content='我再补一句。 {action:send_message, target:"telegram:1", message:"我现在就在这里等你。"}',
+                    action_request={"type": "send_message", "params": 'target:"telegram:1", message:"我现在就在这里等你。"'},
+                )
+            ],
+            recent_thoughts=[
+                _make_thought(
+                    cycle_id=11,
+                    index=1,
+                    thought_type="意图",
+                    content='先发一句。 {action:send_message, target:"telegram:1", message:"我现在就在这里等着你。"}',
+                    action_request={"type": "send_message", "params": 'target:"telegram:1", message:"我现在就在这里等着你。"'},
+                ),
+                _make_thought(
+                    cycle_id=11,
+                    index=2,
+                    thought_type="意图",
+                    content='再发一句。 {action:send_message, target:"telegram:1", message:"别的话"}',
+                    action_request={"type": "send_message", "params": 'target:"telegram:1", message:"别的话"'},
+                ),
+            ],
+            stimuli=[],
+            sleep_state={
+                "energy": 0.82,
+                "mode": "awake",
+                "last_light_sleep_cycle": 0,
+                "last_deep_sleep_cycle": 0,
+                "last_deep_sleep_at": "",
+                "summary": "",
+            },
+            active_habits=[],
+        )
+
+        self.assertEqual(notes, ["这句刚对同一处说过类似的话，这次别重复。"])
+        self.assertIsNone(reviewed[0].action_request)
+
+    def test_prefrontal_suppresses_repeated_send_message_found_earlier_in_recent_window(self) -> None:
+        manager = PrefrontalManager(
+            redis_client=None,
+            check_interval=3,
+            inhibition_enabled=True,
+        )
+        now = datetime.now(timezone.utc)
+        recent_thoughts = [
+            _make_thought(
+                cycle_id=11,
+                index=1,
+                thought_type="意图",
+                content='先发一句。 {action:send_message, target:"telegram:1", message:"我现在就在这里等着你。"}',
+                action_request={"type": "send_message", "params": 'target:"telegram:1", message:"我现在就在这里等着你。"'},
+            ),
+            _make_thought(
+                cycle_id=11,
+                index=2,
+                thought_type="意图",
+                content='再发一句。 {action:send_message, target:"telegram:1", message:"别的话一"}',
+                action_request={"type": "send_message", "params": 'target:"telegram:1", message:"别的话一"'},
+            ),
+            _make_thought(
+                cycle_id=11,
+                index=3,
+                thought_type="意图",
+                content='再发一句。 {action:send_message, target:"telegram:1", message:"别的话二"}',
+                action_request={"type": "send_message", "params": 'target:"telegram:1", message:"别的话二"'},
+            ),
+            _make_thought(
+                cycle_id=11,
+                index=4,
+                thought_type="意图",
+                content='再发一句。 {action:send_message, target:"telegram:1", message:"别的话三"}',
+                action_request={"type": "send_message", "params": 'target:"telegram:1", message:"别的话三"'},
+            ),
+            _make_thought(
+                cycle_id=11,
+                index=5,
+                thought_type="意图",
+                content='再发一句。 {action:send_message, target:"telegram:1", message:"别的话四"}',
+                action_request={"type": "send_message", "params": 'target:"telegram:1", message:"别的话四"'},
+            ),
+        ]
+        for index, thought in enumerate(recent_thoughts, start=1):
+            thought.timestamp = now - timedelta(minutes=6 - index)
+
+        reviewed, notes = manager.review_thoughts(
+            thoughts=[
+                _make_thought(
+                    thought_type="意图",
+                    content='我再补一句。 {action:send_message, target:"telegram:1", message:"我现在就在这里等你。"}',
+                    action_request={"type": "send_message", "params": 'target:"telegram:1", message:"我现在就在这里等你。"'},
+                )
+            ],
+            recent_thoughts=recent_thoughts,
+            stimuli=[],
+            sleep_state={
+                "energy": 0.82,
+                "mode": "awake",
+                "last_light_sleep_cycle": 0,
+                "last_deep_sleep_cycle": 0,
+                "last_deep_sleep_at": "",
+                "summary": "",
+            },
+            active_habits=[],
+        )
+
+        self.assertEqual(notes, ["这句刚对同一处说过类似的话，这次别重复。"])
+        self.assertIsNone(reviewed[0].action_request)
+
+    def test_prefrontal_suppresses_repeated_default_reply_in_foreground_conversation(self) -> None:
+        manager = PrefrontalManager(
+            redis_client=None,
+            check_interval=3,
+            inhibition_enabled=True,
+        )
+
+        reviewed, notes = manager.review_thoughts(
+            thoughts=[
+                _make_thought(
+                    thought_type="意图",
+                    content='我再回一句。 {action:send_message, message:"我现在就在这里等你。", reply_to:"402"}',
+                    action_request={"type": "send_message", "params": 'message:"我现在就在这里等你。", reply_to:"402"'},
+                )
+            ],
+            recent_thoughts=[],
+            stimuli=[_conversation_stimulus(source="telegram:1", content="你在吗？", message_id=402)],
+            sleep_state={
+                "energy": 0.82,
+                "mode": "awake",
+                "last_light_sleep_cycle": 0,
+                "last_deep_sleep_cycle": 0,
+                "last_deep_sleep_at": "",
+                "summary": "",
+            },
+            active_habits=[],
+            recent_send_message_requests=[
+                {
+                    "task": "reply",
+                    "reason": "recent",
+                    "raw_action": {"type": "send_message", "params": 'message:"我现在就在这里等着你。", reply_to:"401"'},
+                    "target_source": "telegram:1",
+                    "message_text": "我现在就在这里等着你。",
+                    "reply_to_message_id": "401",
+                }
+            ],
+        )
+
+        self.assertEqual(notes, ["这句刚对眼前这个人说过类似的话，这次别重复。"])
+        self.assertIsNone(reviewed[0].action_request)
+
+    def test_prefrontal_allows_short_exact_duplicate_send_message(self) -> None:
+        manager = PrefrontalManager(
+            redis_client=None,
+            check_interval=3,
+            inhibition_enabled=True,
+        )
+
+        reviewed, notes = manager.review_thoughts(
+            thoughts=[
+                _make_thought(
+                    thought_type="意图",
+                    content='我再回一句。 {action:send_message, message:"收到"}',
+                    action_request={"type": "send_message", "params": 'message:"收到"'},
+                )
+            ],
+            recent_thoughts=[
+                _make_thought(
+                    cycle_id=11,
+                    index=1,
+                    thought_type="意图",
+                    content='先回一句。 {action:send_message, message:"收到"}',
+                    action_request={"type": "send_message", "params": 'message:"收到"'},
+                )
+            ],
+            stimuli=[],
+            sleep_state={
+                "energy": 0.82,
+                "mode": "awake",
+                "last_light_sleep_cycle": 0,
+                "last_deep_sleep_cycle": 0,
+                "last_deep_sleep_at": "",
+                "summary": "",
+            },
+            active_habits=[],
+        )
+
+        self.assertEqual(notes, [])
+        self.assertIsNotNone(reviewed[0].action_request)
+
+    def test_prefrontal_allows_weather_when_supporting_foreground_reply_plan(self) -> None:
+        manager = PrefrontalManager(
+            redis_client=None,
+            check_interval=3,
+            inhibition_enabled=True,
+        )
+
+        reviewed, notes = manager.review_thoughts(
+            thoughts=[
+                _make_thought(
+                    thought_type="意图",
+                    content=(
+                        '我先查一下再回。 {action:weather, location:"Tallinn"} '
+                        '{action:send_message, message:"我先查一下塔林天气。", reply_to:"401"}'
+                    ),
+                    action_request={"type": "weather", "params": 'location:"Tallinn"'},
+                    additional_action_requests=[
+                        {"type": "send_message", "params": 'message:"我先查一下塔林天气。", reply_to:"401"'},
+                    ],
+                )
+            ],
+            recent_thoughts=[
+                _make_thought(
+                    cycle_id=11,
+                    index=1,
+                    thought_type="意图",
+                    content='先查一次天气。 {action:weather, location:"Riga"}',
+                    action_request={"type": "weather", "params": 'location:"Riga"'},
+                ),
+            ],
+            stimuli=[_conversation_stimulus(content="塔林现在几度？", message_id=401)],
+            sleep_state={
+                "energy": 0.82,
+                "mode": "awake",
+                "last_light_sleep_cycle": 0,
+                "last_deep_sleep_cycle": 0,
+                "last_deep_sleep_at": "",
+                "summary": "",
+            },
+            active_habits=[
+                {
+                    "id": 1,
+                    "pattern": "经常会冒出 weather 行动冲动",
+                    "category": "behavioral",
+                    "strength": 0.9,
+                    "activation_score": 0.9,
+                    "manifested": True,
+                    "signal": {"type": "action_impulse", "action_type": "weather"},
+                }
+            ],
+        )
+
+        self.assertEqual(notes, [])
+        self.assertIsNotNone(reviewed[0].action_request)
+        self.assertEqual(len(reviewed[0].additional_action_requests), 1)
+
+    def test_prefrontal_does_not_let_extra_info_action_hitchhike_on_reply_plan(self) -> None:
+        manager = PrefrontalManager(
+            redis_client=None,
+            check_interval=3,
+            inhibition_enabled=True,
+        )
+
+        reviewed, notes = manager.review_thoughts(
+            thoughts=[
+                _make_thought(
+                    thought_type="意图",
+                    content=(
+                        '我先查天气再搜别的。 {action:weather, location:"Tallinn"} '
+                        '{action:search, query:"塔林 历史"} '
+                        '{action:send_message, message:"我先看一下再回你。", reply_to:"402"}'
+                    ),
+                    action_request={"type": "weather", "params": 'location:"Tallinn"'},
+                    additional_action_requests=[
+                        {"type": "search", "params": 'query:"塔林 历史"'},
+                        {"type": "send_message", "params": 'message:"我先看一下再回你。", reply_to:"402"'},
+                    ],
+                )
+            ],
+            recent_thoughts=[
+                _make_thought(
+                    cycle_id=11,
+                    index=1,
+                    thought_type="意图",
+                    content='先查一次天气。 {action:weather, location:"Riga"}',
+                    action_request={"type": "weather", "params": 'location:"Riga"'},
+                ),
+                _make_thought(
+                    cycle_id=11,
+                    index=2,
+                    thought_type="意图",
+                    content='再搜一次资料。 {action:search, query:"塔林 城市"}',
+                    action_request={"type": "search", "params": 'query:"塔林 城市"'},
+                ),
+            ],
+            stimuli=[_conversation_stimulus(content="塔林现在几度？", message_id=402)],
+            sleep_state={
+                "energy": 0.82,
+                "mode": "awake",
+                "last_light_sleep_cycle": 0,
+                "last_deep_sleep_cycle": 0,
+                "last_deep_sleep_at": "",
+                "summary": "",
+            },
+            active_habits=[
+                {
+                    "id": 1,
+                    "pattern": "经常会冒出 weather 行动冲动",
+                    "category": "behavioral",
+                    "strength": 0.9,
+                    "activation_score": 0.9,
+                    "manifested": True,
+                    "signal": {"type": "action_impulse", "action_type": "weather"},
+                },
+                {
+                    "id": 2,
+                    "pattern": "经常会冒出 search 行动冲动",
+                    "category": "behavioral",
+                    "strength": 0.9,
+                    "activation_score": 0.9,
+                    "manifested": True,
+                    "signal": {"type": "action_impulse", "action_type": "search"},
+                },
+            ],
+        )
+
+        self.assertEqual(
+            notes,
+            [
+                "有人在说话，而且最近已经连续做了好几次 weather，这次先放一放。",
+                "有人在说话，而且最近已经连续做了好几次 search，这次先放一放。",
+            ],
+        )
+        self.assertEqual(
+            reviewed[0].action_request,
+            {"type": "send_message", "params": 'message:"我先看一下再回你。", reply_to:"402"'},
+        )
+        self.assertEqual(reviewed[0].additional_action_requests, [])
 
     def test_load_recent_conversations_builds_summary_and_keeps_recent_raw_lines(self) -> None:
         redis_client = ListRedisStub()
@@ -4751,6 +5347,56 @@ class ActionManagerTests(unittest.TestCase):
         restored = json.loads(redis_stub.hvals(ACTION_REDIS_KEY)[0])
         self.assertEqual(restored["status"], "failed")
         self.assertEqual(restored["result"]["error"], "delivery_status_unknown")
+
+    def test_recent_send_message_requests_only_include_last_hour(self) -> None:
+        manager = _build_action_manager(
+            StimulusQueue(redis_client=None),
+            _Planner(None),
+        )
+
+        try:
+            now = datetime.now(timezone.utc)
+            with manager._lock:
+                manager._actions = {
+                    "act_old": ActionRecord(
+                        action_id="act_old",
+                        type="send_message",
+                        request={
+                            "task": "向 telegram:1 发送消息：很早以前那句",
+                            "reason": "测试",
+                            "raw_action": {"type": "send_message", "params": 'message:"很早以前那句"'},
+                            "target_source": "telegram:1",
+                            "message_text": "很早以前那句",
+                        },
+                        executor="native",
+                        status="succeeded",
+                        source_thought_id="C1-1",
+                        source_content="很早以前那句",
+                        submitted_at=now - timedelta(hours=2),
+                    ),
+                    "act_recent": ActionRecord(
+                        action_id="act_recent",
+                        type="send_message",
+                        request={
+                            "task": "向 telegram:1 发送消息：刚才那句",
+                            "reason": "测试",
+                            "raw_action": {"type": "send_message", "params": 'message:"刚才那句"'},
+                            "target_source": "telegram:1",
+                            "message_text": "刚才那句",
+                        },
+                        executor="native",
+                        status="succeeded",
+                        source_thought_id="C2-1",
+                        source_content="刚才那句",
+                        submitted_at=now - timedelta(minutes=20),
+                    ),
+                }
+            requests = manager.recent_send_message_requests()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["message_text"], "刚才那句")
 
     def test_restore_action_request_payload_preserves_reply_to_message_id(self) -> None:
         payload = _coerce_action_request_payload(
