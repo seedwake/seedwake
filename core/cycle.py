@@ -53,7 +53,18 @@ def run_cycle(
 
     if not thoughts:
         thoughts = [fallback_thought(raw_output, cycle_id)]
-        logger.info("cycle C%s used fallback thought", cycle_id)
+        if not raw_output.strip():
+            fallback_reason = "empty_response"
+        elif len(raw_output) < 10:
+            fallback_reason = f"too_short ({len(raw_output)} chars)"
+        else:
+            fallback_reason = f"no_thought_headers_parsed ({len(raw_output)} chars)"
+        logger.warning(
+            "cycle C%s used fallback thought (reason=%s, raw_preview=%s)",
+            cycle_id,
+            fallback_reason,
+            repr(raw_output[:200]) if raw_output else "(empty)",
+        )
 
     return thoughts
 
