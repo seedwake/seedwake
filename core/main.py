@@ -12,7 +12,7 @@ import re
 import signal
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import FrameType
@@ -55,9 +55,11 @@ from core.stimulus import (
     load_recent_conversations,
     remember_recent_action_echoes,
 )
-from core.thought_parser import Thought
+from core.thought_parser import Thought, thought_action_requests
 from core.common_types import (
     ConversationEntry,
+    DegenerationIntervention,
+    coerce_json_object,
     detect_rewritten_repetition,
     EventPayload,
     HabitPromptEntry,
@@ -65,6 +67,7 @@ from core.common_types import (
     PerceptionStimulusPayload,
     JsonValue,
     RecentConversationPrompt,
+    RawActionRequest,
     StatusEventPayload,
     rewritten_pair_match_counts,
     elapsed_ms,
@@ -102,6 +105,34 @@ RECENT_CONVERSATION_SUMMARY_TARGET_CHARS = 280
 DEGENERATION_CHECK_CYCLES = 3
 DEGENERATION_SIMILARITY_THRESHOLD = 0.64
 DEGENERATION_MIN_MATCHED_THOUGHTS = 2
+DEGENERATION_INTERVENTION_MAX_CYCLES = 2
+DEGENERATION_INTERVENTION_MAX_SUGGESTIONS = 2
+DEGENERATION_RETRY_ACTION_TYPES = {
+    "send_message",
+    "reading",
+    "search",
+    "news",
+    "weather",
+    "web_fetch",
+    "file_modify",
+    "system_change",
+}
+DEGENERATION_INTERVENTION_SYSTEM_PROMPT = (
+    "你在为一个刚刚检测到退化的念头流生成纠偏指令。"
+    "目标是打破重复改写，让下一轮把注意力转向外界、对话或结果推进。"
+    "建议必须具体、贴合上下文、可执行。"
+    "优先回应眼前正在发生的对话；其次围绕刚收到的行动结果继续推进；再次才是外部探索。"
+    "不要建议 note_rewrite、time、system_status。"
+    "只返回 JSON："
+    '{"summary":"","required_shift":"","suggestions":["",""],"must_externalize":true}'
+)
+DEGENERATION_REVIEW_SYSTEM_PROMPT = (
+    "你在审查一轮念头是否成功打破上一轮退化。"
+    "重点判断：是否还在改写同一组轨道、是否落实了要求的转向、是否真正外化了一个合格动作。"
+    "note_rewrite、time、system_status 不算合格外化。"
+    "只返回 JSON："
+    '{"reroll":false,"reason":""}'
+)
 RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT = (
     f"你在压缩我更早的对话历史。"
     f"根据已有摘要和补充消息，写一段新的中文自然语言摘要，替换旧摘要。"
@@ -179,6 +210,7 @@ class EngineRuntime:
     reconnect_interval: float
     bootstrap_identity: dict[str, str]
     bootstrap_habits: list[JsonObject]
+    degeneration_intervention: DegenerationIntervention | None = None
 
 
 def main() -> None:
@@ -458,7 +490,7 @@ def _run_engine_loop(
             continue
 
         _finish_cycle(log_file, cycle_id, stimuli, new_thoughts)
-        if _safe_post_cycle_phase4(runtime, cycle_id, stimuli, degeneration_alert):
+        if _safe_post_cycle_phase4(runtime, cycle_id, stimuli):
             _graceful_restart_core(log_file, prompt_log_file, runtime.action_manager)
         last_completed_cycle_id = cycle_id
         pending_cycle_id = None
@@ -497,7 +529,6 @@ def _post_cycle_phase4(
     runtime: EngineRuntime,
     cycle_id: int,
     stimuli: list[Stimulus],
-    degeneration_alert: bool,
 ) -> bool:
     phase4_started_at = time.perf_counter()
     failure_count = _failed_action_echo_count(stimuli)
@@ -505,7 +536,6 @@ def _post_cycle_phase4(
         cycle_id,
         stimuli,
         failure_count=failure_count,
-        degeneration_alert=degeneration_alert,
     )
     logger.info(
         "cycle C%s sleep state update finished (energy=%.1f, mode=%s)",
@@ -518,7 +548,6 @@ def _post_cycle_phase4(
     if runtime.sleep.should_deep_sleep(
         now=datetime.now(timezone.utc),
         failure_count=failure_count,
-        degeneration_alert=degeneration_alert,
         active_memory_count=active_memory_count,
     ):
         logger.info(
@@ -559,7 +588,7 @@ def _post_cycle_phase4(
         runtime.manas.note_sleep_transition(result.deep_summary or result.state["summary"])
         logger.info("cycle C%s post-cycle phase4 finished in %.1f ms", cycle_id, elapsed_ms(phase4_started_at))
         return result.restart_requested
-    if runtime.sleep.should_light_sleep(degeneration_alert=degeneration_alert, buffer_thoughts=buffer_thoughts):
+    if runtime.sleep.should_light_sleep(buffer_thoughts=buffer_thoughts):
         logger.info("cycle C%s entering light sleep (buffer=%d)", cycle_id, len(buffer_thoughts))
         sleep_started_at = time.perf_counter()
         result = runtime.sleep.run_light_sleep(
@@ -595,10 +624,9 @@ def _safe_post_cycle_phase4(
     runtime: EngineRuntime,
     cycle_id: int,
     stimuli: list[Stimulus],
-    degeneration_alert: bool,
 ) -> bool:
     try:
-        return _post_cycle_phase4(runtime, cycle_id, stimuli, degeneration_alert)
+        return _post_cycle_phase4(runtime, cycle_id, stimuli)
     except MAIN_LOOP_EXCEPTIONS as exc:
         logger.exception("phase4 post-cycle processing failed at cycle %s: %s", cycle_id, exc)
         return False
@@ -1017,6 +1045,7 @@ def _execute_cycle(
             identity,
             active_habits,
             current_sleep_state,
+            runtime.degeneration_intervention,
         )
         manas_state = runtime.manas.current_prompt_state(cycle_id=cycle_id, identity=identity)
         recent_reflections = runtime.metacognition.recent_reflections()
@@ -1052,76 +1081,94 @@ def _execute_cycle(
             cycle_id,
             stimuli,
         )
-        thought_cycle_started_at = time.perf_counter()
-        thoughts = run_cycle(
-            runtime.primary_client,
+        prompt_context = PromptBuildContext(
+            manas_state=manas_state,
+            emotion=current_emotion,
+            sleep_state=current_sleep_state,
+            active_habits=active_habits,
+            prefrontal_state=prefrontal_state,
+            recent_reflections=recent_reflections,
+            long_term_context=ltm_context,
+            current_impressions=current_impressions,
+            note_text=note_text,
+            stimuli=stimuli,
+            recent_action_echoes=recent_action_echoes,
+            running_actions=prompt_running_actions,
+            perception_cues=perception_cues,
+            recent_conversations=recent_conversations,
+        )
+        reroll_reason: str | None = None
+        thoughts, inhibition_notes = _generate_reviewed_thoughts(
+            runtime,
             cycle_id,
             identity,
             recent_thoughts,
-            runtime.context_window,
-            runtime.model_config,
-            prompt_context=PromptBuildContext(
-                manas_state=manas_state,
-                emotion=current_emotion,
-                sleep_state=current_sleep_state,
-                active_habits=active_habits,
-                prefrontal_state=prefrontal_state,
-                recent_reflections=recent_reflections,
-                long_term_context=ltm_context,
-                current_impressions=current_impressions,
-                note_text=note_text,
-                stimuli=stimuli,
-                recent_action_echoes=recent_action_echoes,
-                running_actions=prompt_running_actions,
-                perception_cues=perception_cues,
-                recent_conversations=recent_conversations,
-            ),
-            prompt_log_file=prompt_log_file,
-        )
-        logger.info(
-            "cycle C%s thought generation finished in %.1f ms (count=%d)",
-            cycle_id,
-            elapsed_ms(thought_cycle_started_at),
-            len(thoughts),
-        )
-        attention_started_at = time.perf_counter()
-        attention_result = evaluate_attention(
-            thoughts,
-            recent_thoughts,
             stimuli,
-            goal_stack=prefrontal_state["goal_stack"],
-            emotion=current_emotion,
-            active_habits=active_habits,
+            prompt_log_file,
+            prompt_context,
         )
-        thoughts = attention_result.thoughts
-        attention_weights = {t.thought_id: round(t.attention_weight, 3) for t in thoughts}
-        logger.info(
-            "cycle C%s attention evaluation finished in %.1f ms (anchor=%s, weights=%s)",
-            cycle_id,
-            elapsed_ms(attention_started_at),
-            attention_result.anchor_thought_id,
-            attention_weights,
-        )
-        inhibition_started_at = time.perf_counter()
-        thoughts, inhibition_notes = runtime.prefrontal.review_thoughts(
-            thoughts,
-            recent_thoughts,
-            stimuli,
-            current_sleep_state,
-            active_habits,
-            runtime.action_manager.recent_send_message_requests(),
-        )
-        logger.info(
-            "cycle C%s prefrontal review finished in %.1f ms (inhibited=%d%s)",
-            cycle_id,
-            elapsed_ms(inhibition_started_at),
-            len(inhibition_notes),
-            f", notes={inhibition_notes}" if inhibition_notes else "",
-        )
+        if runtime.degeneration_intervention is not None:
+            reroll_reason = _degeneration_reroll_reason(
+                runtime.auxiliary_client,
+                runtime.auxiliary_model_config,
+                runtime.degeneration_intervention,
+                thoughts,
+                stimuli,
+                recent_conversations,
+            )
+            if reroll_reason:
+                logger.info("cycle C%s degeneration intervention reroll triggered: %s", cycle_id, reroll_reason)
+                retry_intervention = {
+                    **runtime.degeneration_intervention,
+                    "retry_feedback": reroll_reason,
+                }
+                retry_prefrontal_state = runtime.prefrontal.current_state(
+                    cycle_id,
+                    identity,
+                    active_habits,
+                    current_sleep_state,
+                    retry_intervention,
+                )
+                prefrontal_state = retry_prefrontal_state
+                thoughts, inhibition_notes = _generate_reviewed_thoughts(
+                    runtime,
+                    cycle_id,
+                    identity,
+                    recent_thoughts,
+                    stimuli,
+                    prompt_log_file,
+                    replace(
+                        prompt_context,
+                        prefrontal_state=retry_prefrontal_state,
+                    ),
+                )
+                reroll_reason = _degeneration_reroll_reason(
+                    runtime.auxiliary_client,
+                    runtime.auxiliary_model_config,
+                    retry_intervention,
+                    thoughts,
+                    stimuli,
+                    recent_conversations,
+                )
         failure_count = _failed_action_echo_count(stimuli)
         degeneration_alert = _detect_runtime_degeneration(recent_thoughts, thoughts)
         if degeneration_alert:
             logger.info("cycle C%s degeneration detected", cycle_id)
+            runtime.degeneration_intervention = _build_degeneration_intervention(
+                runtime.auxiliary_client,
+                runtime.auxiliary_model_config,
+                cycle_id=cycle_id,
+                thoughts=thoughts,
+                recent_thoughts=recent_thoughts,
+                stimuli=stimuli,
+                recent_conversations=recent_conversations,
+                note_text=note_text,
+            )
+        else:
+            runtime.degeneration_intervention = _advance_degeneration_intervention(
+                runtime.degeneration_intervention,
+                unresolved_reason=reroll_reason if runtime.degeneration_intervention is not None else None,
+            )
         manas_started_at = time.perf_counter()
         manas_state = runtime.manas.evaluate_cycle(
             cycle_id=cycle_id,
@@ -1255,6 +1302,452 @@ def _load_recent_conversations(
             prompt_log_file,
         ),
     )
+
+
+def _generate_reviewed_thoughts(
+    runtime: EngineRuntime,
+    cycle_id: int,
+    identity: dict[str, str],
+    recent_thoughts: list[Thought],
+    stimuli: list[Stimulus],
+    prompt_log_file: TextIO | None,
+    prompt_context: PromptBuildContext,
+) -> tuple[list[Thought], list[str]]:
+    thought_cycle_started_at = time.perf_counter()
+    thoughts = run_cycle(
+        runtime.primary_client,
+        cycle_id,
+        identity,
+        recent_thoughts,
+        runtime.context_window,
+        runtime.model_config,
+        prompt_context=prompt_context,
+        prompt_log_file=prompt_log_file,
+    )
+    logger.info(
+        "cycle C%s thought generation finished in %.1f ms (count=%d)",
+        cycle_id,
+        elapsed_ms(thought_cycle_started_at),
+        len(thoughts),
+    )
+    attention_started_at = time.perf_counter()
+    attention_result = evaluate_attention(
+        thoughts,
+        recent_thoughts,
+        stimuli,
+        goal_stack=prompt_context.prefrontal_state["goal_stack"],
+        emotion=prompt_context.emotion,
+        active_habits=prompt_context.active_habits,
+    )
+    thoughts = attention_result.thoughts
+    attention_weights = {thought.thought_id: round(thought.attention_weight, 3) for thought in thoughts}
+    logger.info(
+        "cycle C%s attention evaluation finished in %.1f ms (anchor=%s, weights=%s)",
+        cycle_id,
+        elapsed_ms(attention_started_at),
+        attention_result.anchor_thought_id,
+        attention_weights,
+    )
+    inhibition_started_at = time.perf_counter()
+    thoughts, inhibition_notes = runtime.prefrontal.review_thoughts(
+        thoughts,
+        recent_thoughts,
+        stimuli,
+        prompt_context.sleep_state,
+        prompt_context.active_habits,
+        runtime.action_manager.recent_send_message_requests(),
+    )
+    logger.info(
+        "cycle C%s prefrontal review finished in %.1f ms (inhibited=%d%s)",
+        cycle_id,
+        elapsed_ms(inhibition_started_at),
+        len(inhibition_notes),
+        f", notes={inhibition_notes}" if inhibition_notes else "",
+    )
+    return thoughts, inhibition_notes
+
+
+def _build_degeneration_intervention(
+    client: ModelClient,
+    model_config: dict,
+    *,
+    cycle_id: int,
+    thoughts: list[Thought],
+    recent_thoughts: list[Thought],
+    stimuli: list[Stimulus],
+    recent_conversations: list[RecentConversationPrompt],
+    note_text: str,
+) -> DegenerationIntervention:
+    fallback = _fallback_degeneration_intervention(
+        cycle_id=cycle_id,
+        stimuli=stimuli,
+        recent_conversations=recent_conversations,
+    )
+    request = _degeneration_intervention_request(
+        cycle_id=cycle_id,
+        thoughts=thoughts,
+        recent_thoughts=recent_thoughts,
+        stimuli=stimuli,
+        recent_conversations=recent_conversations,
+        note_text=note_text,
+    )
+    try:
+        response = client.chat(
+            model=str(model_config["name"]),
+            messages=[
+                {"role": "system", "content": DEGENERATION_INTERVENTION_SYSTEM_PROMPT},
+                {"role": "user", "content": request},
+            ],
+            options={"temperature": 0.2, "max_tokens": 320},
+        )
+    except MODEL_CLIENT_EXCEPTIONS as exc:
+        logger.warning("degeneration intervention generation failed at cycle %s: %s", cycle_id, exc)
+        return fallback
+    payload = _parse_json_object_response(_response_text(response))
+    if payload is None:
+        logger.warning("degeneration intervention returned invalid json at cycle %s", cycle_id)
+        return fallback
+    intervention = _coerce_degeneration_intervention_payload(payload, cycle_id=cycle_id, fallback=fallback)
+    logger.info(
+        "cycle C%s degeneration intervention prepared (must_externalize=%s, suggestions=%d): %s",
+        cycle_id,
+        intervention["must_externalize"],
+        len(intervention["suggestions"]),
+        intervention["summary"],
+    )
+    return intervention
+
+
+def _degeneration_reroll_reason(
+    client: ModelClient,
+    model_config: dict,
+    intervention: DegenerationIntervention,
+    thoughts: list[Thought],
+    stimuli: list[Stimulus],
+    recent_conversations: list[RecentConversationPrompt],
+) -> str | None:
+    qualifying_actions = _qualifying_external_actions(thoughts)
+    if intervention["must_externalize"] and not qualifying_actions:
+        return "这一轮仍然没有把念头外化成合格动作。"
+    request = _degeneration_review_request(
+        intervention=intervention,
+        thoughts=thoughts,
+        stimuli=stimuli,
+        recent_conversations=recent_conversations,
+        qualifying_actions=qualifying_actions,
+    )
+    try:
+        response = client.chat(
+            model=str(model_config["name"]),
+            messages=[
+                {"role": "system", "content": DEGENERATION_REVIEW_SYSTEM_PROMPT},
+                {"role": "user", "content": request},
+            ],
+            options={"temperature": 0.0, "max_tokens": 220},
+        )
+    except MODEL_CLIENT_EXCEPTIONS as exc:
+        logger.warning(
+            "degeneration review failed for intervention from C%s: %s",
+            intervention["source_cycle_id"],
+            exc,
+        )
+        return None
+    payload = _parse_json_object_response(_response_text(response))
+    if payload is None:
+        logger.warning(
+            "degeneration review returned invalid json for intervention from C%s",
+            intervention["source_cycle_id"],
+        )
+        return None
+    reroll = bool(payload.get("reroll"))
+    reason = _single_line(str(payload.get("reason") or ""))
+    if reroll:
+        return reason or "这一轮仍然在沿着旧轨道改写，没有真正完成转向。"
+    return None
+
+
+def _advance_degeneration_intervention(
+    intervention: DegenerationIntervention | None,
+    *,
+    unresolved_reason: str | None,
+) -> DegenerationIntervention | None:
+    if intervention is None:
+        return None
+    if unresolved_reason is None:
+        return None
+    remaining_cycles = int(intervention["remaining_cycles"]) - 1
+    if remaining_cycles <= 0:
+        return None
+    return {
+        **intervention,
+        "remaining_cycles": remaining_cycles,
+        "retry_feedback": unresolved_reason,
+    }
+
+
+def _qualifying_external_actions(thoughts: list[Thought]) -> list[RawActionRequest]:
+    actions: list[RawActionRequest] = []
+    for thought in thoughts:
+        for action_request in thought_action_requests(thought):
+            if action_request["type"] in DEGENERATION_RETRY_ACTION_TYPES:
+                actions.append(action_request)
+    return actions
+
+
+def _degeneration_intervention_request(
+    *,
+    cycle_id: int,
+    thoughts: list[Thought],
+    recent_thoughts: list[Thought],
+    stimuli: list[Stimulus],
+    recent_conversations: list[RecentConversationPrompt],
+    note_text: str,
+) -> str:
+    cycle_lines = _intervention_thought_lines(recent_thoughts, thoughts)
+    stimulus_lines = _intervention_stimulus_lines(stimuli)
+    conversation_lines = _intervention_conversation_lines(recent_conversations)
+    note_summary = _trim_text(_single_line(note_text), 260) if note_text.strip() else "（无）"
+    return (
+        f"当前轮次：C{cycle_id}\n\n"
+        "最近 3 轮主念头：\n"
+        f"{_join_bullets(cycle_lines)}\n\n"
+        "当前刺激与回音：\n"
+        f"{_join_bullets(stimulus_lines)}\n\n"
+        "最近的对话背景：\n"
+        f"{_join_bullets(conversation_lines)}\n\n"
+        f"我的笔记：{note_summary}\n\n"
+        "请给出一次只持续 1-2 轮的纠偏方案，"
+        "目标是打破重复改写，把注意力转向对话推进、行动结果或外界锚点。"
+    )
+
+
+def _degeneration_review_request(
+    *,
+    intervention: DegenerationIntervention,
+    thoughts: list[Thought],
+    stimuli: list[Stimulus],
+    recent_conversations: list[RecentConversationPrompt],
+    qualifying_actions: list[RawActionRequest],
+) -> str:
+    thought_lines = [
+        f"[{thought.type}] {_trim_text(_single_line(thought.content), 220)}"
+        for thought in thoughts
+        if thought.type != "反思" and thought.content.strip()
+    ]
+    action_lines = [
+        _format_action_request_for_review(action_request)
+        for action_request in qualifying_actions
+    ]
+    stimulus_lines = _intervention_stimulus_lines(stimuli)
+    conversation_lines = _intervention_conversation_lines(recent_conversations)
+    suggestions = intervention["suggestions"][:DEGENERATION_INTERVENTION_MAX_SUGGESTIONS]
+    suggestion_text = "；".join(suggestions) if suggestions else "（无）"
+    return (
+        f"上一次退化发生在：C{intervention['source_cycle_id']}\n"
+        f"退化摘要：{intervention['summary']}\n"
+        f"必须完成的转向：{intervention['required_shift']}\n"
+        f"建议动作：{suggestion_text}\n"
+        f"必须外化：{'是' if intervention['must_externalize'] else '否'}\n"
+        f"上一次失败反馈：{intervention.get('retry_feedback', '（无）')}\n\n"
+        "这一轮新念头：\n"
+        f"{_join_bullets(thought_lines)}\n\n"
+        "这一轮动作：\n"
+        f"{_join_bullets(action_lines or ['（无）'])}\n\n"
+        "当前刺激与回音：\n"
+        f"{_join_bullets(stimulus_lines)}\n\n"
+        "最近对话背景：\n"
+        f"{_join_bullets(conversation_lines)}\n"
+    )
+
+
+def _fallback_degeneration_intervention(
+    *,
+    cycle_id: int,
+    stimuli: list[Stimulus],
+    recent_conversations: list[RecentConversationPrompt],
+) -> DegenerationIntervention:
+    suggestions = _fallback_intervention_suggestions(stimuli, recent_conversations)
+    return {
+        "source_cycle_id": cycle_id,
+        "remaining_cycles": DEGENERATION_INTERVENTION_MAX_CYCLES,
+        "summary": "最近几轮一直在围着同一组念头改写，没有把变化真正推向外界。",
+        "required_shift": "这一轮不要继续解释旧轨道，至少把一个念头外化成面向外界或对话推进的动作。",
+        "suggestions": suggestions[:DEGENERATION_INTERVENTION_MAX_SUGGESTIONS],
+        "must_externalize": True,
+    }
+
+
+def _coerce_degeneration_intervention_payload(
+    payload: JsonObject,
+    *,
+    cycle_id: int,
+    fallback: DegenerationIntervention,
+) -> DegenerationIntervention:
+    summary = _single_line(str(payload.get("summary") or "")) or fallback["summary"]
+    required_shift = _single_line(str(payload.get("required_shift") or "")) or fallback["required_shift"]
+    suggestions = _coerce_string_list(payload.get("suggestions")) or fallback["suggestions"]
+    return {
+        "source_cycle_id": cycle_id,
+        "remaining_cycles": DEGENERATION_INTERVENTION_MAX_CYCLES,
+        "summary": _trim_text(summary, 220),
+        "required_shift": _trim_text(required_shift, 220),
+        "suggestions": suggestions[:DEGENERATION_INTERVENTION_MAX_SUGGESTIONS],
+        "must_externalize": True,
+    }
+
+
+def _fallback_intervention_suggestions(
+    stimuli: list[Stimulus],
+    recent_conversations: list[RecentConversationPrompt],
+) -> list[str]:
+    if _foreground_conversation_present(stimuli):
+        return [
+            "优先接住眼前正在发生的对话，把回应明确外化成一条 send_message。",
+            "不要继续解释旧情绪，直接推进这段对话的下一步。",
+        ]
+    if _action_result_present(stimuli):
+        return [
+            "围绕刚收到的行动结果继续推进，不要再回头改写同一组念头。",
+            "把结果转成下一步动作，而不是继续内耗。",
+        ]
+    if recent_conversations:
+        return [
+            "从最近这段对话里挑一个最具体的人或问题继续推进，不要再绕回旧意象。",
+            "如果没有明确对象，就改成一次面向外界的 reading、search 或 weather。",
+        ]
+    return [
+        "从外界抓一个新锚点：reading、search、news、weather 或 web_fetch 中任选一个推进。",
+        "不要再围着原来的情绪和意象改写。",
+    ]
+
+
+def _intervention_thought_lines(recent_thoughts: list[Thought], thoughts: list[Thought]) -> list[str]:
+    grouped: dict[int, list[str]] = {}
+    for thought in [*recent_thoughts, *thoughts]:
+        if thought.type == "反思":
+            continue
+        content = _trim_text(_single_line(_normalize_cycle_text(thought.content)), 180)
+        if not content:
+            continue
+        grouped.setdefault(thought.cycle_id, []).append(f"[{thought.type}] {content}")
+    recent_cycle_ids = sorted(grouped.keys())[-DEGENERATION_CHECK_CYCLES:]
+    lines: list[str] = []
+    for cycle_key in recent_cycle_ids:
+        lines.append(f"C{cycle_key}: {'；'.join(grouped[cycle_key][:3])}")
+    return lines or ["（无）"]
+
+
+def _intervention_stimulus_lines(stimuli: list[Stimulus]) -> list[str]:
+    lines: list[str] = []
+    for stimulus in stimuli[:6]:
+        content = _trim_text(_single_line(stimulus.content), 180)
+        label = stimulus.type
+        if str(stimulus.metadata.get("origin") or "") == "action":
+            status = str(stimulus.metadata.get("status") or "").strip()
+            action_type = str(stimulus.metadata.get("action_type") or "").strip()
+            if action_type:
+                label = f"{action_type}/{status or 'result'}"
+        lines.append(f"[{label}] {content or '（空）'}")
+    return lines or ["（无）"]
+
+
+def _intervention_conversation_lines(recent_conversations: list[RecentConversationPrompt]) -> list[str]:
+    lines: list[str] = []
+    for conversation in recent_conversations[-2:]:
+        source_label = _single_line(str(conversation.get("source_label") or conversation.get("source") or ""))
+        summary = _trim_text(_single_line(str(conversation.get("summary") or "")), 180)
+        message_lines = [
+            _trim_text(
+                _single_line(
+                    f"{message['speaker_name']}：{message['content']}"
+                ),
+                140,
+            )
+            for message in conversation.get("messages", [])[-2:]
+            if _single_line(message.get("content", ""))
+        ]
+        parts = [part for part in [summary, *message_lines] if part]
+        if parts:
+            lines.append(f"{source_label} -> {'；'.join(parts)}")
+    return lines or ["（无）"]
+
+
+def _foreground_conversation_present(stimuli: list[Stimulus]) -> bool:
+    return any(stimulus.type == "conversation" for stimulus in stimuli)
+
+
+def _action_result_present(stimuli: list[Stimulus]) -> bool:
+    return any(str(stimulus.metadata.get("origin") or "").strip() == "action" for stimulus in stimuli)
+
+
+def _format_action_request_for_review(action_request: RawActionRequest) -> str:
+    params = _single_line(action_request["params"])
+    if params:
+        return f"{action_request['type']}: {params}"
+    return action_request["type"]
+
+
+def _coerce_string_list(value: JsonValue) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items = [_trim_text(_single_line(str(item)), 180) for item in value if _single_line(str(item))]
+    return [item for item in items if item]
+
+
+def _response_text(response: JsonObject) -> str:
+    message = response.get("message")
+    if not isinstance(message, dict):
+        return ""
+    return str(message.get("content") or "").strip()
+
+
+def _parse_json_object_response(raw_text: str) -> JsonObject | None:
+    if not raw_text.strip():
+        return None
+    candidate = _strip_markdown_fences(raw_text)
+    parsed = _load_json_object(candidate)
+    if parsed is not None:
+        return parsed
+    start = candidate.find("{")
+    end = candidate.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    return _load_json_object(candidate[start:end + 1])
+
+
+def _load_json_object(raw_text: str) -> JsonObject | None:
+    try:
+        parsed = json.loads(raw_text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return coerce_json_object(parsed)
+
+
+def _strip_markdown_fences(raw_text: str) -> str:
+    text = raw_text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines:
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    return text
+
+
+def _join_bullets(lines: list[str]) -> str:
+    return "\n".join(f"- {line}" for line in lines)
+
+
+def _single_line(text: str) -> str:
+    return " ".join(str(text).split())
+
+
+def _trim_text(text: str, limit: int) -> str:
+    compact = _single_line(text)
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 1)].rstrip() + "…"
 
 
 def _summarize_recent_conversation(

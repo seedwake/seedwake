@@ -488,7 +488,6 @@ def _format_conversations(conversations: list[Stimulus]) -> str:
         "这一段是眼前正在发生、优先级最高的对话，不要和上面的“最近的对话”混淆。",
         "如果我决定回应，需要用 {action:send_message} 真正把话发出去。",
         "如果 {action:send_message} 没写 target 和 target_entity，默认就是发给这里当前正在对我说话的人。",
-        "如果想回这里某条具体消息，可以用 reply_to 带上下面显示的 msg id。",
         "",
     ]
     for conv in conversations:

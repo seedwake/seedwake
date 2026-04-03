@@ -13,8 +13,12 @@ import redis as redis_lib
 # noinspection PyProtectedMember
 from core.main import (
     EngineRuntime,
+    _advance_degeneration_intervention,
+    _build_degeneration_intervention,
     _detect_runtime_degeneration,
+    _degeneration_reroll_reason,
     _execute_cycle,
+    _qualifying_external_actions,
     _recover_runtime_services,
     _post_cycle_phase4,
     _safe_post_cycle_phase4,
@@ -36,7 +40,8 @@ from core.sleep import SleepManager, _archive_action_result_memories, _light_sle
 from core.memory.short_term import ShortTermMemory, _thought_to_dict, _dict_to_thought
 from core.stimulus import Stimulus
 from core.thought_parser import Thought
-from core.common_types import EmotionSnapshot, ManasPromptState, PrefrontalPromptState, SleepStateSnapshot
+from core.common_types import EmotionSnapshot, JsonObject, ManasPromptState, PrefrontalPromptState, SleepStateSnapshot
+from core.model_client import ModelClient
 
 
 def _make_thought(cycle_id: int = 1, index: int = 1, content: str = "test") -> Thought:
@@ -143,6 +148,158 @@ class RuntimeDegenerationDetectionTests(unittest.TestCase):
         self.assertFalse(_detect_runtime_degeneration(recent_thoughts, current_thoughts))
 
 
+class DegenerationInterventionTests(unittest.TestCase):
+    def test_build_degeneration_intervention_uses_llm_payload(self) -> None:
+        client = _JsonResponseClient(
+            json.dumps(
+                {
+                    "summary": "最近三轮一直在围着同一组回应打转。",
+                    "required_shift": "这一轮把注意力转向眼前对话推进。",
+                    "suggestions": [
+                        "先回应现在正在说话的人。",
+                        "把刚拿到的回音推进成下一步动作。",
+                    ],
+                    "must_externalize": True,
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        intervention = _build_degeneration_intervention(
+            client,
+            {"name": "aux"},
+            cycle_id=42,
+            thoughts=[Thought("C42-1", 42, 1, "思考", "我还在反复改写同一句回应。")],
+            recent_thoughts=[
+                Thought("C40-1", 40, 1, "思考", "我一直在改写同一句回应。"),
+                Thought("C41-1", 41, 1, "思考", "我还是在改写同一句回应。"),
+            ],
+            stimuli=[],
+            recent_conversations=[],
+            note_text="",
+        )
+
+        self.assertEqual(intervention["source_cycle_id"], 42)
+        self.assertEqual(intervention["remaining_cycles"], 2)
+        self.assertEqual(intervention["summary"], "最近三轮一直在围着同一组回应打转。")
+        self.assertEqual(len(intervention["suggestions"]), 2)
+        self.assertTrue(intervention["must_externalize"])
+
+    def test_degeneration_reroll_reason_requires_qualifying_action_before_llm(self) -> None:
+        intervention = {
+            "source_cycle_id": 41,
+            "remaining_cycles": 2,
+            "summary": "最近三轮一直在围着同一组回应打转。",
+            "required_shift": "至少外化一个真正动作。",
+            "suggestions": ["直接回应眼前对话。"],
+            "must_externalize": True,
+        }
+
+        reason = _degeneration_reroll_reason(
+            _JsonResponseClient(json.dumps({"reroll": False, "reason": ""}, ensure_ascii=False)),
+            {"name": "aux"},
+            intervention,
+            [Thought("C42-1", 42, 1, "思考", "我还是想继续解释刚才那句话。")],
+            [],
+            [],
+        )
+
+        self.assertEqual(reason, "这一轮仍然没有把念头外化成合格动作。")
+
+    def test_degeneration_reroll_reason_uses_llm_review_when_action_exists(self) -> None:
+        intervention = {
+            "source_cycle_id": 41,
+            "remaining_cycles": 2,
+            "summary": "最近三轮一直在围着同一组回应打转。",
+            "required_shift": "至少外化一个真正动作。",
+            "suggestions": ["直接回应眼前对话。"],
+            "must_externalize": True,
+        }
+        thought = Thought(
+            "C42-1",
+            42,
+            1,
+            "意图",
+            '我现在就回他一句。 {action:send_message, message:"我在。"}',
+            action_request={"type": "send_message", "params": 'message:"我在。"'},
+        )
+
+        reason = _degeneration_reroll_reason(
+            _JsonResponseClient(json.dumps({"reroll": True, "reason": "还是在绕回旧解释。"}, ensure_ascii=False)),
+            {"name": "aux"},
+            intervention,
+            [thought],
+            [],
+            [],
+        )
+
+        self.assertEqual(reason, "还是在绕回旧解释。")
+
+    def test_advance_degeneration_intervention_clears_when_resolved(self) -> None:
+        intervention = {
+            "source_cycle_id": 41,
+            "remaining_cycles": 2,
+            "summary": "最近三轮一直在围着同一组回应打转。",
+            "required_shift": "至少外化一个真正动作。",
+            "suggestions": ["直接回应眼前对话。"],
+            "must_externalize": True,
+        }
+
+        self.assertIsNone(_advance_degeneration_intervention(intervention, unresolved_reason=None))
+
+    def test_advance_degeneration_intervention_carries_feedback_one_more_cycle(self) -> None:
+        intervention = {
+            "source_cycle_id": 41,
+            "remaining_cycles": 2,
+            "summary": "最近三轮一直在围着同一组回应打转。",
+            "required_shift": "至少外化一个真正动作。",
+            "suggestions": ["直接回应眼前对话。"],
+            "must_externalize": True,
+        }
+
+        advanced = _advance_degeneration_intervention(
+            intervention,
+            unresolved_reason="这一轮还是没有真正转向。",
+        )
+
+        self.assertIsNotNone(advanced)
+        assert advanced is not None
+        self.assertEqual(advanced["remaining_cycles"], 1)
+        self.assertEqual(advanced["retry_feedback"], "这一轮还是没有真正转向。")
+
+    def test_qualifying_external_actions_excludes_note_rewrite_and_time(self) -> None:
+        thoughts = [
+            Thought(
+                "C42-1",
+                42,
+                1,
+                "意图",
+                '{action:note_rewrite, content:"still thinking"}',
+                action_request={"type": "note_rewrite", "params": 'content:"still thinking"'},
+            ),
+            Thought(
+                "C42-2",
+                42,
+                2,
+                "意图",
+                '{action:time}',
+                action_request={"type": "time", "params": ""},
+            ),
+            Thought(
+                "C42-3",
+                42,
+                3,
+                "意图",
+                '{action:reading, query:"Walden solitude"}',
+                action_request={"type": "reading", "params": 'query:"Walden solitude"'},
+            ),
+        ]
+
+        actions = _qualifying_external_actions(thoughts)
+
+        self.assertEqual([action["type"] for action in actions], ["reading"])
+
+
 def _seed_existing_history(redis_client: MagicMock, *, latest_cycle_id: str | None) -> None:
     redis_client.get.return_value = latest_cycle_id
     redis_client.zrange.return_value = [json.dumps(_thought_to_dict(_make_thought(8, 1, "old")))]
@@ -227,6 +384,7 @@ def _build_execute_cycle_runtime(action_manager: MagicMock | None = None) -> Sim
         prefrontal=MagicMock(),
         manas=MagicMock(),
         metacognition=MagicMock(),
+        degeneration_intervention=None,
     )
     runtime.stm.get_context.return_value = []
     runtime.stm.redis_client = None
@@ -235,6 +393,7 @@ def _build_execute_cycle_runtime(action_manager: MagicMock | None = None) -> Sim
     if action_manager is None:
         runtime.action_manager.pop_prompt_echoes.return_value = []
     runtime.action_manager.submit_from_thoughts.return_value = []
+    runtime.action_manager.recent_send_message_requests.return_value = []
     runtime.habit_memory.activate_for_cycle.return_value = []
     runtime.emotion.current.return_value = _emotion_snapshot()
     runtime.emotion.apply_cycle.return_value = runtime.emotion.current.return_value
@@ -246,6 +405,35 @@ def _build_execute_cycle_runtime(action_manager: MagicMock | None = None) -> Sim
     runtime.metacognition.recent_reflections.return_value = []
     runtime.metacognition.should_reflect.return_value = False
     return runtime
+
+
+class _JsonResponseClient(ModelClient):
+    def __init__(self, content: str) -> None:
+        super().__init__(provider="test", supports_tool_calls=False)
+        self._content = content
+
+    def generate_text(self, prompt: str, model_config: dict) -> str:
+        _ = (prompt, model_config)
+        raise NotImplementedError
+
+    def chat(
+        self,
+        *,
+        model: str,
+        messages: list[JsonObject],
+        tools: list[JsonObject] | None = None,
+        options: dict | None = None,
+    ) -> JsonObject:
+        _ = (model, messages, tools, options)
+        return {"message": {"content": self._content}}
+
+    def embed_text(self, text: str, model: str) -> list[float]:
+        _ = (text, model)
+        raise NotImplementedError
+
+    def embed_texts(self, texts: list[str], model: str) -> list[list[float]]:
+        _ = (texts, model)
+        raise NotImplementedError
 
 
 class ShortTermMemoryRedisDegradationTests(unittest.TestCase):
@@ -760,7 +948,7 @@ class Phase4RuntimeTests(unittest.TestCase):
             "updated_at": "2026-01-01T00:00:00+00:00",
         }
 
-        _post_cycle_phase4(_as_runtime(runtime), 12, [], False)
+        _post_cycle_phase4(_as_runtime(runtime), 12, [])
 
         sleep.consume_cycle.assert_called_once()
         sleep.run_light_sleep.assert_called_once()
@@ -1066,7 +1254,6 @@ class Phase4RuntimeTests(unittest.TestCase):
             sleep.should_deep_sleep(
                 now=baseline + timedelta(hours=23),
                 failure_count=0,
-                degeneration_alert=False,
                 active_memory_count=0,
             )
         )
@@ -1074,7 +1261,6 @@ class Phase4RuntimeTests(unittest.TestCase):
             sleep.should_deep_sleep(
                 now=baseline + timedelta(hours=25),
                 failure_count=0,
-                degeneration_alert=False,
                 active_memory_count=0,
             )
         )
@@ -1087,7 +1273,6 @@ class Phase4RuntimeTests(unittest.TestCase):
                 _as_runtime(runtime),
                 12,
                 [],
-                False,
             )
 
         self.assertFalse(result)

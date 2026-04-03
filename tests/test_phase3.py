@@ -5088,6 +5088,40 @@ class ActionManagerTests(unittest.TestCase):
         body = json.loads(req.data.decode("utf-8"))
         self.assertEqual(body["reply_parameters"]["message_id"], 103)
 
+    def test_native_send_message_uses_recent_conversation_focus_without_new_stimulus(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        manager = _build_action_manager(
+            queue,
+            _Planner(ActionPlan("send_message", "native", "发送消息", 30, "测试", message_text="我在。")),
+            redis_client=ListRedisStub(),
+            auto_execute=["send_message"],
+        )
+
+        try:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
+                with patch("core.action.request.urlopen") as mock_urlopen:
+                    response = MagicMock()
+                    response.read.return_value = b'{"ok": true}'
+                    mock_urlopen.return_value.__enter__.return_value = response
+                    first_created = manager.submit_from_thoughts(
+                        [_make_thought(action_request={"type": "send_message", "params": 'message:"我先回一句。"'})],
+                        stimuli=[_conversation_stimulus(source="telegram:558805571", message_id=294)],
+                    )
+                    wait(manager._snapshot_futures(), timeout=1.0)
+                    second_created = manager.submit_from_thoughts(
+                        [_make_thought(index=2, action_request={"type": "send_message", "params": 'message:"我再补一句。"'})],
+                        stimuli=[],
+                    )
+                    manager.shutdown_with_timeout(1.0)
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(first_created[0].status, "succeeded")
+        self.assertEqual(second_created[0].status, "succeeded")
+        self.assertEqual(second_created[0].request["target_source"], "telegram:558805571")
+        self.assertNotIn("reply_to_message_id", second_created[0].request)
+
     def test_send_telegram_message_retries_transient_network_error(self) -> None:
         transient_error = error.URLError(ConnectionRefusedError(111, "Connection refused"))
         with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):

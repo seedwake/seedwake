@@ -115,15 +115,12 @@ class SleepManager:
         stimuli: list[Stimulus],
         *,
         failure_count: int,
-        degeneration_alert: bool,
     ) -> SleepStateSnapshot:
         penalty = self._energy_per_cycle
         if not stimuli:
             penalty += 0.1
         if failure_count > 0:
             penalty += 0.3 * failure_count
-        if degeneration_alert:
-            penalty += 0.8
         energy = max(0.0, self._shadow["energy"] - penalty)
         mode = "awake"
         if energy <= self._drowsy_threshold:
@@ -138,11 +135,8 @@ class SleepManager:
         self._sync_to_redis()
         return self.current()
 
-    def should_light_sleep(self, *, degeneration_alert: bool, buffer_thoughts: list[Thought]) -> bool:
+    def should_light_sleep(self, *, buffer_thoughts: list[Thought]) -> bool:
         buffer_count = len(buffer_thoughts)
-        if degeneration_alert:
-            logger.info("sleep decision: light_sleep=True (reason=degeneration, buffer=%d)", buffer_count)
-            return True
         if self._shadow["energy"] <= self._drowsy_threshold:
             logger.info(
                 "sleep decision: light_sleep=True (reason=drowsy, energy=%.1f, buffer=%d)",
@@ -159,7 +153,6 @@ class SleepManager:
         *,
         now: datetime,
         failure_count: int,
-        degeneration_alert: bool,
         active_memory_count: int,
     ) -> bool:
         elapsed_triggered, elapsed_hours = _deep_sleep_elapsed_trigger(
@@ -168,8 +161,7 @@ class SleepManager:
             self._deep_sleep_trigger_hours,
         )
         systemic_triggered = (
-            degeneration_alert
-            or failure_count >= self._deep_sleep_failure_threshold
+            failure_count >= self._deep_sleep_failure_threshold
             or active_memory_count >= self._deep_sleep_active_memory_threshold
         )
         result = elapsed_triggered or systemic_triggered
@@ -178,7 +170,6 @@ class SleepManager:
                 elapsed_triggered=elapsed_triggered,
                 elapsed_hours=elapsed_hours,
                 trigger_hours=self._deep_sleep_trigger_hours,
-                degeneration_alert=degeneration_alert,
                 failure_count=failure_count,
                 failure_threshold=self._deep_sleep_failure_threshold,
                 active_memory_count=active_memory_count,
@@ -543,7 +534,6 @@ def _deep_sleep_reasons(
     elapsed_triggered: bool,
     elapsed_hours: float,
     trigger_hours: float,
-    degeneration_alert: bool,
     failure_count: int,
     failure_threshold: int,
     active_memory_count: int,
@@ -552,8 +542,6 @@ def _deep_sleep_reasons(
     reasons: list[str] = []
     if elapsed_triggered:
         reasons.append(f"elapsed={elapsed_hours:.1f}h >= {trigger_hours}h")
-    if degeneration_alert:
-        reasons.append("degeneration")
     if failure_count >= failure_threshold:
         reasons.append(f"failures={failure_count}")
     if active_memory_count >= active_memory_threshold:

@@ -168,6 +168,16 @@ class ReflectionPromptEntry(TypedDict):
     created_at: str
 
 
+class DegenerationIntervention(TypedDict):
+    source_cycle_id: int
+    remaining_cycles: int
+    summary: str
+    required_shift: str
+    suggestions: list[str]
+    must_externalize: bool
+    retry_feedback: NotRequired[str]
+
+
 class SleepStateSnapshot(TypedDict):
     energy: float
     mode: str

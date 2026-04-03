@@ -71,6 +71,7 @@ SEARCH_STIMULUS_URL_MAX_CHARS = 160
 SEARCH_STIMULUS_SNIPPET_MAX_CHARS = 200
 SEND_MESSAGE_SUMMARY_MAX_CHARS = 120
 RECENT_SEND_MESSAGE_WINDOW = timedelta(hours=1)
+CONVERSATION_FOCUS_WINDOW = timedelta(minutes=10)
 TELEGRAM_SEND_RETRY_DELAY_SECONDS = 30.0
 TELEGRAM_SEND_RETRY_ATTEMPTS = 10
 TELEGRAM_SEND_REQUEST_TIMEOUT_SECONDS = 10
@@ -256,6 +257,9 @@ class ActionManager:
         self._perception_observations: list[str] = []
         self._futures: set[Future] = set()
         self._recent_sent_messages: list[tuple[str, str, str]] = []  # (target, message, reply_to) dedup window
+        self._conversation_focus_source = ""
+        self._conversation_focus_reply_to_message_id = ""
+        self._conversation_focus_updated_at: datetime | None = None
         if self._redis is not None:
             try:
                 self._restore_from_redis()
@@ -271,6 +275,14 @@ class ActionManager:
         created: list[ActionRecord] = []
         conversation_source = _latest_conversation_source(stimuli or [])
         conversation_reply_to_message_id = _latest_conversation_message_id(stimuli or [])
+        if conversation_source:
+            self._remember_conversation_focus(
+                conversation_source,
+                conversation_reply_to_message_id or "",
+            )
+        else:
+            conversation_source, _ = self._current_conversation_focus()
+            conversation_reply_to_message_id = None
         for thought in thoughts:
             for action_index, action_thought in enumerate(self._submitted_action_thoughts(thought)):
                 action = self._plan_submitted_action(
@@ -593,6 +605,7 @@ class ActionManager:
                 error_detail=send_error,
             )
         self._record_sent_message(target_source, message_text, delivered_reply_to)
+        self._remember_conversation_focus(target_source, delivered_reply_to)
         return _build_action_result(
             ok=True,
             summary=_send_message_success_summary(target_source, message_text),
@@ -857,6 +870,26 @@ class ActionManager:
             self._futures.discard(future)
 
     _SENT_MESSAGE_DEDUP_WINDOW = 5
+
+    def _remember_conversation_focus(self, source: str, reply_to_message_id: str) -> None:
+        normalized_source = str(source).strip()
+        if not normalized_source:
+            return
+        with self._lock:
+            self._conversation_focus_source = normalized_source
+            self._conversation_focus_reply_to_message_id = str(reply_to_message_id or "").strip()
+            self._conversation_focus_updated_at = datetime.now(timezone.utc)
+
+    def _current_conversation_focus(self) -> tuple[str | None, str | None]:
+        with self._lock:
+            source = self._conversation_focus_source
+            reply_to_message_id = self._conversation_focus_reply_to_message_id
+            updated_at = self._conversation_focus_updated_at
+        if not source or updated_at is None:
+            return None, None
+        if datetime.now(timezone.utc) - updated_at > CONVERSATION_FOCUS_WINDOW:
+            return None, None
+        return source, reply_to_message_id or None
 
     def _is_duplicate_message(self, target: str, message: str, reply_to_message_id: str) -> bool:
         key = (target.strip(), message.strip(), reply_to_message_id.strip())

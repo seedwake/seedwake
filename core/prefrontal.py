@@ -19,6 +19,7 @@ from core.stimulus import Stimulus
 from core.thought_parser import Thought, thought_action_requests
 from core.common_types import (
     ActionRequestPayload,
+    DegenerationIntervention,
     HabitPromptEntry,
     PrefrontalPromptState,
     RawActionRequest,
@@ -95,6 +96,7 @@ class PrefrontalManager:
         identity: dict[str, str],
         active_habits: list[HabitPromptEntry],
         sleep_state: SleepStateSnapshot,
+        degeneration_intervention: DegenerationIntervention | None = None,
     ) -> PrefrontalPromptState:
         goal_stack = build_goal_stack(identity)
         guidance: list[str] = []
@@ -103,12 +105,15 @@ class PrefrontalManager:
             guidance.append(f"我现在偏{sleep_state['mode']}，需要把行动收得更谨慎。")
         if manifested_habits:
             guidance.append("此刻有旧的惯性正在浮现，留意是否在重复旧模式。")
-        plan_mode = cycle_id % self._check_interval == 0 or bool(manifested_habits)
+        if degeneration_intervention is not None:
+            guidance.extend(_degeneration_guidance(degeneration_intervention))
+        plan_mode = cycle_id % self._check_interval == 0 or bool(manifested_habits) or degeneration_intervention is not None
         if plan_mode:
             guidance.append("这一轮我需要多留意：是否偏题、是否重复、是否该压住冲动。")
+        guidance_limit = 6 if degeneration_intervention is not None else 3
         self._last_state = {
             "goal_stack": goal_stack,
-            "guidance": guidance[:3],
+            "guidance": guidance[:guidance_limit],
             "inhibition_notes": [],
             "plan_mode": plan_mode,
         }
@@ -237,6 +242,20 @@ def _copy_state(state: PrefrontalPromptState) -> PrefrontalPromptState:
         "inhibition_notes": list(state["inhibition_notes"]),
         "plan_mode": state["plan_mode"],
     }
+
+
+def _degeneration_guidance(intervention: DegenerationIntervention) -> list[str]:
+    guidance = [
+        f"上一轮我已经在打转：{intervention['summary']}",
+        f"这轮必须完成的转向：{intervention['required_shift']}",
+    ]
+    if intervention["must_externalize"]:
+        guidance.append("这一轮至少要把一个念头外化成真正动作；note_rewrite、time、system_status 不算。")
+    guidance.extend(f"可行方向：{suggestion}" for suggestion in intervention["suggestions"][:2])
+    retry_feedback = str(intervention.get("retry_feedback") or "").strip()
+    if retry_feedback:
+        guidance.append(f"上一稿仍未过关：{retry_feedback}")
+    return guidance
 
 
 def _replace_thought_action_requests(thought: Thought, action_requests: list[RawActionRequest]) -> Thought:
