@@ -5627,6 +5627,46 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(created[0].status, "succeeded")
         self.assertEqual(events[-1][1]["source"], "telegram:99")
 
+    def test_native_send_message_target_entity_overrides_current_conversation_source(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        events = []
+        planner = _Planner(ActionPlan(
+            "send_message",
+            "native",
+            "发送消息",
+            30,
+            "测试",
+            target_entity="person:alice",
+            message_text="你好",
+        ))
+        manager = _build_action_manager(
+            queue,
+            planner,
+            redis_client=ListRedisStub(),
+            contact_resolver=lambda entity: "telegram:99" if entity == "person:alice" else None,
+            event_callback=lambda event_type, payload: events.append((event_type, payload)),
+            auto_execute=["send_message"],
+        )
+
+        try:
+            created = _submit_send_message_success(
+                manager,
+                [
+                    _make_thought(
+                        action_request={"type": "send_message", "params": _target_entity_message_params()}
+                    )
+                ],
+                stimuli=[_conversation_stimulus(source="telegram:42", message_id=401, content="你在吗")],
+            )
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(created[0].status, "succeeded")
+        self.assertEqual(created[0].request.get("target_entity"), "person:alice")
+        self.assertNotIn("target_source", created[0].request)
+        self.assertEqual(events[-1][1]["source"], "telegram:99")
+
     def test_native_send_message_fails_when_telegram_send_fails(self) -> None:
         queue = StimulusQueue(redis_client=None)
         planner = _Planner(ActionPlan(

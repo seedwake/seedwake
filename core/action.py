@@ -317,12 +317,14 @@ class ActionManager:
                         thought.thought_id, raw_action_type)
             self._emit_planner_feedback(thought, raw_action_type, skip_reason)
             return None
-        return _action_from_plan(
+        action = _action_from_plan(
             thought=thought,
             plan=plan,
             conversation_source=conversation_source,
             conversation_reply_to_message_id=conversation_reply_to_message_id,
         )
+        self._log_submitted_action_plan(thought, action, conversation_source)
+        return action
 
     @staticmethod
     def _submitted_action_thoughts(thought: Thought) -> list[Thought]:
@@ -345,6 +347,27 @@ class ActionManager:
         if action_index == 0:
             return f"act_{thought_id}"
         return f"act_{thought_id}-{action_index + 1}"
+
+    @staticmethod
+    def _log_submitted_action_plan(
+        thought: Thought,
+        action: ActionRecord,
+        conversation_source: str | None,
+    ) -> None:
+        raw_action_type = str((thought.action_request or {}).get("type") or "custom")
+        request = action.request
+        logger.info(
+            "planner produced action for %s (raw_type=%s, action_type=%s, executor=%s, "
+            "conversation_source=%s, target_source=%s, target_entity=%s, reply_to=%s)",
+            thought.thought_id,
+            raw_action_type,
+            action.type,
+            action.executor,
+            str(conversation_source or "-"),
+            str(request.get("target_source") or "-"),
+            str(request.get("target_entity") or "-"),
+            str(request.get("reply_to_message_id") or "-"),
+        )
 
     def apply_controls(self, controls: list[ActionControl]) -> None:
         for control in controls:
@@ -2302,6 +2325,9 @@ def _action_from_plan(
     conversation_source: str | None,
     conversation_reply_to_message_id: str | None,
 ) -> ActionRecord:
+    implicit_target_source = ""
+    if not plan.target_source and not plan.target_entity:
+        implicit_target_source = str(conversation_source or "").strip()
     reply_to_message_id = plan.reply_to_message_id
     if (
         not reply_to_message_id
@@ -2316,7 +2342,7 @@ def _action_from_plan(
         raw_action=thought.action_request,
         news_feed_urls=plan.news_feed_urls,
         worker_agent_id=plan.worker_agent_id,
-        target_source=plan.target_source or str(conversation_source or "").strip(),
+        target_source=plan.target_source or implicit_target_source,
         target_entity=plan.target_entity,
         message_text=plan.message_text,
         reply_to_message_id=reply_to_message_id,
