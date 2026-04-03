@@ -23,6 +23,7 @@ from telegram.ext import (
 from bot.helpers import (
     format_action_event,
     format_status_event,
+    format_thought_event_chunks,
     load_admin_user_ids,
     load_allowed_user_ids,
     load_notification_chat_ids,
@@ -38,6 +39,7 @@ from core.common_types import (
     JsonObject,
     JsonValue,
     StatusEventPayload,
+    ThoughtEventPayload,
 )
 
 EVENT_CHANNEL = "seedwake:events"
@@ -293,6 +295,9 @@ async def _dispatch_event(application: Application, envelope: EventEnvelope) -> 
         return
     if event_type == "status":
         await _dispatch_status_update(application, payload)
+        return
+    if event_type == "thoughts":
+        await _dispatch_thought_update(application, payload)
 
 
 async def _start_event_forwarder(application: Application) -> None:
@@ -346,6 +351,17 @@ async def _dispatch_status_update(application: Application, payload: JsonObject)
     if not text:
         return
     await _broadcast_text(application, text)
+
+
+async def _dispatch_thought_update(application: Application, payload: JsonObject) -> None:
+    thought_payload = _coerce_thought_payload(payload)
+    if thought_payload is None:
+        return
+    texts = format_thought_event_chunks(thought_payload)
+    if not texts:
+        return
+    for text in texts:
+        await _broadcast_text(application, text)
 
 
 async def _broadcast_action_event(application: Application, payload: ActionEventPayload) -> None:
@@ -616,6 +632,22 @@ def _coerce_status_payload(payload: JsonObject) -> StatusEventPayload | None:
     if isinstance(username, str):
         status_payload["username"] = username
     return status_payload
+
+
+def _coerce_thought_payload(payload: JsonObject) -> ThoughtEventPayload | None:
+    cycle_id = payload.get("cycle_id")
+    lines = payload.get("lines")
+    if not isinstance(cycle_id, int):
+        return None
+    if not isinstance(lines, list):
+        return None
+    normalized_lines = [str(line) for line in lines if isinstance(line, str)]
+    if len(normalized_lines) != len(lines):
+        return None
+    return {
+        "cycle_id": cycle_id,
+        "lines": normalized_lines,
+    }
 
 
 if __name__ == "__main__":

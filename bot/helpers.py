@@ -1,7 +1,9 @@
 import json
 import re
 
-from core.common_types import ActionEventPayload, StatusEventPayload
+from core.common_types import ActionEventPayload, StatusEventPayload, ThoughtEventPayload
+
+TELEGRAM_MESSAGE_MAX_CHARS = 4096
 
 
 def load_allowed_user_ids(config: dict) -> list[int]:
@@ -55,6 +57,38 @@ def format_status_event(payload: StatusEventPayload) -> str:
     return f"系统状态：{message}"
 
 
+def format_thought_event(payload: ThoughtEventPayload) -> str:
+    cycle_id = payload.get("cycle_id")
+    lines = payload.get("lines")
+    if not isinstance(cycle_id, int):
+        return ""
+    if not isinstance(lines, list):
+        return ""
+    normalized_lines = [str(line).strip() for line in lines if str(line).strip()]
+    if not normalized_lines:
+        return ""
+    return "\n".join([f"── C{cycle_id} ──", *normalized_lines]).strip()
+
+
+def format_thought_event_chunks(payload: ThoughtEventPayload) -> list[str]:
+    cycle_id = payload.get("cycle_id")
+    lines = payload.get("lines")
+    if not isinstance(cycle_id, int):
+        return []
+    if not isinstance(lines, list):
+        return []
+    normalized_lines = [str(line).strip() for line in lines if str(line).strip()]
+    if not normalized_lines:
+        return []
+    header = f"── C{cycle_id} ──"
+    available_chars = TELEGRAM_MESSAGE_MAX_CHARS - len(header) - 1
+    if available_chars <= 0:
+        return []
+    body = "\n".join(normalized_lines)
+    body_chunks = _split_telegram_body(body, available_chars)
+    return [f"{header}\n{chunk}".strip() for chunk in body_chunks if chunk.strip()]
+
+
 def _load_numeric_user_ids(config: dict, key: str) -> list[int]:
     raw_ids = config.get("telegram", {}).get(key, [])
     user_ids = []
@@ -91,3 +125,22 @@ def _extract_embedded_summary(summary: str) -> str | None:
         return None
     extracted = str(payload.get("summary") or "").strip()
     return extracted or None
+
+
+def _split_telegram_body(text: str, max_chars: int) -> list[str]:
+    if len(text) <= max_chars:
+        return [text]
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= max_chars:
+            chunks.append(remaining)
+            break
+        split_at = remaining.rfind("\n", 0, max_chars + 1)
+        if split_at <= 0:
+            split_at = max_chars
+        chunk = remaining[:split_at].rstrip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[split_at:].lstrip("\n")
+    return chunks

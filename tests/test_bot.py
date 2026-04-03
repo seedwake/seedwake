@@ -20,13 +20,15 @@ from bot.main import (
 from bot.helpers import (
     extract_telegram_chat_id,
     format_action_event,
+    format_thought_event,
+    format_thought_event_chunks,
     load_admin_user_ids,
     load_allowed_user_ids,
     load_notification_chat_ids,
 )
 from core.action import ACTION_CONTROL_KEY
 from core.stimulus import CONVERSATION_HISTORY_KEY, REDIS_KEY as STIMULUS_REDIS_KEY
-from core.common_types import ActionEventPayload, EventEnvelope
+from core.common_types import ActionEventPayload, EventEnvelope, ThoughtEventPayload
 from test_support import slice_window
 
 
@@ -161,6 +163,18 @@ def _action_envelope() -> EventEnvelope:
     return {"type": "action", "payload": payload}
 
 
+def _thought_envelope() -> EventEnvelope:
+    payload: ThoughtEventPayload = {
+        "cycle_id": 42,
+        "lines": [
+            "[思考] 我先想一下。",
+            "[意图] 我想回一句。",
+            "[反应] 刚才那句确实接住了。",
+        ],
+    }
+    return {"type": "thoughts", "payload": payload}
+
+
 def _store_running_action(redis_client: FakeRedis, action_id: str = "act_1") -> None:
     redis_client.hset(
         "seedwake:actions",
@@ -248,6 +262,34 @@ class TelegramBotHelpersTests(unittest.TestCase):
         self.assertIn("act_2", text)
         self.assertIn("选了 Virginia Woolf《The Waves》的开篇，和目标意象很贴近。", text)
         self.assertNotIn('{"ok":true', text)
+
+    def test_format_thought_event(self) -> None:
+        payload: ThoughtEventPayload = {
+            "cycle_id": 42,
+            "lines": [
+                "[思考] 我先想一下。",
+                "[意图] 我想回一句。",
+            ],
+        }
+
+        text = format_thought_event(payload)
+
+        self.assertIn("── C42 ──", text)
+        self.assertIn("[思考] 我先想一下。", text)
+        self.assertIn("[意图] 我想回一句。", text)
+
+    def test_format_thought_event_chunks_splits_long_body(self) -> None:
+        long_line = "[思考] " + ("很长的念头" * 900)
+        payload: ThoughtEventPayload = {
+            "cycle_id": 42,
+            "lines": [long_line],
+        }
+
+        chunks = format_thought_event_chunks(payload)
+
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(chunk.startswith("── C42 ──\n") for chunk in chunks))
+        self.assertTrue(all(len(chunk) <= 4096 for chunk in chunks))
 
 
 class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
@@ -383,6 +425,44 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         await _dispatch_event(context.application, _action_envelope())
 
         self.assertEqual(_send_message_mock(context).await_count, 2)
+
+    async def test_dispatch_thought_event_broadcasts_to_notification_channel(self) -> None:
+        context = _make_context(
+            FakeRedis(),
+            allowed_user_ids={1, 2},
+            admin_user_ids={2},
+            notification_chat_ids=[-1001234567890],
+        )
+
+        await _dispatch_event(context.application, _thought_envelope())
+
+        send_mock = _send_message_mock(context)
+        send_mock.assert_awaited_once()
+        first_kwargs = send_mock.await_args_list[0].kwargs
+        self.assertEqual(first_kwargs["chat_id"], -1001234567890)
+        self.assertIn("── C42 ──", str(first_kwargs["text"]))
+        self.assertIn("[思考] 我先想一下。", str(first_kwargs["text"]))
+
+    async def test_dispatch_thought_event_splits_long_message(self) -> None:
+        context = _make_context(
+            FakeRedis(),
+            allowed_user_ids={1, 2},
+            admin_user_ids={2},
+            notification_chat_ids=[-1001234567890],
+        )
+        long_line = "[思考] " + ("很长的念头" * 900)
+        envelope: EventEnvelope = {
+            "type": "thoughts",
+            "payload": {"cycle_id": 42, "lines": [long_line]},
+        }
+
+        await _dispatch_event(context.application, envelope)
+
+        send_mock = _send_message_mock(context)
+        self.assertGreater(send_mock.await_count, 1)
+        texts = [str(call.kwargs["text"]) for call in send_mock.await_args_list]
+        self.assertTrue(all(text.startswith("── C42 ──\n") for text in texts))
+        self.assertTrue(all(len(text) <= 4096 for text in texts))
 
     async def test_handle_approve_pushes_action_control(self) -> None:
         redis_client = FakeRedis()

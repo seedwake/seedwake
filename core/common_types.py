@@ -246,7 +246,12 @@ class StatusEventPayload(TypedDict):
     username: NotRequired[str]
 
 
-type EventPayload = ActionEventPayload | ReplyEventPayload | StatusEventPayload
+class ThoughtEventPayload(TypedDict):
+    cycle_id: int
+    lines: list[str]
+
+
+type EventPayload = ActionEventPayload | ReplyEventPayload | StatusEventPayload | ThoughtEventPayload
 
 
 class EventEnvelope(TypedDict):

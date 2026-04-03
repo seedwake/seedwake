@@ -74,6 +74,7 @@ from core.common_types import (
     StatusEventPayload,
     person_entity_tag_from_telegram_username,
     rewritten_pair_match_counts,
+    ThoughtEventPayload,
     elapsed_ms,
 )
 
@@ -505,6 +506,7 @@ def _run_engine_loop(
             continue
 
         _finish_cycle(log_file, cycle_id, stimuli, new_thoughts)
+        _publish_event(runtime.stm.redis_client, "thoughts", _thought_event_payload(cycle_id, new_thoughts))
         if _safe_post_cycle_phase4(runtime, cycle_id, stimuli):
             _graceful_restart_core(log_file, prompt_log_file, runtime.action_manager)
         last_completed_cycle_id = cycle_id
@@ -2564,6 +2566,18 @@ def _publish_event(
 
 def _status_payload(message: str) -> StatusEventPayload:
     return {"message": message}
+
+
+def _thought_event_payload(cycle_id: int, thoughts: list[Thought]) -> ThoughtEventPayload:
+    return {
+        "cycle_id": cycle_id,
+        "lines": [_thought_event_line(thought) for thought in thoughts],
+    }
+
+
+def _thought_event_line(thought: Thought) -> str:
+    plain_trigger = f" (← {thought.trigger_ref})" if thought.trigger_ref else ""
+    return f"[{thought.type}] {thought.content}{plain_trigger}"
 
 
 # -- Utilities -------------------------------------------------------------

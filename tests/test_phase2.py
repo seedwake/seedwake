@@ -1580,6 +1580,56 @@ class CycleCounterTests(unittest.TestCase):
         self.assertIn("cycle C294 loop finished", output)
         self.assertIn("retry_sleep_ms=1000.0", output)
 
+    def test_run_engine_loop_publishes_thought_event_after_successful_cycle(self) -> None:
+        redis_client = MagicMock()
+        runtime = SimpleNamespace(
+            retry_delay=1.0,
+            max_retry_delay=8.0,
+            reconnect_interval=30.0,
+            bootstrap_identity={},
+            stimulus_queue=MagicMock(),
+            stm=SimpleNamespace(redis_client=redis_client),
+        )
+        generated = [_make_thought(301, 1, "这轮已经成形了。")]
+
+        def prepare_cycle(
+            log_file,
+            cycle_id,
+            runtime_obj,
+            identity,
+            bootstrap_identity,
+            reconnect_interval,
+            last_redis_reconnect,
+            last_pg_reconnect,
+        ) -> tuple[dict[str, str], float, float, list[MagicMock], list, list]:
+            _ = (
+                log_file,
+                cycle_id,
+                runtime_obj,
+                bootstrap_identity,
+                reconnect_interval,
+                last_redis_reconnect,
+                last_pg_reconnect,
+            )
+            return identity, 0.0, 0.0, [], [], []
+
+        with (
+            patch("core.main._next_cycle_id", return_value=301),
+            patch("core.main._prepare_cycle", side_effect=prepare_cycle),
+            patch("core.main._execute_cycle", return_value=(generated, False)),
+            patch("core.main._finish_cycle"),
+            patch("core.main._publish_event") as publish_event,
+            patch("core.main._safe_post_cycle_phase4", side_effect=KeyboardInterrupt),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                _run_engine_loop(log_file=None, prompt_log_file=None, runtime=_as_runtime(runtime), identity={})
+
+        publish_event.assert_any_call(
+            redis_client,
+            "thoughts",
+            {"cycle_id": 301, "lines": ["[思考] 这轮已经成形了。"]},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
