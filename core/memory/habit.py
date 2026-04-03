@@ -8,12 +8,13 @@ import re
 import time
 
 import psycopg
+from psycopg import sql
 
 from core.embedding import embed_text
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient
 from core.stimulus import Stimulus
 from core.thought_parser import Thought, thought_action_requests
-from core.common_types import HabitControlSignal, HabitPromptEntry, JsonObject, elapsed_ms
+from core.common_types import HabitControlSignal, HabitPromptEntry, JsonObject, bigram_similarity, elapsed_ms
 
 logger = logging.getLogger(__name__)
 HABIT_MIN_PATTERN_LENGTH = 4
@@ -82,10 +83,10 @@ class HabitMemory:
                     """
                 )
                 cur.execute(
-                    f"""
+                    sql.SQL("""
                     ALTER TABLE habit_seeds
-                    ADD COLUMN IF NOT EXISTS embedding vector({HABIT_EMBEDDING_DIMENSIONS})
-                    """
+                    ADD COLUMN IF NOT EXISTS embedding vector({})
+                    """).format(sql.Literal(HABIT_EMBEDDING_DIMENSIONS))
                 )
                 cur.execute(
                     """
@@ -877,7 +878,7 @@ def _habit_context_similarity(pattern: str, context_text: str) -> float:
     normalized_context = _normalize_habit_text(context_text)
     if not normalized_pattern or not normalized_context:
         return 0.0
-    return _text_similarity(normalized_pattern, normalized_context)
+    return bigram_similarity(normalized_pattern, normalized_context)
 
 
 def _habit_recency_bonus(last_activated: datetime | None) -> float:
@@ -888,15 +889,6 @@ def _habit_recency_bonus(last_activated: datetime | None) -> float:
     return max(0.0, 1.0 - min(age_days / 7.0, 1.0))
 
 
-def _text_similarity(a: str, b: str) -> float:
-    if len(a) < 2 or len(b) < 2:
-        return 0.0
-    grams_a = {a[index:index + 2] for index in range(len(a) - 1)}
-    grams_b = {b[index:index + 2] for index in range(len(b) - 1)}
-    union = len(grams_a | grams_b)
-    if union == 0:
-        return 0.0
-    return len(grams_a & grams_b) / union
 
 
 def _embed_habit_pattern(

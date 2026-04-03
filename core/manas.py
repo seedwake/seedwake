@@ -11,7 +11,7 @@ import redis as redis_lib
 from core.embedding import embed_texts
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient
 from core.thought_parser import Thought, strip_action_markers
-from core.common_types import ManasPromptState, elapsed_ms
+from core.common_types import ManasPromptState, bigram_similarity, elapsed_ms
 
 MANAS_STATE_KEY = "seedwake:manas_state"
 MANAS_REDIS_EXCEPTIONS = (
@@ -315,11 +315,11 @@ def _fallback_coherence_score(
     stable_text: str,
     session_context: str,
 ) -> float:
-    identity_similarity = _text_similarity(current_text, identity_text)
-    stable_similarity = _text_similarity(current_text, stable_text or current_text)
-    inclusive_similarity = _text_similarity(current_text, SELF_CONTINUITY_ANCHOR)
-    externalized_similarity = _text_similarity(current_text, EXTERNALIZED_SELF_ANCHOR)
-    session_similarity = _text_similarity(current_text, session_context) if session_context else 0.0
+    identity_similarity = bigram_similarity(current_text, identity_text)
+    stable_similarity = bigram_similarity(current_text, stable_text or current_text)
+    inclusive_similarity = bigram_similarity(current_text, SELF_CONTINUITY_ANCHOR)
+    externalized_similarity = bigram_similarity(current_text, EXTERNALIZED_SELF_ANCHOR)
+    session_similarity = bigram_similarity(current_text, session_context) if session_context else 0.0
     score = (
         identity_similarity * 0.34
         + stable_similarity * 0.28
@@ -372,18 +372,6 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
         return 0.0
     return max(-1.0, min(1.0, dot / (left_norm * right_norm)))
 
-
-def _text_similarity(left: str, right: str) -> float:
-    normalized_left = _normalize_text(left)
-    normalized_right = _normalize_text(right)
-    if len(normalized_left) < 2 or len(normalized_right) < 2:
-        return 0.0
-    grams_left = {normalized_left[index:index + 2] for index in range(len(normalized_left) - 1)}
-    grams_right = {normalized_right[index:index + 2] for index in range(len(normalized_right) - 1)}
-    union = len(grams_left | grams_right)
-    if union == 0:
-        return 0.0
-    return len(grams_left & grams_right) / union
 
 
 def _normalize_text(text: str) -> str:

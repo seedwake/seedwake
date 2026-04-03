@@ -228,7 +228,8 @@ def _infer_emotion_via_llm(
         return {}
     finally:
         logger.info("emotion LLM inference finished in %.1f ms", elapsed_ms(started_at))
-    raw_content = str(response.get("message", {}).get("content") or "").strip()
+    message = response.get("message")
+    raw_content = str(message.get("content") or "").strip() if isinstance(message, dict) else ""
     return _parse_emotion_json(raw_content, dimensions)
 
 

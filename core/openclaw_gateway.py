@@ -36,7 +36,6 @@ def _websocket_exception_types(exceptions_module: ModuleType) -> tuple[type[Base
         "ProtocolError",
         "ProxyError",
         "SecurityError",
-        "WebSocketProtocolError",
     )
     exception_types: list[type[BaseException]] = []
     for name in exception_names:

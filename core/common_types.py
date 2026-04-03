@@ -294,3 +294,15 @@ def coerce_json_object(value: object) -> JsonObject | None:
     if not isinstance(value, dict):
         return None
     return {str(key): coerce_json_value(item) for key, item in value.items()}
+
+
+def bigram_similarity(left: str, right: str) -> float:
+    """Jaccard similarity of character bigrams between two strings."""
+    if len(left) < 2 or len(right) < 2:
+        return 0.0
+    grams_left = {left[i:i + 2] for i in range(len(left) - 1)}
+    grams_right = {right[i:i + 2] for i in range(len(right) - 1)}
+    union = len(grams_left | grams_right)
+    if union == 0:
+        return 0.0
+    return len(grams_left & grams_right) / union

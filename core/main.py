@@ -65,6 +65,7 @@ from core.common_types import (
     JsonValue,
     RecentConversationPrompt,
     StatusEventPayload,
+    bigram_similarity,
     elapsed_ms,
 )
 
@@ -1722,9 +1723,9 @@ def _detect_runtime_degeneration(recent_thoughts: list[Thought], current_thought
     if any(not text for text in cycle_texts):
         return False
     pairwise = [
-        _cycle_text_similarity(cycle_texts[0], cycle_texts[1]),
-        _cycle_text_similarity(cycle_texts[0], cycle_texts[2]),
-        _cycle_text_similarity(cycle_texts[1], cycle_texts[2]),
+        bigram_similarity(cycle_texts[0], cycle_texts[1]),
+        bigram_similarity(cycle_texts[0], cycle_texts[2]),
+        bigram_similarity(cycle_texts[1], cycle_texts[2]),
     ]
     detected = all(value >= 0.6 for value in pairwise)
     if detected:
@@ -1742,15 +1743,6 @@ def _normalize_cycle_text(content: str) -> str:
     return " ".join(normalized.split())
 
 
-def _cycle_text_similarity(left: str, right: str) -> float:
-    if len(left) < 2 or len(right) < 2:
-        return 0.0
-    grams_left = {left[index:index + 2] for index in range(len(left) - 1)}
-    grams_right = {right[index:index + 2] for index in range(len(right) - 1)}
-    union = len(grams_left | grams_right)
-    if union == 0:
-        return 0.0
-    return len(grams_left & grams_right) / union
 
 
 def _recent_conversation_summary_request(

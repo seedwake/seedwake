@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from core.stimulus import Stimulus
 from core.thought_parser import Thought, strip_action_markers, thought_action_requests
-from core.common_types import AttentionPromptEntry, EmotionSnapshot, HabitPromptEntry
+from core.common_types import AttentionPromptEntry, EmotionSnapshot, HabitPromptEntry, bigram_similarity
 
 NOVELTY_WINDOW = 12
 
@@ -88,7 +88,7 @@ def _attention_score(
     score = 0.15
     reasons: list[str] = []
 
-    goal_relevance = _max_text_similarity(thought.content, goal_stack)
+    goal_relevance = _maxbigram_similarity(thought.content, goal_stack)
     score += goal_relevance * 0.28
     if goal_relevance >= 0.16:
         reasons.append("贴近目标")
@@ -131,17 +131,17 @@ def _novelty_score(content: str, recent_texts: list[str]) -> float:
     normalized = _normalize_text(content)
     if not normalized or not recent_texts:
         return 0.5
-    similarities = [_text_similarity(normalized, _normalize_text(text)) for text in recent_texts]
+    similarities = [bigram_similarity(normalized, _normalize_text(text)) for text in recent_texts]
     highest_similarity = max(similarities) if similarities else 0.0
     return max(0.0, 1.0 - highest_similarity)
 
 
-def _max_text_similarity(content: str, targets: list[str]) -> float:
+def _maxbigram_similarity(content: str, targets: list[str]) -> float:
     normalized = _normalize_text(content)
     if not normalized or not targets:
         return 0.0
     similarities = [
-        _text_similarity(normalized, _normalize_text(target))
+        bigram_similarity(normalized, _normalize_text(target))
         for target in targets
         if _normalize_text(target)
     ]
@@ -156,7 +156,7 @@ def _emotion_resonance_score(
     if emotion is None:
         return 0.0
     dimensions = emotion["dimensions"]
-    summary_similarity = _text_similarity(
+    summary_similarity = bigram_similarity(
         _normalize_text(thought.content),
         _normalize_text(emotion["summary"]),
     )
@@ -203,7 +203,7 @@ def _habit_resonance_score(
     if not thought_text:
         return 0.0
     similarities = [
-        _text_similarity(
+        bigram_similarity(
             thought_text,
             _normalize_text(str(habit["pattern"])),
         )
@@ -216,14 +216,3 @@ def _habit_resonance_score(
 
 def _normalize_text(text: str) -> str:
     return " ".join(str(text).replace("\n", " ").split())
-
-
-def _text_similarity(a: str, b: str) -> float:
-    if len(a) < 2 or len(b) < 2:
-        return 0.0
-    grams_a = {a[index:index + 2] for index in range(len(a) - 1)}
-    grams_b = {b[index:index + 2] for index in range(len(b) - 1)}
-    union = len(grams_a | grams_b)
-    if union == 0:
-        return 0.0
-    return len(grams_a & grams_b) / union

@@ -21,6 +21,7 @@ from core.common_types import (
     RecentConversationPrompt,
     ReflectionPromptEntry,
     SleepStateSnapshot,
+    bigram_similarity,
     elapsed_ms,
 )
 
@@ -588,7 +589,7 @@ def _detect_thought_stagnation(
     for i in range(len(cycle_texts)):
         for j in range(i + 1, len(cycle_texts)):
             total_pairs += 1
-            if _text_similarity(cycle_texts[i], cycle_texts[j]) >= STAGNATION_SIMILARITY_THRESHOLD:
+            if bigram_similarity(cycle_texts[i], cycle_texts[j]) >= STAGNATION_SIMILARITY_THRESHOLD:
                 similar_pairs += 1
     if total_pairs > 0 and similar_pairs == total_pairs:
         return _stagnation_warning(cycle_texts, available_sources, has_foreground)
@@ -717,15 +718,6 @@ def _trim_stagnation_prefix(candidate: str) -> str:
         trimmed = trimmed[1:]
     return trimmed
 
-
-def _text_similarity(a: str, b: str) -> float:
-    if len(a) < 2 or len(b) < 2:
-        return 0.0
-    bigrams_a = {a[i:i + 2] for i in range(len(a) - 1)}
-    bigrams_b = {b[i:i + 2] for i in range(len(b) - 1)}
-    intersection = len(bigrams_a & bigrams_b)
-    union = len(bigrams_a | bigrams_b)
-    return intersection / union if union > 0 else 0.0
 
 
 def _format_running_actions(actions: list[ActionRecord], conversation_labels: dict[str, str]) -> str:
