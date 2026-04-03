@@ -62,10 +62,15 @@ class MetacognitionManager:
         except METACOGNITION_REDIS_EXCEPTIONS:
             self._redis = None
             return []
+        if not isinstance(raw_items, list):
+            return []
         records: list[ReflectionPromptEntry] = []
         for raw_item in raw_items:
+            decoded = _decode_redis_value(raw_item)
+            if decoded is None:
+                continue
             try:
-                payload = json.loads(_decode_redis_value(raw_item))
+                payload = json.loads(decoded)
             except (TypeError, ValueError):
                 continue
             if not isinstance(payload, dict):
@@ -202,7 +207,10 @@ class MetacognitionManager:
             raw = redis_client.get(REFLECTION_STATE_KEY)
             if raw is None:
                 return
-            payload = json.loads(_decode_redis_value(raw))
+            decoded = _decode_redis_value(raw)
+            if decoded is None:
+                return
+            payload = json.loads(decoded)
             if not isinstance(payload, dict):
                 return
             self._last_reflection_cycle = int(payload.get("last_reflection_cycle") or 0)
@@ -283,7 +291,9 @@ def _manas_reflection_due(
     return cycle_id - last_reflection_cycle >= minimum_gap
 
 
-def _decode_redis_value(value: bytes | str) -> str:
+def _decode_redis_value(value: object) -> str | None:
     if isinstance(value, bytes):
         return value.decode("utf-8")
-    return value
+    if isinstance(value, str):
+        return value
+    return None

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 import re
+from typing import cast
 
 import redis as redis_lib
 
@@ -15,6 +16,7 @@ from core.memory.long_term import LongTermEntry, LongTermMemory
 from core.memory.short_term import ShortTermMemory
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient
 from core.stimulus import (
+    ConversationRedisLike,
     Stimulus,
     forget_action_result_history_ids,
     load_action_result_history,
@@ -248,7 +250,8 @@ class SleepManager:
 
         # -- 2. action result archive --
         action_result_started_at = time.perf_counter()
-        action_result_stimuli = load_action_result_history(self._redis, limit=LIGHT_SLEEP_ACTION_RESULT_LIMIT)
+        conversation_redis = _conversation_redis(self._redis)
+        action_result_stimuli = load_action_result_history(conversation_redis, limit=LIGHT_SLEEP_ACTION_RESULT_LIMIT)
         archived_action_result_ids = _archive_action_result_memories(
             ltm,
             embedding_client,
@@ -257,7 +260,7 @@ class SleepManager:
             emotion,
         )
         if archived_action_result_ids:
-            forget_action_result_history_ids(self._redis, archived_action_result_ids)
+            forget_action_result_history_ids(conversation_redis, archived_action_result_ids)
             archived_action_result_id_set = set(archived_action_result_ids)
             archived_texts.extend(
                 _light_sleep_action_result_line(stimulus)
@@ -469,7 +472,10 @@ class SleepManager:
             raw = redis_client.get(SLEEP_STATE_KEY)
             if raw is None:
                 return
-            payload = json.loads(_decode_redis_value(raw))
+            decoded = _decode_redis_value(raw)
+            if decoded is None:
+                return
+            payload = json.loads(decoded)
             if not isinstance(payload, dict):
                 return
             last_deep_sleep_at = str(payload.get("last_deep_sleep_at") or "").strip()
@@ -495,7 +501,8 @@ class SleepManager:
         except SLEEP_REDIS_EXCEPTIONS:
             self._redis = None
 
-    def _default_state(self) -> SleepStateSnapshot:
+    @staticmethod
+    def _default_state() -> SleepStateSnapshot:
         return {
             "energy": 100.0,
             "mode": "awake",
@@ -769,7 +776,7 @@ def _update_impression_memories(
     cycle_id: int,
     emotion: EmotionSnapshot,
 ) -> int:
-    history = load_conversation_history(redis_client, limit=240)
+    history = load_conversation_history(_conversation_redis(redis_client), limit=240)
     if not history:
         return 0
     grouped = _recent_impression_groups(history)
@@ -1087,10 +1094,18 @@ def _sleep_summary(energy: float, mode: str) -> str:
     return f"精力 {energy:.1f}/100，当前仍清醒。"
 
 
-def _decode_redis_value(value: bytes | str) -> str:
+def _decode_redis_value(value: object) -> str | None:
     if isinstance(value, bytes):
         return value.decode("utf-8")
-    return value
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def _conversation_redis(redis_client: redis_lib.Redis | None) -> ConversationRedisLike | None:
+    if redis_client is None:
+        return None
+    return cast(ConversationRedisLike, redis_client)
 
 
 def _copy_sleep_state(state: SleepStateSnapshot) -> SleepStateSnapshot:

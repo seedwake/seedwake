@@ -163,7 +163,10 @@ class ManasManager:
             raw = redis_client.get(MANAS_STATE_KEY)
             if raw is None:
                 return
-            payload = json.loads(_decode_redis_value(raw))
+            decoded = _decode_redis_value(raw)
+            if decoded is None:
+                return
+            payload = json.loads(decoded)
             if not isinstance(payload, dict):
                 return
             self._state = _state_from_json(payload)
@@ -186,10 +189,10 @@ class ManasManager:
 
 def _state_from_json(payload: dict[str, object]) -> _ManasState:
     return _ManasState(
-        self_coherence_score=float(payload.get("self_coherence_score") or 1.0),
-        last_stable_cycle=int(payload.get("last_stable_cycle") or 0),
-        consecutive_disruptions=int(payload.get("consecutive_disruptions") or 0),
-        session_start_cycle=int(payload.get("session_start_cycle") or 0),
+        self_coherence_score=_coerce_float(payload.get("self_coherence_score"), 1.0),
+        last_stable_cycle=_coerce_int(payload.get("last_stable_cycle"), 0),
+        consecutive_disruptions=_coerce_int(payload.get("consecutive_disruptions"), 0),
+        session_start_cycle=_coerce_int(payload.get("session_start_cycle"), 0),
         session_context=str(payload.get("session_context") or "").strip(),
         identity_hash=str(payload.get("identity_hash") or "").strip(),
         session_context_pending=bool(payload.get("session_context_pending")),
@@ -377,7 +380,37 @@ def _normalize_text(text: str) -> str:
     return " ".join(str(text).replace("\n", " ").split())
 
 
-def _decode_redis_value(value: bytes | str) -> str:
+def _decode_redis_value(value: object) -> str | None:
     if isinstance(value, bytes):
         return value.decode("utf-8")
-    return value
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def _coerce_float(value: object, default: float) -> float:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _coerce_int(value: object, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default

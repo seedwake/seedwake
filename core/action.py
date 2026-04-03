@@ -315,7 +315,8 @@ class ActionManager:
             conversation_reply_to_message_id=conversation_reply_to_message_id,
         )
 
-    def _submitted_action_thoughts(self, thought: Thought) -> list[Thought]:
+    @staticmethod
+    def _submitted_action_thoughts(thought: Thought) -> list[Thought]:
         action_requests = thought_action_requests(thought)
         if not action_requests:
             return [thought]
@@ -330,7 +331,8 @@ class ActionManager:
             for action_request in action_requests
         ]
 
-    def _submitted_action_id(self, thought_id: str, action_index: int) -> str:
+    @staticmethod
+    def _submitted_action_id(thought_id: str, action_index: int) -> str:
         if action_index == 0:
             return f"act_{thought_id}"
         return f"act_{thought_id}-{action_index + 1}"
@@ -3038,12 +3040,12 @@ def _reading_stimulus_intent_line(action: ActionRecord) -> str:
     return ""
 
 
-def _reading_request_focus(request: ActionRequestPayload) -> str:
-    raw_params = _request_raw_params(request)
+def _reading_request_focus(request_payload: ActionRequestPayload) -> str:
+    raw_params = _request_raw_params(request_payload)
     focus = _extract_action_first_param(raw_params, "query", "topic", "keywords")
     if focus:
         return _compact_prompt_text(focus)
-    task = str(request.get("task") or "").strip()
+    task = str(request_payload.get("task") or "").strip()
     if task.startswith("围绕“"):
         start = len("围绕“")
         end = task.find("”", start)
@@ -3052,20 +3054,20 @@ def _reading_request_focus(request: ActionRequestPayload) -> str:
     return ""
 
 
-def _web_fetch_request_url(request: ActionRequestPayload) -> str:
-    raw_params = _request_raw_params(request)
+def _web_fetch_request_url(request_payload: ActionRequestPayload) -> str:
+    raw_params = _request_raw_params(request_payload)
     url = _extract_action_first_param(raw_params, "url", "link")
     if url:
         return _compact_prompt_text(url)
-    task = str(request.get("task") or "").strip()
+    task = str(request_payload.get("task") or "").strip()
     fallback_url = _first_url_in_text(task)
     if fallback_url:
         return _compact_prompt_text(fallback_url)
     return ""
 
 
-def _request_raw_params(request: ActionRequestPayload) -> str:
-    raw_action = request.get("raw_action")
+def _request_raw_params(request_payload: ActionRequestPayload) -> str:
+    raw_action = request_payload.get("raw_action")
     if not isinstance(raw_action, dict):
         return ""
     return str(raw_action.get("params") or "").strip()
@@ -3406,8 +3408,38 @@ def _request_payload_with_submitted_at(
     request: ActionRequestPayload,
     submitted_at: datetime,
 ) -> ActionRequestPayload:
-    payload = dict(request)
+    payload = _clone_action_request_payload(request)
     payload["submitted_at"] = submitted_at.isoformat()
+    return payload
+
+
+def _clone_action_request_payload(request: ActionRequestPayload) -> ActionRequestPayload:
+    payload: ActionRequestPayload = {
+        "task": request["task"],
+        "reason": request["reason"],
+        "raw_action": request["raw_action"],
+    }
+    news_feed_urls = request.get("news_feed_urls")
+    if news_feed_urls:
+        payload["news_feed_urls"] = list(news_feed_urls)
+    worker_agent_id = request.get("worker_agent_id")
+    if worker_agent_id:
+        payload["worker_agent_id"] = worker_agent_id
+    submitted_at = request.get("submitted_at")
+    if submitted_at:
+        payload["submitted_at"] = submitted_at
+    target_source = request.get("target_source")
+    if target_source:
+        payload["target_source"] = target_source
+    target_entity = request.get("target_entity")
+    if target_entity:
+        payload["target_entity"] = target_entity
+    message_text = request.get("message_text")
+    if message_text:
+        payload["message_text"] = message_text
+    reply_to_message_id = request.get("reply_to_message_id")
+    if reply_to_message_id:
+        payload["reply_to_message_id"] = reply_to_message_id
     return payload
 
 

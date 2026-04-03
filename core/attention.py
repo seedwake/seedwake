@@ -49,7 +49,7 @@ def evaluate_attention(
         entries.append((score, reason, thought))
     ranked = sorted(entries, key=lambda item: item[0], reverse=True)
     anchor = ranked[0][2] if ranked else thoughts[0]
-    prompt_entries = [
+    prompt_entries: list[AttentionPromptEntry] = [
         {
             "thought_id": thought.thought_id,
             "weight": score,
@@ -88,7 +88,7 @@ def _attention_score(
     score = 0.15
     reasons: list[str] = []
 
-    goal_relevance = _maxbigram_similarity(thought.content, goal_stack)
+    goal_relevance = _max_bigram_similarity(thought.content, goal_stack)
     score += goal_relevance * 0.28
     if goal_relevance >= 0.16:
         reasons.append("贴近目标")
@@ -136,7 +136,7 @@ def _novelty_score(content: str, recent_texts: list[str]) -> float:
     return max(0.0, 1.0 - highest_similarity)
 
 
-def _maxbigram_similarity(content: str, targets: list[str]) -> float:
+def _max_bigram_similarity(content: str, targets: list[str]) -> float:
     normalized = _normalize_text(content)
     if not normalized or not targets:
         return 0.0

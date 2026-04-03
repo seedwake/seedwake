@@ -236,7 +236,7 @@ def _append_prompt_context_sections(
     note_text: str,
     perception_cues: list[str],
 ) -> None:
-    if _prefrontal_needs_prompt(prefrontal_state):
+    if prefrontal_state is not None and _prefrontal_needs_prompt(prefrontal_state):
         executive = prefrontal_state
         _append_prompt_section(parts, "goal_stack", lambda: _format_prefrontal_alert(executive))
     if manas_state and _manas_needs_prompt(manas_state):
@@ -589,7 +589,7 @@ def _detect_thought_stagnation(
             total_pairs += 1
             if bigram_similarity(cycle_texts[i], cycle_texts[j]) >= STAGNATION_SIMILARITY_THRESHOLD:
                 similar_pairs += 1
-    if total_pairs > 0 and similar_pairs == total_pairs:
+    if 0 < total_pairs == similar_pairs:
         return _stagnation_warning(cycle_texts, available_sources, has_foreground)
     return ""
 

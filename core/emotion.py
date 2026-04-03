@@ -124,7 +124,10 @@ class EmotionManager:
             raw = redis_client.get(EMOTION_STATE_KEY)
             if raw is None:
                 return
-            payload = json.loads(_decode_redis_value(raw))
+            decoded = _decode_redis_value(raw)
+            if decoded is None:
+                return
+            payload = json.loads(decoded)
             if not isinstance(payload, dict):
                 return
             dimensions = payload.get("dimensions")
@@ -349,7 +352,9 @@ def _emotion_summary(dimensions: dict[str, float]) -> str:
     return "，".join(visible)
 
 
-def _decode_redis_value(value: bytes | str) -> str:
+def _decode_redis_value(value: object) -> str | None:
     if isinstance(value, bytes):
         return value.decode("utf-8")
-    return value
+    if isinstance(value, str):
+        return value
+    return None

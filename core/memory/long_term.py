@@ -18,6 +18,8 @@ from core.common_types import JsonObject, coerce_json_object, elapsed_ms
 
 logger = logging.getLogger(__name__)
 
+type LongTermQueryParam = str | int | list[int] | list[str]
+
 
 @dataclass
 class LongTermEntry:
@@ -197,17 +199,12 @@ class LongTermMemory:
             return []
         k = top_k or self._top_k
         vec_literal = _format_vector(query_embedding)
-        filters = [sql.SQL("is_active = TRUE")]
-        params: list[str | int | list[int] | list[str]] = [vec_literal]
-        if entity_filter:
-            filters.append(sql.SQL("%s = ANY(entity_tags)"))
-            params.append(entity_filter)
-        if exclude_cycle_ids:
-            filters.append(sql.SQL("(source_cycle_id IS NULL OR source_cycle_id <> ALL(%s))"))
-            params.append(exclude_cycle_ids)
-        if memory_types:
-            filters.append(sql.SQL("memory_type = ANY(%s)"))
-            params.append(memory_types)
+        filters, params = _query_filters(
+            entity_filter=entity_filter,
+            exclude_cycle_ids=exclude_cycle_ids,
+            memory_types=memory_types,
+        )
+        params.insert(0, vec_literal)
         params.extend([vec_literal, k])
         query = sql.SQL("""
             SELECT id, content, memory_type, source_cycle_id,
@@ -249,14 +246,14 @@ class LongTermMemory:
             _entry_from_search_row(r)
             for r in rows
         ]
-        for entry in entries:
-            entry.weighted_score = _weighted_memory_score(
-                entry.similarity,
-                entry.importance,
-                entry.created_at,
+        for memory in entries:
+            memory.weighted_score = _weighted_memory_score(
+                memory.similarity,
+                memory.importance,
+                memory.created_at,
                 self._time_decay_factor,
             )
-        entries.sort(key=lambda entry: entry.weighted_score, reverse=True)
+        entries.sort(key=lambda memory: memory.weighted_score, reverse=True)
         return entries
 
     def recent_by_time(
@@ -274,17 +271,11 @@ class LongTermMemory:
         if conn is None:
             return []
         k = top_k or self._top_k
-        filters = [sql.SQL("is_active = TRUE")]
-        params: list[str | int | list[int]] = []
-        if entity_filter:
-            filters.append(sql.SQL("%s = ANY(entity_tags)"))
-            params.append(entity_filter)
-        if exclude_cycle_ids:
-            filters.append(sql.SQL("(source_cycle_id IS NULL OR source_cycle_id <> ALL(%s))"))
-            params.append(exclude_cycle_ids)
-        if memory_types:
-            filters.append(sql.SQL("memory_type = ANY(%s)"))
-            params.append(memory_types)
+        filters, params = _query_filters(
+            entity_filter=entity_filter,
+            exclude_cycle_ids=exclude_cycle_ids,
+            memory_types=memory_types,
+        )
         params.append(k)
         query = sql.SQL("""
             SELECT id, content, memory_type, source_cycle_id,
@@ -633,6 +624,26 @@ class LongTermMemory:
         except psycopg.Error:
             conn.rollback()
             raise
+
+
+def _query_filters(
+    *,
+    entity_filter: str | None,
+    exclude_cycle_ids: list[int] | None,
+    memory_types: list[str] | None,
+) -> tuple[list[sql.SQL], list[LongTermQueryParam]]:
+    filters = [sql.SQL("is_active = TRUE")]
+    params: list[LongTermQueryParam] = []
+    if entity_filter:
+        filters.append(sql.SQL("%s = ANY(entity_tags)"))
+        params.append(entity_filter)
+    if exclude_cycle_ids:
+        filters.append(sql.SQL("(source_cycle_id IS NULL OR source_cycle_id <> ALL(%s))"))
+        params.append(exclude_cycle_ids)
+    if memory_types:
+        filters.append(sql.SQL("memory_type = ANY(%s)"))
+        params.append(memory_types)
+    return filters, params
 
 
 def _format_vector(vec: list[float]) -> str:

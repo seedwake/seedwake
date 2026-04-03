@@ -29,11 +29,13 @@ from core.main import (
 from core.memory.short_term import LATEST_CYCLE_KEY
 from core.memory.identity import load_identity
 from core.memory.long_term import LongTermEntry, LongTermMemory
+# noinspection PyProtectedMember
 from core.sleep import SleepManager, _archive_action_result_memories, _light_sleep_trace_line
 # noinspection PyProtectedMember
 from core.memory.short_term import ShortTermMemory, _thought_to_dict, _dict_to_thought
 from core.stimulus import Stimulus
 from core.thought_parser import Thought
+from core.common_types import EmotionSnapshot, ManasPromptState, PrefrontalPromptState, SleepStateSnapshot
 
 
 def _make_thought(cycle_id: int = 1, index: int = 1, content: str = "test") -> Thought:
@@ -98,6 +100,95 @@ def _build_association_stm() -> ShortTermMemory:
     stm = ShortTermMemory(redis_client=None, context_window=2)
     stm.append([_make_thought(1, 1, "当前念头")])
     return stm
+
+
+def _emotion_snapshot(
+    *,
+    curiosity: float = 0.0,
+    summary: str = "情绪平稳，波动很轻。",
+) -> EmotionSnapshot:
+    return {
+        "dimensions": {"curiosity": curiosity},
+        "dominant": "curiosity",
+        "summary": summary,
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+
+
+def _sleep_state_snapshot(
+    *,
+    energy: float = 100.0,
+    mode: str = "awake",
+    summary: str = "精力 100.0/100，当前仍清醒。",
+) -> SleepStateSnapshot:
+    return {
+        "energy": energy,
+        "mode": mode,
+        "last_light_sleep_cycle": 0,
+        "last_deep_sleep_cycle": 0,
+        "last_deep_sleep_at": "",
+        "summary": summary,
+    }
+
+
+def _prefrontal_prompt_state() -> PrefrontalPromptState:
+    return {
+        "goal_stack": [],
+        "guidance": [],
+        "inhibition_notes": [],
+        "plan_mode": False,
+    }
+
+
+def _manas_prompt_state() -> ManasPromptState:
+    return {
+        "self_coherence_score": 1.0,
+        "consecutive_disruptions": 0,
+        "session_context": "",
+        "warning": "",
+        "identity_notice": "",
+        "reflection_requested": False,
+    }
+
+
+def _build_execute_cycle_runtime(action_manager: MagicMock | None = None) -> SimpleNamespace:
+    manager = action_manager or MagicMock()
+    runtime = SimpleNamespace(
+        stm=MagicMock(),
+        ltm=MagicMock(),
+        habit_memory=MagicMock(),
+        embedding_client=MagicMock(),
+        auxiliary_client=MagicMock(),
+        embedding_model="embed-model",
+        primary_client=MagicMock(),
+        context_window=30,
+        model_config={"name": "test-model"},
+        auxiliary_model_config={"name": "aux-model"},
+        action_manager=manager,
+        emotion=MagicMock(),
+        sleep=MagicMock(),
+        prefrontal=MagicMock(),
+        manas=MagicMock(),
+        metacognition=MagicMock(),
+    )
+    runtime.stm.get_context.return_value = []
+    runtime.stm.redis_client = None
+    runtime.ltm.available = False
+    runtime.action_manager.current_note.return_value = ""
+    if action_manager is None:
+        runtime.action_manager.pop_prompt_echoes.return_value = []
+    runtime.action_manager.submit_from_thoughts.return_value = []
+    runtime.habit_memory.activate_for_cycle.return_value = []
+    runtime.emotion.current.return_value = _emotion_snapshot()
+    runtime.emotion.apply_cycle.return_value = runtime.emotion.current.return_value
+    runtime.sleep.current.return_value = _sleep_state_snapshot()
+    runtime.prefrontal.current_state.return_value = _prefrontal_prompt_state()
+    runtime.prefrontal.review_thoughts.return_value = ([], [])
+    runtime.manas.current_prompt_state.return_value = _manas_prompt_state()
+    runtime.manas.evaluate_cycle.return_value = runtime.manas.current_prompt_state.return_value
+    runtime.metacognition.recent_reflections.return_value = []
+    runtime.metacognition.should_reflect.return_value = False
+    return runtime
 
 
 class ShortTermMemoryRedisDegradationTests(unittest.TestCase):
@@ -505,75 +596,18 @@ class RecoveryTests(unittest.TestCase):
 class CycleTimingLogTests(unittest.TestCase):
     @patch("core.main.run_cycle", side_effect=RuntimeError("boom"))
     def test_execute_cycle_logs_total_duration_on_failure(self, _) -> None:
-        runtime = SimpleNamespace(
-            stm=MagicMock(),
-            ltm=MagicMock(),
-            habit_memory=MagicMock(),
-            embedding_client=MagicMock(),
-            auxiliary_client=MagicMock(),
-            embedding_model="embed-model",
-            primary_client=MagicMock(),
-            context_window=30,
-            model_config={"name": "test-model"},
-            auxiliary_model_config={"name": "aux-model"},
-            action_manager=MagicMock(),
-            emotion=MagicMock(),
-            sleep=MagicMock(),
-            prefrontal=MagicMock(),
-            manas=MagicMock(),
-            metacognition=MagicMock(),
-        )
-        runtime.stm.get_context.return_value = []
-        runtime.stm.redis_client = None
-        runtime.ltm.available = False
-        runtime.action_manager.current_note.return_value = ""
-        runtime.action_manager.pop_prompt_echoes.return_value = []
-        runtime.action_manager.submit_from_thoughts.return_value = []
-        runtime.habit_memory.activate_for_cycle.return_value = []
-        runtime.emotion.current.return_value = {
-            "dimensions": {"curiosity": 0.0},
-            "dominant": "curiosity",
-            "summary": "情绪平稳，波动很轻。",
-            "updated_at": "2026-01-01T00:00:00+00:00",
-        }
-        runtime.emotion.apply_cycle.return_value = runtime.emotion.current.return_value
-        runtime.sleep.current.return_value = {
-            "energy": 100.0,
-            "mode": "awake",
-            "last_light_sleep_cycle": 0,
-            "last_deep_sleep_cycle": 0,
-            "last_deep_sleep_at": "",
-            "summary": "精力 100.0/100，当前仍清醒。",
-        }
-        runtime.prefrontal.current_state.return_value = {
-            "goal_stack": [],
-            "guidance": [],
-            "inhibition_notes": [],
-            "plan_mode": False,
-        }
-        runtime.prefrontal.review_thoughts.return_value = ([], [])
-        runtime.manas.current_prompt_state.return_value = {
-            "self_coherence_score": 1.0,
-            "consecutive_disruptions": 0,
-            "session_context": "",
-            "warning": "",
-            "identity_notice": "",
-            "reflection_requested": False,
-        }
-        runtime.manas.evaluate_cycle.return_value = runtime.manas.current_prompt_state.return_value
-        runtime.metacognition.recent_reflections.return_value = []
-        runtime.metacognition.should_reflect.return_value = False
+        runtime = _build_execute_cycle_runtime()
 
         with self.assertLogs("core.main", level="INFO") as logs:
             with self.assertRaises(RuntimeError):
-                    _execute_cycle(
-                        _as_runtime(runtime),
-                        cycle_id=42,
-                        identity={"self_description": "我"},
-                        stimuli=[],
-                        perception_cues=[],
-                        prompt_log_file=None,
-                    )
+                _execute_cycle(
+                    _as_runtime(runtime),
+                    cycle_id=42,
+                    identity={"self_description": "我"},
+                    stimuli=[],
+                    perception_cues=[],
+                    prompt_log_file=None,
+                )
 
         output = "\n".join(logs.output)
         self.assertIn("cycle C42 stm get_context finished", output)
@@ -593,63 +627,7 @@ class CycleTimingLogTests(unittest.TestCase):
         )
         action_manager = MagicMock()
         action_manager.pop_prompt_echoes.return_value = [pending_echo]
-        runtime = SimpleNamespace(
-            stm=MagicMock(),
-            ltm=MagicMock(),
-            habit_memory=MagicMock(),
-            embedding_client=MagicMock(),
-            auxiliary_client=MagicMock(),
-            embedding_model="embed-model",
-            primary_client=MagicMock(),
-            context_window=30,
-            model_config={"name": "test-model"},
-            auxiliary_model_config={"name": "aux-model"},
-            action_manager=action_manager,
-            emotion=MagicMock(),
-            sleep=MagicMock(),
-            prefrontal=MagicMock(),
-            manas=MagicMock(),
-            metacognition=MagicMock(),
-        )
-        runtime.stm.get_context.return_value = []
-        runtime.stm.redis_client = None
-        runtime.ltm.available = False
-        runtime.action_manager.current_note.return_value = ""
-        runtime.action_manager.submit_from_thoughts.return_value = []
-        runtime.habit_memory.activate_for_cycle.return_value = []
-        runtime.emotion.current.return_value = {
-            "dimensions": {"curiosity": 0.0},
-            "dominant": "curiosity",
-            "summary": "情绪平稳，波动很轻。",
-            "updated_at": "2026-01-01T00:00:00+00:00",
-        }
-        runtime.emotion.apply_cycle.return_value = runtime.emotion.current.return_value
-        runtime.sleep.current.return_value = {
-            "energy": 100.0,
-            "mode": "awake",
-            "last_light_sleep_cycle": 0,
-            "last_deep_sleep_cycle": 0,
-            "last_deep_sleep_at": "",
-            "summary": "精力 100.0/100，当前仍清醒。",
-        }
-        runtime.prefrontal.current_state.return_value = {
-            "goal_stack": [],
-            "guidance": [],
-            "inhibition_notes": [],
-            "plan_mode": False,
-        }
-        runtime.prefrontal.review_thoughts.return_value = ([], [])
-        runtime.manas.current_prompt_state.return_value = {
-            "self_coherence_score": 1.0,
-            "consecutive_disruptions": 0,
-            "session_context": "",
-            "warning": "",
-            "identity_notice": "",
-            "reflection_requested": False,
-        }
-        runtime.manas.evaluate_cycle.return_value = runtime.manas.current_prompt_state.return_value
-        runtime.metacognition.recent_reflections.return_value = []
-        runtime.metacognition.should_reflect.return_value = False
+        runtime = _build_execute_cycle_runtime(action_manager)
 
         with self.assertRaises(RuntimeError):
             _execute_cycle(
@@ -683,16 +661,10 @@ class Phase4RuntimeTests(unittest.TestCase):
         mock_embed.assert_called_once()
         self.assertEqual(mock_embed.call_args.args[1], "更牵引我的念头")
 
+    # noinspection PyMethodMayBeStatic
     def test_post_cycle_phase4_runs_light_sleep_when_buffer_backlogs(self) -> None:
         sleep = MagicMock()
-        sleep.consume_cycle.return_value = {
-            "energy": 20.0,
-            "mode": "drowsy",
-            "last_light_sleep_cycle": 0,
-            "last_deep_sleep_cycle": 0,
-            "last_deep_sleep_at": "",
-            "summary": "精力偏低。",
-        }
+        sleep.consume_cycle.return_value = _sleep_state_snapshot(energy=20.0, mode="drowsy", summary="精力偏低。")
         sleep.should_deep_sleep.return_value = False
         sleep.should_light_sleep.return_value = True
         sleep.run_light_sleep.return_value = SimpleNamespace(
@@ -763,10 +735,10 @@ class Phase4RuntimeTests(unittest.TestCase):
             embedding_client=MagicMock(),
             embedding_model="embed-model",
         )
-        mock_reconnect_redis.side_effect = lambda *args, **kwargs: 12.0
+        mock_reconnect_redis.side_effect = lambda *_args, **_kwargs: 12.0
         mock_redis_recovered.return_value = True
 
-        def reconnect_pg(*args, **kwargs):
+        def reconnect_pg(*_args: object, **_kwargs: object) -> tuple[dict[str, str], float]:
             runtime.ltm.available = True
             return {"self_understanding": "restored"}, 34.0
 
@@ -834,6 +806,7 @@ class Phase4RuntimeTests(unittest.TestCase):
         self.assertEqual(first_call.kwargs["entity_filter"], "telegram:1")
         self.assertEqual(first_call.kwargs["memory_types"], ["episodic", "semantic", "action_result"])
 
+    # noinspection DuplicatedCode
     @patch("core.sleep._update_impression_memories", return_value=0)
     @patch("core.sleep._store_light_sleep_semantic_memories", return_value=0)
     @patch("core.sleep.embed_text", return_value=[0.1, 0.2])
@@ -880,12 +853,7 @@ class Phase4RuntimeTests(unittest.TestCase):
         ltm.cool_inactive_memories.return_value = 0
         habit_memory = MagicMock()
         habit_memory.strengthen_from_sleep.return_value = []
-        emotion = {
-            "dimensions": {"curiosity": 0.2},
-            "dominant": "curiosity",
-            "summary": "好奇 0.20",
-            "updated_at": "2026-01-01T00:00:00+00:00",
-        }
+        emotion = _emotion_snapshot(curiosity=0.2, summary="好奇 0.20")
 
         sleep.run_light_sleep(
             cycle_id=12,
@@ -902,6 +870,7 @@ class Phase4RuntimeTests(unittest.TestCase):
         self.assertTrue(ltm.store.called)
         self.assertEqual(ltm.store.call_args_list[0].kwargs["memory_type"], "episodic")
 
+    # noinspection DuplicatedCode
     @patch("core.sleep._update_impression_memories", return_value=0)
     @patch("core.sleep._store_light_sleep_semantic_memories", return_value=0)
     @patch("core.sleep.embed_text", return_value=[0.1, 0.2])
@@ -950,12 +919,7 @@ class Phase4RuntimeTests(unittest.TestCase):
         ltm.cool_inactive_memories.return_value = 0
         habit_memory = MagicMock()
         habit_memory.strengthen_from_sleep.return_value = []
-        emotion = {
-            "dimensions": {"curiosity": 0.2},
-            "dominant": "curiosity",
-            "summary": "好奇 0.20",
-            "updated_at": "2026-01-01T00:00:00+00:00",
-        }
+        emotion = _emotion_snapshot(curiosity=0.2, summary="好奇 0.20")
 
         sleep.run_light_sleep(
             cycle_id=12,
@@ -993,12 +957,7 @@ class Phase4RuntimeTests(unittest.TestCase):
     ) -> None:
         ltm = MagicMock()
         ltm.store.return_value = 11
-        emotion = {
-            "dimensions": {"curiosity": 0.2},
-            "dominant": "curiosity",
-            "summary": "好奇 0.20",
-            "updated_at": "2026-01-01T00:00:00+00:00",
-        }
+        emotion = _emotion_snapshot(curiosity=0.2, summary="好奇 0.20")
         first = Stimulus(
             stimulus_id="stim_a",
             type="action_result",

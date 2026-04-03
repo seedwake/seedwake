@@ -35,6 +35,7 @@ class ActionControl(TypedDict):
     timestamp: str
 
 
+# noinspection DuplicatedCode
 class NewsItem(TypedDict):
     feed_url: str
     guid: str
@@ -135,6 +136,7 @@ class HabitPromptEntry(TypedDict):
     signal: NotRequired[HabitControlSignal]
 
 
+# noinspection DuplicatedCode
 class ManasPromptState(TypedDict):
     self_coherence_score: float
     consecutive_disruptions: int

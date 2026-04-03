@@ -171,7 +171,10 @@ class PrefrontalManager:
             raw = redis_client.get(PREFRONTAL_STATE_KEY)
             if raw is None:
                 return
-            payload = json.loads(_decode_redis_value(raw))
+            decoded = _decode_redis_value(raw)
+            if decoded is None:
+                return
+            payload = json.loads(decoded)
             if not isinstance(payload, dict):
                 return
             goal_stack = payload.get("goal_stack")
@@ -219,10 +222,12 @@ def build_goal_stack(identity: dict[str, str]) -> list[str]:
     return ordered[:5]
 
 
-def _decode_redis_value(value: bytes | str) -> str:
+def _decode_redis_value(value: object) -> str | None:
     if isinstance(value, bytes):
         return value.decode("utf-8")
-    return value
+    if isinstance(value, str):
+        return value
+    return None
 
 
 def _copy_state(state: PrefrontalPromptState) -> PrefrontalPromptState:

@@ -33,7 +33,9 @@ from core.action import (
     pop_action_controls,
     push_action_control,
 )
+# noinspection PyProtectedMember
 from core.attention import _habit_resonance_score, evaluate_attention
+# noinspection PyProtectedMember
 from core.emotion import _llm_fusion_weight
 # noinspection PyProtectedMember
 from core.main import (
@@ -47,7 +49,9 @@ from core.main import (
     _select_cycle_stimuli,
     _summarize_recent_conversation,
 )
+# noinspection PyProtectedMember
 from core.memory.long_term import LongTermEntry
+# noinspection PyProtectedMember
 from core.memory.habit import (
     HabitMemory,
     HabitSeed,
@@ -57,12 +61,14 @@ from core.memory.habit import (
 from core.metacognition import MetacognitionManager
 from core.model_client import ModelClient
 from core.manas import MANAS_STATE_KEY, ManasManager
+# noinspection PyProtectedMember
 from core.openclaw_gateway import (
     OpenClawGatewayExecutor,
     OpenClawUnavailableError,
     _normalize_worker_text,
 )
 from core.perception import PerceptionManager
+# noinspection PyProtectedMember
 from core.prefrontal import (
     ConversationSignal,
     PrefrontalManager,
@@ -72,8 +78,10 @@ from core.prefrontal import (
     _send_message_target_key,
     _supports_foreground_reply,
 )
+# noinspection PyProtectedMember
 from core.prompt_builder import PromptBuildContext, _stagnation_terms, build_prompt
 from core.rss import read_news_result, summarize_news_items
+# noinspection PyProtectedMember
 from core.sleep import _ensure_impression_contact, _impression_needs_refresh
 from core.stimulus import (
     CONVERSATION_HISTORY_KEY,
@@ -89,14 +97,30 @@ from core.stimulus import (
     load_recent_conversations,
     remember_recent_action_echoes,
 )
-from core.common_types import ConversationEntry, JsonObject, JsonValue, RawActionRequest, RecentConversationPrompt
+from core.common_types import (
+    ActionControl,
+    ActionRequestPayload,
+    ActionResultEnvelope,
+    ConversationEntry,
+    EmotionSnapshot,
+    HabitPromptEntry,
+    JsonObject,
+    JsonValue,
+    ManasPromptState,
+    NewsItem,
+    PrefrontalPromptState,
+    RawActionRequest,
+    RecentConversationPrompt,
+    ReflectionPromptEntry,
+    SleepStateSnapshot,
+)
 from core.thought_parser import Thought
-from core.common_types import ActionControl, ActionResultEnvelope, NewsItem
 from test_support import ListRedisStub
 
 
 class _ClosableHTTPError(error.HTTPError):
     def __del__(self) -> None:
+        # noinspection PyBroadException
         try:
             self.close()
         except Exception:
@@ -120,6 +144,144 @@ def _make_thought(
         action_request=_as_raw_action_request(action_request),
         additional_action_requests=_as_raw_action_requests(additional_action_requests),
     )
+
+
+def _emotion_snapshot(
+    *,
+    dominant: str = "curiosity",
+    summary: str = "平稳 0.10",
+    curiosity: float = 0.1,
+    calm: float = 0.1,
+    frustration: float = 0.1,
+    satisfaction: float = 0.1,
+    concern: float = 0.1,
+) -> EmotionSnapshot:
+    return {
+        "dimensions": {
+            "curiosity": curiosity,
+            "calm": calm,
+            "frustration": frustration,
+            "satisfaction": satisfaction,
+            "concern": concern,
+        },
+        "dominant": dominant,
+        "summary": summary,
+        "updated_at": "2026-04-02T00:00:00+00:00",
+    }
+
+
+def _manas_prompt_state(
+    *,
+    self_coherence_score: float = 0.78,
+    consecutive_disruptions: int = 2,
+    session_context: str = "",
+    warning: str = "",
+    identity_notice: str = "",
+    reflection_requested: bool = False,
+) -> ManasPromptState:
+    return {
+        "self_coherence_score": self_coherence_score,
+        "consecutive_disruptions": consecutive_disruptions,
+        "session_context": session_context,
+        "warning": warning,
+        "identity_notice": identity_notice,
+        "reflection_requested": reflection_requested,
+    }
+
+
+def _sleep_state_snapshot(
+    *,
+    energy: float = 74.0,
+    mode: str = "awake",
+    summary: str = "精力 74.0/100，当前仍清醒。",
+) -> SleepStateSnapshot:
+    return {
+        "energy": energy,
+        "mode": mode,
+        "last_light_sleep_cycle": 0,
+        "last_deep_sleep_cycle": 0,
+        "last_deep_sleep_at": "",
+        "summary": summary,
+    }
+
+
+def _habit_prompt_entry(
+    *,
+    habit_id: int = 1,
+    pattern: str,
+    category: str,
+    strength: float,
+    activation_score: float | None = None,
+    manifested: bool | None = None,
+) -> HabitPromptEntry:
+    entry: HabitPromptEntry = {
+        "id": habit_id,
+        "pattern": pattern,
+        "category": category,
+        "strength": strength,
+    }
+    if activation_score is not None:
+        entry["activation_score"] = activation_score
+    if manifested is not None:
+        entry["manifested"] = manifested
+    return entry
+
+
+def _prefrontal_prompt_state(
+    *,
+    goal_stack: list[str] | None = None,
+    guidance: list[str] | None = None,
+    inhibition_notes: list[str] | None = None,
+    plan_mode: bool = False,
+) -> PrefrontalPromptState:
+    return {
+        "goal_stack": list(goal_stack or []),
+        "guidance": list(guidance or []),
+        "inhibition_notes": list(inhibition_notes or []),
+        "plan_mode": plan_mode,
+    }
+
+
+def _reflection_prompt_entry(
+    *,
+    thought_id: str = "C8-4",
+    cycle_id: int = 8,
+    content: str,
+    created_at: str = "2026-04-02T00:00:00+00:00",
+) -> ReflectionPromptEntry:
+    return {
+        "thought_id": thought_id,
+        "cycle_id": cycle_id,
+        "content": content,
+        "created_at": created_at,
+    }
+
+
+def _action_request_payload(
+    *,
+    task: str = "reply",
+    reason: str = "recent",
+    raw_action_type: str = "send_message",
+    raw_action_params: str,
+    target_source: str | None = None,
+    message_text: str | None = None,
+    reply_to_message_id: str | None = None,
+    submitted_at: str | None = None,
+) -> ActionRequestPayload:
+    payload: ActionRequestPayload = {
+        "task": task,
+        "reason": reason,
+        "raw_action": {"type": raw_action_type, "params": raw_action_params},
+    }
+    if target_source:
+        payload["target_source"] = target_source
+    if message_text:
+        payload["message_text"] = message_text
+    if reply_to_message_id:
+        payload["reply_to_message_id"] = reply_to_message_id
+    if submitted_at:
+        payload["submitted_at"] = submitted_at
+    return payload
 
 
 def _conversation_stimulus(
@@ -1264,50 +1426,33 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             [_make_thought(cycle_id=8, index=1, thought_type="思考", content="之前的念头")],
             30,
             prompt_context=PromptBuildContext(
-                manas_state={
-                    "self_coherence_score": 0.78,
-                    "consecutive_disruptions": 2,
-                    "session_context": "刚从浅睡整理里回来，我继续沿着上一刻往下走。",
-                    "warning": "",
-                    "identity_notice": "",
-                    "reflection_requested": False,
-                },
-                emotion={
-                    "dimensions": {
-                        "curiosity": 0.61,
-                        "calm": 0.22,
-                        "frustration": 0.18,
-                        "satisfaction": 0.05,
-                        "concern": 0.44,
-                    },
-                    "dominant": "curiosity",
-                    "summary": "好奇 0.61，牵挂 0.44，平静 0.22",
-                    "updated_at": "2026-04-02T00:00:00+00:00",
-                },
-                sleep_state={
-                    "energy": 74.0,
-                    "mode": "awake",
-                    "last_light_sleep_cycle": 6,
-                    "last_deep_sleep_cycle": 0,
-                    "last_deep_sleep_at": "",
-                    "summary": "精力 74.0/100，当前仍清醒。",
-                },
+                manas_state=_manas_prompt_state(
+                    session_context="刚从浅睡整理里回来，我继续沿着上一刻往下走。",
+                ),
+                emotion=_emotion_snapshot(
+                    summary="好奇 0.61，牵挂 0.44，平静 0.22",
+                    curiosity=0.61,
+                    calm=0.22,
+                    frustration=0.18,
+                    satisfaction=0.05,
+                    concern=0.44,
+                ),
+                sleep_state=_sleep_state_snapshot(),
                 active_habits=[
-                    {"id": 1, "pattern": "遇到技术问题时倾向于先查文档", "category": "cognitive", "strength": 0.35},
+                    _habit_prompt_entry(
+                        pattern="遇到技术问题时倾向于先查文档",
+                        category="cognitive",
+                        strength=0.35,
+                    ),
                 ],
-                prefrontal_state={
-                    "goal_stack": ["保持清醒。", "回应眼前的人。"],
-                    "guidance": ["先看是否偏题。"],
-                    "inhibition_notes": ["当前有人说话时不要先去 reading。"],
-                    "plan_mode": True,
-                },
+                prefrontal_state=_prefrontal_prompt_state(
+                    goal_stack=["保持清醒。", "回应眼前的人。"],
+                    guidance=["先看是否偏题。"],
+                    inhibition_notes=["当前有人说话时不要先去 reading。"],
+                    plan_mode=True,
+                ),
                 recent_reflections=[
-                    {
-                        "thought_id": "C8-4",
-                        "cycle_id": 8,
-                        "content": "我注意到自己最近容易在等待里打转。",
-                        "created_at": "2026-04-02T00:00:00+00:00",
-                    },
+                    _reflection_prompt_entry(content="我注意到自己最近容易在等待里打转。"),
                 ],
                 long_term_context=["一段浮上来的记忆。"],
             ),
@@ -1591,7 +1736,12 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         sqls = [call.args[0] for call in cursor.execute.call_args_list]
         self.assertTrue(any("ALTER COLUMN category SET NOT NULL" in sql for sql in sqls))
-        self.assertTrue(any("CREATE UNIQUE INDEX IF NOT EXISTS idx_habit_seeds_pattern_category" in sql for sql in sqls))
+        self.assertTrue(
+            any(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_habit_seeds_pattern_category" in sql
+                for sql in sqls
+            )
+        )
         self.assertTrue(any("SUM(activation_count) AS merged_activation_count" in sql for sql in sqls))
         self.assertTrue(any("source_memories = grouped.merged_source_memories" in sql for sql in sqls))
         self.assertTrue(any("DELETE FROM habit_seeds AS duplicate" in sql for sql in sqls))
@@ -1670,6 +1820,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         self.assertEqual(selected[0]["pattern"], "回应眼前的人")
 
+    # noinspection PyMethodMayBeStatic
     def test_activate_for_cycle_uses_full_candidate_pool(self) -> None:
         memory = HabitMemory(None, max_active_in_prompt=2, decay_rate=0.05)
         memory._fetch_active_seeds = MagicMock(return_value=[])  # type: ignore[method-assign]
@@ -1765,18 +1916,15 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             recent_thoughts=[_make_thought(cycle_id=11, index=1, thought_type="思考", content="刚才还在打转。")],
             stimuli=[_conversation_stimulus(content="你在吗？", message_id=101)],
             goal_stack=["回应眼前的人"],
-            emotion={
-                "dimensions": {
-                    "curiosity": 0.2,
-                    "calm": 0.1,
-                    "frustration": 0.0,
-                    "satisfaction": 0.0,
-                    "concern": 0.7,
-                },
-                "dominant": "concern",
-                "summary": "牵挂 0.70",
-                "updated_at": "2026-04-02T00:00:00+00:00",
-            },
+            emotion=_emotion_snapshot(
+                dominant="concern",
+                summary="牵挂 0.70",
+                curiosity=0.2,
+                calm=0.1,
+                frustration=0.0,
+                satisfaction=0.0,
+                concern=0.7,
+            ),
         )
 
         self.assertEqual(result.anchor_thought_id, "C12-1")
@@ -1792,14 +1940,13 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             recent_thoughts=[],
             stimuli=[_conversation_stimulus(content="你还在吗？", message_id=201)],
             active_habits=[
-                {
-                    "id": 1,
-                    "pattern": "先把话递给眼前的人",
-                    "category": "behavioral",
-                    "strength": 0.42,
-                    "activation_score": 0.77,
-                    "manifested": True,
-                }
+                _habit_prompt_entry(
+                    pattern="先把话递给眼前的人",
+                    category="behavioral",
+                    strength=0.42,
+                    activation_score=0.77,
+                    manifested=True,
+                )
             ],
         )
 
@@ -1816,14 +1963,15 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         score = _habit_resonance_score(
             thought,
-            [{
-                "id": 1,
-                "pattern": "经常会冒出 reading 行动冲动",
-                "category": "behavioral",
-                "strength": 0.42,
-                "activation_score": 0.88,
-                "manifested": True,
-            }],
+            [
+                _habit_prompt_entry(
+                    pattern="经常会冒出 reading 行动冲动",
+                    category="behavioral",
+                    strength=0.42,
+                    activation_score=0.88,
+                    manifested=True,
+                )
+            ],
         )
 
         self.assertEqual(score, 0.0)
@@ -1831,18 +1979,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
     def test_manas_reflection_request_is_throttled_between_cycles(self) -> None:
         manager = MetacognitionManager(redis_client=None, reflection_interval=10)
         manager._last_reflection_cycle = 10
-        emotion = {
-            "dimensions": {
-                "curiosity": 0.1,
-                "calm": 0.1,
-                "frustration": 0.1,
-                "satisfaction": 0.1,
-                "concern": 0.1,
-            },
-            "dominant": "curiosity",
-            "summary": "平稳 0.10",
-            "updated_at": "2026-04-02T00:00:00+00:00",
-        }
+        emotion = _emotion_snapshot()
 
         self.assertFalse(
             manager.should_reflect(
@@ -1948,14 +2085,12 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         contexts = _recent_action_contexts(
             [thought],
             [
-                {
-                    "task": "reply",
-                    "reason": "older",
-                    "raw_action": {"type": "send_message", "params": 'target:"telegram:1", message:"更早那句"'},
-                    "target_source": "telegram:1",
-                    "message_text": "更早那句",
-                    "submitted_at": (now - timedelta(minutes=50)).isoformat(),
-                }
+                _action_request_payload(
+                    raw_action_params='target:"telegram:1", message:"更早那句"',
+                    target_source="telegram:1",
+                    message_text="更早那句",
+                    submitted_at=(now - timedelta(minutes=50)).isoformat(),
+                )
             ],
         )
 
@@ -1975,14 +2110,12 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         contexts = _recent_action_contexts(
             [old_thought],
             [
-                {
-                    "task": "reply",
-                    "reason": "recent",
-                    "raw_action": {"type": "send_message", "params": 'target:"telegram:1", message:"最近这句"'},
-                    "target_source": "telegram:1",
-                    "message_text": "最近这句",
-                    "submitted_at": (now - timedelta(minutes=5)).isoformat(),
-                }
+                _action_request_payload(
+                    raw_action_params='target:"telegram:1", message:"最近这句"',
+                    target_source="telegram:1",
+                    message_text="最近这句",
+                    submitted_at=(now - timedelta(minutes=5)).isoformat(),
+                )
             ],
         )
 
@@ -2003,14 +2136,12 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         contexts = _recent_action_contexts(
             [thought],
             [
-                {
-                    "task": "reply",
-                    "reason": "recent",
-                    "raw_action": {"type": "send_message", "params": 'target:"telegram:1", message:"同一条消息"'},
-                    "target_source": "telegram:1",
-                    "message_text": "同一条消息",
-                    "submitted_at": (now - timedelta(minutes=2)).isoformat(),
-                }
+                _action_request_payload(
+                    raw_action_params='target:"telegram:1", message:"同一条消息"',
+                    target_source="telegram:1",
+                    message_text="同一条消息",
+                    submitted_at=(now - timedelta(minutes=2)).isoformat(),
+                )
             ],
         )
 
@@ -2032,14 +2163,12 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         contexts = _recent_action_contexts(
             [thought],
             [
-                {
-                    "task": "reply",
-                    "reason": "recent",
-                    "raw_action": {"type": "send_message", "params": 'message:"默认当前对话那句"'},
-                    "target_source": "telegram:1",
-                    "message_text": "默认当前对话那句",
-                    "submitted_at": (now - timedelta(minutes=2)).isoformat(),
-                }
+                _action_request_payload(
+                    raw_action_params='message:"默认当前对话那句"',
+                    target_source="telegram:1",
+                    message_text="默认当前对话那句",
+                    submitted_at=(now - timedelta(minutes=2)).isoformat(),
+                )
             ],
         )
 
@@ -2092,7 +2221,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         )
         self.assertEqual(prompt_state["session_context"], "断线期间形成的新会话上下文")
 
-        self.assertTrue(manager.attach_redis(redis_stub))
+        self.assertTrue(manager.attach_redis(cast(redis_lib.Redis, redis_stub)))
         raw = redis_stub.get(MANAS_STATE_KEY)
         self.assertIsNotNone(raw)
         payload = json.loads(str(raw))
@@ -2130,7 +2259,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             identity={"self_description": "我仍在这里。", "core_goals": "继续回应。"},
         )
 
-        self.assertTrue(manager.attach_redis(redis_stub))
+        self.assertTrue(manager.attach_redis(cast(redis_lib.Redis, redis_stub)))
         raw = redis_stub.get(MANAS_STATE_KEY)
         self.assertIsNotNone(raw)
         payload = json.loads(str(raw))
@@ -2156,7 +2285,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         )
 
         manager = ManasManager(
-            redis_client=redis_stub,
+            redis_client=cast(redis_lib.Redis, redis_stub),
             warning_threshold=2,
             reflection_threshold=3,
             stable_window=3,
@@ -2625,24 +2754,15 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             ],
             recent_thoughts=[],
             stimuli=[_conversation_stimulus(source="telegram:1", content="你在吗？", message_id=402)],
-            sleep_state={
-                "energy": 0.82,
-                "mode": "awake",
-                "last_light_sleep_cycle": 0,
-                "last_deep_sleep_cycle": 0,
-                "last_deep_sleep_at": "",
-                "summary": "",
-            },
+            sleep_state=_sleep_state_snapshot(energy=0.82, summary=""),
             active_habits=[],
             recent_send_message_requests=[
-                {
-                    "task": "reply",
-                    "reason": "recent",
-                    "raw_action": {"type": "send_message", "params": 'message:"我现在就在这里等着你。", reply_to:"401"'},
-                    "target_source": "telegram:1",
-                    "message_text": "我现在就在这里等着你。",
-                    "reply_to_message_id": "401",
-                }
+                _action_request_payload(
+                    raw_action_params='message:"我现在就在这里等着你。", reply_to:"401"',
+                    target_source="telegram:1",
+                    message_text="我现在就在这里等着你。",
+                    reply_to_message_id="401",
+                )
             ],
         )
 
@@ -4888,7 +5008,10 @@ class ActionManagerTests(unittest.TestCase):
     def test_send_telegram_message_retries_transient_network_error(self) -> None:
         transient_error = error.URLError(ConnectionRefusedError(111, "Connection refused"))
         with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
-            with patch("core.action.request.urlopen", side_effect=[transient_error, _urlopen_success_response()]) as mock_urlopen:
+            with patch(
+                "core.action.request.urlopen",
+                side_effect=[transient_error, _urlopen_success_response()],
+            ) as mock_urlopen:
                 with patch("core.action.time.sleep") as mock_sleep:
                     send_error, delivered_reply_to = _send_telegram_message(
                         "telegram:1",
@@ -4924,7 +5047,10 @@ class ActionManagerTests(unittest.TestCase):
     def test_send_telegram_message_retries_reset_error(self) -> None:
         transient_error = error.URLError(ConnectionResetError(104, "Connection reset by peer"))
         with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
-            with patch("core.action.request.urlopen", side_effect=[transient_error, _urlopen_success_response()]) as mock_urlopen:
+            with patch(
+                "core.action.request.urlopen",
+                side_effect=[transient_error, _urlopen_success_response()],
+            ) as mock_urlopen:
                 with patch("core.action.time.sleep") as mock_sleep:
                     send_error, delivered_reply_to = _send_telegram_message(
                         "telegram:1",

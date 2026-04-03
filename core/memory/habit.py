@@ -621,8 +621,7 @@ class HabitMemory:
                     """,
                     (pattern, category, strength, vec_literal, signal_type, signal_payload_text),
                 )
-                inserted = cur.fetchone()
-                habit_id = int(inserted[0]) if inserted is not None else None
+                habit_id = _row_first_int(cur.fetchone())
             conn.commit()
             return habit_id
         except psycopg.Error:
@@ -673,13 +672,18 @@ class HabitMemory:
                     """,
                     (pattern, category, strength, vec_literal, signal_type, signal_payload_text),
                 )
-                inserted = cur.fetchone()
-                habit_id = int(inserted[0]) if inserted is not None else None
+                habit_id = _row_first_int(cur.fetchone())
             conn.commit()
             return habit_id
         except psycopg.Error:
             conn.rollback()
             raise
+
+
+def _row_first_int(row: tuple[object, ...] | None) -> int | None:
+    if row is None or not row:
+        return None
+    return int(row[0])
 
 
 def _extract_habit_patterns(thoughts: list[Thought]) -> list[HabitSeedCandidate]:
