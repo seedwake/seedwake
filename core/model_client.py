@@ -104,6 +104,7 @@ class OllamaModelClient(ModelClient):
         started_at = time.perf_counter()
         status = "failed"
         think_enabled = _resolve_generate_think_flag(model_config.get("think"))
+        detail = f"prompt_chars={len(prompt)}, think={think_enabled}"
         try:
             response = _normalize_ollama_generate_response(self._client.generate(
                 model=model_config["name"],
@@ -115,6 +116,7 @@ class OllamaModelClient(ModelClient):
                 },
                 think=think_enabled,
             ))
+            detail = _ollama_generate_detail(prompt, response, think_enabled)
             text = _ollama_generate_text(response)
             status = "ok"
             return text
@@ -125,7 +127,7 @@ class OllamaModelClient(ModelClient):
                 model=model_config["name"],
                 started_at=started_at,
                 status=status,
-                detail=f"prompt_chars={len(prompt)}, think={think_enabled}",
+                detail=detail,
             )
 
     def chat(
@@ -414,6 +416,12 @@ def _normalize_ollama_chat_options(options: dict) -> dict:
 
 class _OllamaGenerateResponse(Protocol):
     response: str | None
+    thinking: str | None
+    prompt_eval_count: int | None
+    prompt_eval_duration: int | None
+    eval_count: int | None
+    eval_duration: int | None
+    total_duration: int | None
 
 
 class _OllamaChatResponse(Protocol):
@@ -445,6 +453,59 @@ def _ollama_generate_text(response: _OllamaGenerateResponse | JsonObject) -> str
     if raw_text is None and isinstance(response, dict):
         raw_text = response.get("response")
     return str(raw_text or "")
+
+
+def _ollama_generate_detail(
+    prompt: str,
+    response: _OllamaGenerateResponse | JsonObject,
+    think_enabled: bool,
+) -> str:
+    details = [f"prompt_chars={len(prompt)}", f"think={think_enabled}"]
+    response_text = _ollama_generate_text(response)
+    details.append(f"response_chars={len(response_text)}")
+    thinking_text = _ollama_generate_thinking_text(response)
+    if thinking_text:
+        details.append(f"thinking_chars={len(thinking_text)}")
+    prompt_eval_count = _ollama_optional_int(response, "prompt_eval_count")
+    if prompt_eval_count is not None:
+        details.append(f"prompt_eval_count={prompt_eval_count}")
+    eval_count = _ollama_optional_int(response, "eval_count")
+    if eval_count is not None:
+        details.append(f"eval_count={eval_count}")
+    eval_duration = _ollama_optional_int(response, "eval_duration")
+    if eval_duration is not None:
+        details.append(f"eval_duration_ms={eval_duration / 1_000_000:.1f}")
+    tokens_per_second = _ollama_tokens_per_second(eval_count, eval_duration)
+    if tokens_per_second is not None:
+        details.append(f"eval_tps={tokens_per_second:.1f}")
+    return ", ".join(details)
+
+
+def _ollama_generate_thinking_text(response: _OllamaGenerateResponse | JsonObject) -> str:
+    raw_text = getattr(response, "thinking", None)
+    if raw_text is None and isinstance(response, dict):
+        raw_text = response.get("thinking")
+    return str(raw_text or "")
+
+
+def _ollama_optional_int(
+    response: _OllamaGenerateResponse | JsonObject,
+    field_name: str,
+) -> int | None:
+    raw_value = getattr(response, field_name, None)
+    if raw_value is None and isinstance(response, dict):
+        raw_value = response.get(field_name)
+    if isinstance(raw_value, bool):
+        return None
+    if isinstance(raw_value, int):
+        return raw_value
+    return None
+
+
+def _ollama_tokens_per_second(eval_count: int | None, eval_duration_ns: int | None) -> float | None:
+    if eval_count is None or eval_duration_ns is None or eval_duration_ns <= 0:
+        return None
+    return eval_count / (eval_duration_ns / 1_000_000_000)
 
 
 def _ollama_chat_message(response: _OllamaChatResponse | JsonObject) -> JsonObject:

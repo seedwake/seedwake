@@ -450,6 +450,29 @@ class ModelClientTests(unittest.TestCase):
         self.assertEqual(text, "[思考] a\n[意图] b\n[反应] c")
         self.assertTrue(generate_mock.call_args.kwargs["think"])
 
+    def test_ollama_generate_log_includes_eval_metrics_and_token_rate(self) -> None:
+        client = create_model_client({"name": "test-model"})
+        generate_mock = MagicMock(return_value={
+            "response": "[思考] a\n[意图] b\n[反应] c",
+            "thinking": "hidden chain of thought",
+            "prompt_eval_count": 64,
+            "eval_count": 120,
+            "eval_duration": 2_000_000_000,
+        })
+        client._client.generate = generate_mock  # type: ignore[attr-defined]
+
+        with self.assertLogs("core.model_client", level="INFO") as logs:
+            text = client.generate_text("prompt-body", {"name": "test-model", "think": True})
+
+        self.assertEqual(text, "[思考] a\n[意图] b\n[反应] c")
+        output = "\n".join(logs.output)
+        self.assertIn("response_chars=20", output)
+        self.assertIn("thinking_chars=23", output)
+        self.assertIn("prompt_eval_count=64", output)
+        self.assertIn("eval_count=120", output)
+        self.assertIn("eval_duration_ms=2000.0", output)
+        self.assertIn("eval_tps=60.0", output)
+
 
 if __name__ == "__main__":
     unittest.main()
