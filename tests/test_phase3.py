@@ -1289,6 +1289,8 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("我自己想读的内容", prompt)
         self.assertIn("这种回应必须外化成 {action:send_message, ...}", prompt)
         self.assertIn("对话是前景，时间感和身体感觉只是背景", prompt)
+        self.assertIn("这一段是眼前正在发生、优先级最高的对话", prompt)
+        self.assertIn("默认就是发给这里当前正在对我说话的人", prompt)
         self.assertNotIn("你想发出的内容", prompt)
 
     def test_prompt_hides_note_section_when_empty(self) -> None:

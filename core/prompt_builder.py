@@ -53,10 +53,9 @@ SYSTEM_PROMPT = """\
 - {action:search, query:"在互联网上搜索关键词"}
 - {action:web_fetch, url:"https://example.com"}
 - {action:send_message, message:"我想说的话"}
-- {action:send_message, chat_id:"123456", message:"我想发出的消息内容"}
 - {action:send_message, message:"针对那条消息的回复", reply_to:"294"}
-- {action:send_message, target:"telegram:123456", message:"发给特定的人"}
-- {action:send_message, target_entity:"person:alice", message:"发给已知实体"}
+- {action:send_message, target:"telegram:123456", message:"把我想发出的消息发给特定的人"}
+- {action:send_message, target_entity:"person:alice", message:"把我想发出的消息发给已知实体"}
 - {action:note_rewrite, content:"任意内容"}
 - {action:file_modify, path:"文件路径", instruction:"修改要求"}
 - {action:system_change, instruction:"我想进行的系统变更"}
@@ -484,7 +483,13 @@ def _split_stimuli(stimuli: list[Stimulus]) -> tuple[list[Stimulus], list[Stimul
 
 
 def _format_conversations(conversations: list[Stimulus]) -> str:
-    lines = ["如果我决定回应，需要用 {action:send_message} 真正把话发出去。", ""]
+    lines = [
+        "这一段是眼前正在发生、优先级最高的对话，不要和上面的“最近的对话”混淆。",
+        "如果我决定回应，需要用 {action:send_message} 真正把话发出去。",
+        "如果 {action:send_message} 没写 target 和 target_entity，默认就是发给这里当前正在对我说话的人。",
+        "如果想回这里某条具体消息，可以用 reply_to 带上下面显示的 msg id。",
+        "",
+    ]
     for conv in conversations:
         lines.append(_format_conversation_line(conv))
     return _render_section("有人对我说话了", lines, keep_blank_lines=True)
