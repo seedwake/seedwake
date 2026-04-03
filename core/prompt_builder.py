@@ -12,6 +12,7 @@ from core.action import ActionRecord
 from core.stimulus import Stimulus
 from core.thought_parser import Thought
 from core.common_types import (
+    DegenerationIntervention,
     EmotionSnapshot,
     HabitPromptEntry,
     JsonObject,
@@ -20,6 +21,7 @@ from core.common_types import (
     PrefrontalPromptState,
     RecentConversationPrompt,
     ReflectionPromptEntry,
+    ReplyFocusPromptState,
     SleepStateSnapshot,
     detect_rewritten_repetition,
     elapsed_ms,
@@ -155,6 +157,7 @@ class PromptBuildContext:
     manas_state: ManasPromptState | None = None
     emotion: EmotionSnapshot | None = None
     sleep_state: SleepStateSnapshot | None = None
+    degeneration_intervention: DegenerationIntervention | None = None
     active_habits: list[HabitPromptEntry] | None = None
     prefrontal_state: PrefrontalPromptState | None = None
     recent_reflections: list[ReflectionPromptEntry] | None = None
@@ -166,6 +169,7 @@ class PromptBuildContext:
     running_actions: list[ActionRecord] | None = None
     perception_cues: list[str] | None = None
     recent_conversations: list[RecentConversationPrompt] | None = None
+    reply_focus: ReplyFocusPromptState | None = None
 
 
 def build_prompt(
@@ -177,7 +181,16 @@ def build_prompt(
 ) -> str:
     """Build a single prompt string for thought generation."""
     resolved_context = prompt_context or PromptBuildContext()
-    parts = [_timed_prompt_section("system", lambda: _build_system(identity))]
+    conversations, action_echoes, passive = _split_stimuli(resolved_context.stimuli or [])
+    parts = [
+        _timed_prompt_section(
+            "system",
+            lambda: _build_system(
+                identity,
+                allow_implicit_send_message=bool(conversations or resolved_context.reply_focus),
+            ),
+        )
+    ]
     visible_pending_actions = _visible_pending_actions(resolved_context.running_actions)
     visible_running_actions = _visible_running_actions(resolved_context.running_actions)
     window = recent_thoughts[-context_window * 3:]
@@ -192,7 +205,6 @@ def build_prompt(
         resolved_context.note_text,
         resolved_context.perception_cues or [],
     )
-    conversations, action_echoes, passive = _split_stimuli(resolved_context.stimuli or [])
     conversation_labels = _conversation_label_map(conversations, resolved_context.recent_conversations)
     _append_prompt_stimulus_sections(
         parts,
@@ -204,6 +216,7 @@ def build_prompt(
         passive,
         resolved_context.current_impressions or [],
         resolved_context.recent_conversations or [],
+        resolved_context.reply_focus,
         conversation_labels,
     )
     stagnation_warning = _stagnation_warning_text(
@@ -221,6 +234,16 @@ def build_prompt(
     )
     if stagnation_warning:
         parts.append(stagnation_warning)
+    if resolved_context.degeneration_intervention is not None:
+        _append_prompt_section(
+            parts,
+            "degeneration_nudge",
+            lambda: _format_degeneration_nudge(
+                resolved_context.degeneration_intervention,
+                has_conversation=bool(conversations),
+                has_external_results=bool(action_echoes or passive),
+            ),
+        )
     _append_prompt_section(parts, "next_cycle", lambda: _format_next_cycle(cycle_id))
     return "\n\n".join(parts)
 
@@ -270,6 +293,7 @@ def _append_prompt_stimulus_sections(
     passive: list[Stimulus],
     current_impressions: list[str],
     recent_conversations: list[RecentConversationPrompt],
+    reply_focus: ReplyFocusPromptState | None,
     conversation_labels: dict[str, str],
 ) -> None:
     if action_echoes or recent_action_echoes:
@@ -306,6 +330,8 @@ def _append_prompt_stimulus_sections(
             "recent_conversations",
             lambda: _format_recent_conversations(convos),
         )
+    if not conversations and reply_focus is not None:
+        _append_prompt_section(parts, "reply_focus", lambda: _format_reply_focus(reply_focus, conversation_labels))
     if conversations:
         _append_prompt_section(parts, "conversations", lambda: _format_conversations(conversations))
 
@@ -366,13 +392,23 @@ def _timed_prompt_section(section_name: str, builder: Callable[[], str]) -> str:
     return section
 
 
-def _build_system(identity: dict[str, str]) -> str:
-    parts = [SYSTEM_PROMPT.rstrip(), '## “我”是谁']
+def _build_system(identity: dict[str, str], *, allow_implicit_send_message: bool) -> str:
+    parts = [_system_prompt_text(allow_implicit_send_message), '## “我”是谁']
     for content in identity.values():
         normalized = content.strip()
         if normalized:
             parts.append(normalized)
     return "\n\n".join(parts)
+
+
+def _system_prompt_text(allow_implicit_send_message: bool) -> str:
+    if allow_implicit_send_message:
+        return SYSTEM_PROMPT.rstrip()
+    return (
+        SYSTEM_PROMPT.replace('- {action:send_message, message:"我想说的话"}\n', "")
+        .replace('- {action:send_message, message:"针对那条消息的回复", reply_to:"294"}\n', "")
+        .rstrip()
+    )
 
 
 def _prefrontal_needs_prompt(prefrontal_state: PrefrontalPromptState | None) -> bool:
@@ -495,6 +531,15 @@ def _format_conversations(conversations: list[Stimulus]) -> str:
     return _render_section("有人对我说话了", lines, keep_blank_lines=True)
 
 
+def _format_reply_focus(reply_focus: ReplyFocusPromptState, conversation_labels: dict[str, str]) -> str:
+    target = _known_target_label(reply_focus["source"], conversation_labels)
+    lines = [
+        f"这一轮下面没有新的对话消息，但我刚才还在和 {target} 这段对话里。",
+        "如果这一轮只是顺着这段对话继续说，{action:send_message, message:\"我想说的话\"} 默认仍然发给这里。",
+    ]
+    return _render_section("刚才还在继续的对话", lines)
+
+
 def _format_recent_conversations(conversations: list[RecentConversationPrompt]) -> str:
     lines: list[str] = []
     for conversation in conversations:
@@ -513,6 +558,24 @@ def _format_recent_conversations(conversations: list[RecentConversationPrompt]) 
     while lines and not lines[-1]:
         lines.pop()
     return _render_section("最近的对话", lines, keep_blank_lines=True)
+
+
+def _format_degeneration_nudge(
+    intervention: DegenerationIntervention,
+    *,
+    has_conversation: bool,
+    has_external_results: bool,
+) -> str:
+    lines = ["这一轮不能继续打转，至少一个念头必须外化成合格动作。"]
+    if intervention["must_externalize"]:
+        lines.append("note_rewrite、time、system_status 不算。")
+    if has_conversation:
+        lines.append("优先回应眼前这段对话。")
+    elif has_external_results:
+        lines.append("优先跟进刚得到的外部结果或建议方向。")
+    elif intervention["suggestions"]:
+        lines.append(f"优先沿着这个方向推进：{intervention['suggestions'][0]}")
+    return _render_section("这一轮的硬约束", lines)
 
 
 def _format_sensory_stimuli(stimuli: list[Stimulus]) -> str:

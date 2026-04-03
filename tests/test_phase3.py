@@ -22,6 +22,7 @@ from core.action import (
     NEWS_SEEN_REDIS_KEY,
     PlannerLike,
     _coerce_action_request_payload,
+    _extract_action_first_param,
     _fallback_plan,
     _native_send_message_plan,
     _plan_delegate_tool_call,
@@ -100,6 +101,7 @@ from core.common_types import (
     ActionRequestPayload,
     ActionResultEnvelope,
     ConversationEntry,
+    DegenerationIntervention,
     EmotionSnapshot,
     HabitPromptEntry,
     JsonObject,
@@ -165,6 +167,27 @@ def _emotion_snapshot(
         "dominant": dominant,
         "summary": summary,
         "updated_at": "2026-04-02T00:00:00+00:00",
+    }
+
+
+def _degeneration_intervention(
+    *,
+    source_cycle_id: int = 12,
+    summary: str = "最近三轮一直在围着同一组回应打转。",
+    required_shift: str = "把注意力从解释自己转向真实外化。",
+    suggestions: list[str] | None = None,
+    must_externalize: bool = True,
+    remaining_cycles: int = 2,
+    retry_feedback: str = "",
+) -> DegenerationIntervention:
+    return {
+        "source_cycle_id": source_cycle_id,
+        "summary": summary,
+        "required_shift": required_shift,
+        "suggestions": suggestions or ["直接回应眼前这个人。", "跟进刚拿到的外部结果。"],
+        "must_externalize": must_externalize,
+        "remaining_cycles": remaining_cycles,
+        "retry_feedback": retry_feedback,
     }
 
 
@@ -1292,6 +1315,84 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("这一段是眼前正在发生、优先级最高的对话", prompt)
         self.assertIn("默认就是发给这里当前正在对我说话的人", prompt)
         self.assertNotIn("你想发出的内容", prompt)
+
+    def test_prompt_hides_implicit_send_message_examples_without_conversation_or_reply_focus(self) -> None:
+        prompt = build_prompt(
+            3,
+            {
+                "self_description": "我是 Seedwake。",
+                "core_goals": "探索和学习。",
+                "self_understanding": "我会在经验里慢慢形成自己。",
+            },
+            [_make_thought(cycle_id=2, index=1, thought_type="思考", content="之前的念头")],
+            30,
+            prompt_context=PromptBuildContext(),
+        )
+
+        self.assertNotIn('{action:send_message, message:"我想说的话"}', prompt)
+        self.assertNotIn('{action:send_message, message:"针对那条消息的回复", reply_to:"294"}', prompt)
+        self.assertIn('{action:send_message, target:"telegram:123456", message:"把我想发出的消息发给特定的人"}', prompt)
+        self.assertNotIn("必须显式写 target 或 target_entity", prompt)
+
+    def test_prompt_includes_implicit_send_message_examples_when_reply_focus_exists(self) -> None:
+        prompt = build_prompt(
+            3,
+            {
+                "self_description": "我是 Seedwake。",
+                "core_goals": "探索和学习。",
+                "self_understanding": "我会在经验里慢慢形成自己。",
+            },
+            [_make_thought(cycle_id=2, index=1, thought_type="思考", content="之前的念头")],
+            30,
+            prompt_context=PromptBuildContext(
+                reply_focus={"source": "telegram:1"},
+                recent_conversations=[
+                    {
+                        "source": "telegram:1",
+                        "source_name": "Alice",
+                        "source_label": "[Alice](telegram:1)",
+                        "summary": "",
+                        "last_timestamp": "2026-04-03T12:00:00+03:00",
+                        "messages": [],
+                    }
+                ],
+            ),
+        )
+
+        self.assertIn('{action:send_message, message:"我想说的话"}', prompt)
+        self.assertIn('{action:send_message, message:"针对那条消息的回复", reply_to:"294"}', prompt)
+        self.assertIn("## 刚才还在继续的对话", prompt)
+        self.assertIn("我刚才还在和 [Alice](telegram:1) 这段对话里。", prompt)
+
+    def test_prompt_includes_degeneration_nudge_before_next_cycle(self) -> None:
+        prompt = build_prompt(
+            3,
+            {"self_description": "我是 Seedwake。"},
+            [_make_thought(cycle_id=2, index=1, thought_type="思考", content="之前的念头")],
+            30,
+            prompt_context=PromptBuildContext(
+                degeneration_intervention=_degeneration_intervention(),
+            ),
+        )
+
+        self.assertIn("## 这一轮的硬约束", prompt)
+        self.assertIn("这一轮不能继续打转，至少一个念头必须外化成合格动作。", prompt)
+        self.assertIn("note_rewrite、time、system_status 不算。", prompt)
+        self.assertLess(prompt.index("## 这一轮的硬约束"), prompt.index("## 接下来的念头"))
+
+    def test_prompt_degeneration_nudge_prefers_foreground_conversation_when_present(self) -> None:
+        prompt = build_prompt(
+            3,
+            {"self_description": "我是 Seedwake。"},
+            [_make_thought(cycle_id=2, index=1, thought_type="思考", content="之前的念头")],
+            30,
+            prompt_context=PromptBuildContext(
+                degeneration_intervention=_degeneration_intervention(),
+                stimuli=[_conversation_stimulus(source="telegram:1", message_id=12)],
+            ),
+        )
+
+        self.assertIn("优先回应眼前这段对话。", prompt)
 
     def test_prompt_hides_note_section_when_empty(self) -> None:
         prompt = build_prompt(
@@ -5088,7 +5189,7 @@ class ActionManagerTests(unittest.TestCase):
         body = json.loads(req.data.decode("utf-8"))
         self.assertEqual(body["reply_parameters"]["message_id"], 103)
 
-    def test_native_send_message_uses_recent_conversation_focus_without_new_stimulus(self) -> None:
+    def test_native_send_message_uses_reply_focus_without_new_stimulus(self) -> None:
         queue = StimulusQueue(redis_client=None)
         manager = _build_action_manager(
             queue,
@@ -5121,6 +5222,75 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(second_created[0].status, "succeeded")
         self.assertEqual(second_created[0].request["target_source"], "telegram:558805571")
         self.assertNotIn("reply_to_message_id", second_created[0].request)
+
+    def test_native_send_message_explicit_outreach_does_not_override_reply_focus(self) -> None:
+        class _TargetAwarePlanner(PlannerLike):
+            def plan(
+                self,
+                thought: Thought,
+                *,
+                conversation_source: str | None = None,
+            ) -> ActionPlan:
+                raw_params = str((thought.action_request or {}).get("params") or "")
+                message_text = _extract_action_first_param(raw_params, "message", "text", "body", "content") or "我在。"
+                if 'target:"telegram:8469901143"' in raw_params:
+                    return ActionPlan(
+                        "send_message",
+                        "native",
+                        "发送消息",
+                        30,
+                        "测试",
+                        target_source="telegram:8469901143",
+                        message_text=message_text,
+                    )
+                return ActionPlan(
+                    "send_message",
+                    "native",
+                    "发送消息",
+                    30,
+                    "测试",
+                    message_text=message_text,
+                    target_source=str(conversation_source or "").strip(),
+                )
+
+        queue = StimulusQueue(redis_client=None)
+        manager = _build_action_manager(
+            queue,
+            _TargetAwarePlanner(),
+            redis_client=ListRedisStub(),
+            auto_execute=["send_message"],
+        )
+
+        try:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "token"}):
+                with patch("core.action.request.urlopen") as mock_urlopen:
+                    response = MagicMock()
+                    response.read.return_value = b'{"ok": true}'
+                    mock_urlopen.return_value.__enter__.return_value = response
+                    focus_created = manager.submit_from_thoughts(
+                        [_make_thought(action_request={"type": "send_message", "params": 'message:"我先回一句。"'})],
+                        stimuli=[_conversation_stimulus(source="telegram:558805571", message_id=294)],
+                    )
+                    wait(manager._snapshot_futures(), timeout=1.0)
+                    outreach_created = manager.submit_from_thoughts(
+                        [_make_thought(index=2, action_request={"type": "send_message", "params": 'target:"telegram:8469901143", message:"我去找另一个人。"'})],
+                        stimuli=[],
+                    )
+                    wait(manager._snapshot_futures(), timeout=1.0)
+                    reply_created = manager.submit_from_thoughts(
+                        [_make_thought(index=3, action_request={"type": "send_message", "params": 'message:"我再补一句。"'})],
+                        stimuli=[],
+                    )
+                    manager.shutdown_with_timeout(1.0)
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(focus_created[0].status, "succeeded")
+        self.assertEqual(outreach_created[0].status, "succeeded")
+        self.assertEqual(outreach_created[0].request["target_source"], "telegram:8469901143")
+        self.assertEqual(reply_created[0].status, "succeeded")
+        self.assertEqual(reply_created[0].request["target_source"], "telegram:558805571")
 
     def test_send_telegram_message_retries_transient_network_error(self) -> None:
         transient_error = error.URLError(ConnectionRefusedError(111, "Connection refused"))

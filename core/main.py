@@ -1085,6 +1085,7 @@ def _execute_cycle(
             manas_state=manas_state,
             emotion=current_emotion,
             sleep_state=current_sleep_state,
+            degeneration_intervention=runtime.degeneration_intervention,
             active_habits=active_habits,
             prefrontal_state=prefrontal_state,
             recent_reflections=recent_reflections,
@@ -1096,6 +1097,7 @@ def _execute_cycle(
             running_actions=prompt_running_actions,
             perception_cues=perception_cues,
             recent_conversations=recent_conversations,
+            reply_focus=runtime.action_manager.reply_focus_prompt_state(),
         )
         reroll_reason: str | None = None
         thoughts, inhibition_notes = _generate_reviewed_thoughts(

@@ -110,6 +110,10 @@ class RecentConversationPrompt(TypedDict):
     messages: list[RecentConversationMessage]
 
 
+class ReplyFocusPromptState(TypedDict):
+    source: str
+
+
 class RecentActionEchoRecord(TypedDict):
     cycle_id: int
     stimulus: StimulusRecord

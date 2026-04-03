@@ -394,6 +394,7 @@ def _build_execute_cycle_runtime(action_manager: MagicMock | None = None) -> Sim
         runtime.action_manager.pop_prompt_echoes.return_value = []
     runtime.action_manager.submit_from_thoughts.return_value = []
     runtime.action_manager.recent_send_message_requests.return_value = []
+    runtime.action_manager.reply_focus_prompt_state.return_value = None
     runtime.habit_memory.activate_for_cycle.return_value = []
     runtime.emotion.current.return_value = _emotion_snapshot()
     runtime.emotion.apply_cycle.return_value = runtime.emotion.current.return_value
