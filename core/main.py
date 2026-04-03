@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import FrameType
-from typing import TextIO
+from typing import Protocol, TextIO
 
 import psycopg
 import redis as redis_lib
@@ -59,6 +59,7 @@ from core.thought_parser import Thought
 from core.common_types import (
     ConversationEntry,
     EventPayload,
+    HabitPromptEntry,
     JsonObject,
     PerceptionStimulusPayload,
     JsonValue,
@@ -386,7 +387,7 @@ def _run_engine_loop(
             last_redis_reconnect,
             last_pg_reconnect,
             stimuli,
-            running_actions,
+            _running_actions,
             perception_cues,
         ) = _prepare_cycle(
             log_file,
@@ -404,7 +405,6 @@ def _run_engine_loop(
                 cycle_id,
                 identity,
                 stimuli,
-                running_actions,
                 perception_cues,
                 prompt_log_file,
             )
@@ -972,7 +972,6 @@ def _execute_cycle(
     cycle_id: int,
     identity: dict[str, str],
     stimuli: list[Stimulus],
-    running_actions: list[ActionRecord],
     perception_cues: list[str],
     prompt_log_file: TextIO | None,
 ) -> tuple[list[Thought], bool]:
@@ -1000,15 +999,7 @@ def _execute_cycle(
             embedding_client=runtime.embedding_client,
             embedding_model=runtime.embedding_model,
         )
-        manifested = [h for h in active_habits if h.get("manifested")]
-        if active_habits:
-            logger.info(
-                "cycle C%s active habits: %d total, %d manifested%s",
-                cycle_id,
-                len(active_habits),
-                len(manifested),
-                f" [{', '.join(h['pattern'][:30] for h in manifested)}]" if manifested else "",
-            )
+        _log_active_habits(cycle_id, active_habits)
         prefrontal_state = runtime.prefrontal.current_state(
             cycle_id,
             identity,
@@ -1044,17 +1035,10 @@ def _execute_cycle(
         current_impressions = _retrieve_current_impressions(runtime.ltm, impression_sources)
         if current_impressions and ltm_context:
             ltm_context = [memory for memory in ltm_context if memory not in current_impressions] or None
-        pending_prompt_echoes = runtime.action_manager.pop_prompt_echoes()
-        if pending_prompt_echoes:
-            stimuli = [*stimuli, *pending_prompt_echoes]
-        running_actions, recent_action_echoes = _resolve_prompt_action_state(
-            runtime.action_manager,
-            pending_prompt_echoes,
-            lambda: load_recent_action_echoes(
-                _as_conversation_redis(runtime.stm.redis_client),
-                current_cycle_id=cycle_id,
-                exclude_action_ids=_action_echo_action_ids(stimuli),
-            ),
+        stimuli, prompt_running_actions, recent_action_echoes, pending_prompt_echoes = _prepare_prompt_action_state(
+            runtime,
+            cycle_id,
+            stimuli,
         )
         thought_cycle_started_at = time.perf_counter()
         thoughts = run_cycle(
@@ -1076,7 +1060,7 @@ def _execute_cycle(
                 note_text=note_text,
                 stimuli=stimuli,
                 recent_action_echoes=recent_action_echoes,
-                running_actions=running_actions,
+                running_actions=prompt_running_actions,
                 perception_cues=perception_cues,
                 recent_conversations=recent_conversations,
             ),
@@ -1188,7 +1172,7 @@ def _execute_cycle(
             cycle_id,
             thoughts,
             stimuli,
-            running_actions,
+            prompt_running_actions,
             auxiliary_client=runtime.auxiliary_client,
             auxiliary_model_config=runtime.auxiliary_model_config,
             inhibited_actions=len(inhibition_notes),
@@ -1652,6 +1636,38 @@ def _action_echo_action_ids(stimuli: list[Stimulus]) -> set[str]:
     return action_ids
 
 
+def _log_active_habits(cycle_id: int, active_habits: list[HabitPromptEntry]) -> None:
+    if not active_habits:
+        return
+    manifested = [habit for habit in active_habits if habit.get("manifested")]
+    logger.info(
+        "cycle C%s active habits: %d total, %d manifested%s",
+        cycle_id,
+        len(active_habits),
+        len(manifested),
+        f" [{', '.join(h['pattern'][:30] for h in manifested)}]" if manifested else "",
+    )
+
+
+def _prepare_prompt_action_state(
+    runtime: EngineRuntime,
+    cycle_id: int,
+    stimuli: list[Stimulus],
+) -> tuple[list[Stimulus], list[ActionRecord], list[Stimulus], list[Stimulus]]:
+    pending_prompt_echoes = runtime.action_manager.pop_prompt_echoes()
+    prompt_stimuli = [*stimuli, *pending_prompt_echoes] if pending_prompt_echoes else stimuli
+    prompt_running_actions, recent_action_echoes = _resolve_prompt_action_state(
+        runtime.action_manager,
+        pending_prompt_echoes,
+        lambda: load_recent_action_echoes(
+            _as_conversation_redis(runtime.stm.redis_client),
+            current_cycle_id=cycle_id,
+            exclude_action_ids=_action_echo_action_ids(prompt_stimuli),
+        ),
+    )
+    return prompt_stimuli, prompt_running_actions, recent_action_echoes, pending_prompt_echoes
+
+
 def _filter_prompt_running_actions(
     actions: list[ActionRecord],
     recent_action_echoes: list[Stimulus],
@@ -1663,8 +1679,13 @@ def _filter_prompt_running_actions(
     return [action for action in actions if action.action_id not in echoed_action_ids]
 
 
+class _PromptActionStateManager(Protocol):
+    def running_actions(self) -> list[ActionRecord]:
+        """Return a prompt-safe snapshot of running actions."""
+
+
 def _resolve_prompt_action_state(
-    action_manager: ActionManager,
+    action_manager: _PromptActionStateManager,
     prompt_echoes: list[Stimulus],
     recent_action_echo_loader: Callable[[], list[Stimulus]],
 ) -> tuple[list[ActionRecord], list[Stimulus]]:

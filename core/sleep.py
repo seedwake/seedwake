@@ -56,6 +56,16 @@ class SleepRunResult:
     restart_requested: bool
 
 
+@dataclass(frozen=True)
+class LightSleepArchivePreparation:
+    archived: list[Thought]
+    new_candidates: list[Thought]
+    grouped_new_candidates: dict[str, list[Thought]]
+    already_stored: set[str]
+    already_stored_count: int
+    duplicate_candidates: int
+
+
 class SleepManager:
     def __init__(
         self,
@@ -142,17 +152,11 @@ class SleepManager:
         degeneration_alert: bool,
         active_memory_count: int,
     ) -> bool:
-        last = self._shadow["last_deep_sleep_at"]
-        elapsed_triggered = False
-        elapsed_hours = 0.0
-        if last:
-            try:
-                last_time = datetime.fromisoformat(last)
-            except ValueError:
-                last_time = None
-            if last_time is not None:
-                elapsed_hours = (now - last_time).total_seconds() / 3600.0
-                elapsed_triggered = elapsed_hours >= self._deep_sleep_trigger_hours
+        elapsed_triggered, elapsed_hours = _deep_sleep_elapsed_trigger(
+            now,
+            self._shadow["last_deep_sleep_at"],
+            self._deep_sleep_trigger_hours,
+        )
         systemic_triggered = (
             degeneration_alert
             or failure_count >= self._deep_sleep_failure_threshold
@@ -160,15 +164,16 @@ class SleepManager:
         )
         result = elapsed_triggered or systemic_triggered
         if result:
-            reasons = []
-            if elapsed_triggered:
-                reasons.append(f"elapsed={elapsed_hours:.1f}h >= {self._deep_sleep_trigger_hours}h")
-            if degeneration_alert:
-                reasons.append("degeneration")
-            if failure_count >= self._deep_sleep_failure_threshold:
-                reasons.append(f"failures={failure_count}")
-            if active_memory_count >= self._deep_sleep_active_memory_threshold:
-                reasons.append(f"active_memories={active_memory_count}")
+            reasons = _deep_sleep_reasons(
+                elapsed_triggered=elapsed_triggered,
+                elapsed_hours=elapsed_hours,
+                trigger_hours=self._deep_sleep_trigger_hours,
+                degeneration_alert=degeneration_alert,
+                failure_count=failure_count,
+                failure_threshold=self._deep_sleep_failure_threshold,
+                active_memory_count=active_memory_count,
+                active_memory_threshold=self._deep_sleep_active_memory_threshold,
+            )
             logger.info("sleep decision: deep_sleep=True (reasons=%s)", ", ".join(reasons))
         return result
 
@@ -188,39 +193,27 @@ class SleepManager:
         # -- 1. episodic archive --
         archive_started_at = time.perf_counter()
         buffer_thoughts = stm.buffer_thoughts()
-        archived = _archive_candidates(buffer_thoughts, self._archive_importance_threshold)
-        already_stored = ltm.existing_contents(
-            [thought.content for thought in archived],
-            memory_type="episodic",
+        archive_preparation = _prepare_light_sleep_archive(
+            ltm,
+            buffer_thoughts,
+            self._archive_importance_threshold,
         )
-        grouped_new_candidates: dict[str, list[Thought]] = {}
-        new_candidates: list[Thought] = []
-        already_stored_thought_count = 0
-        for thought in archived:
-            normalized_content = thought.content.strip()
-            if normalized_content in already_stored:
-                already_stored_thought_count += 1
-                continue
-            grouped_new_candidates.setdefault(normalized_content, []).append(thought)
-            if len(grouped_new_candidates[normalized_content]) == 1:
-                new_candidates.append(thought)
-        duplicate_candidates = sum(len(group) - 1 for group in grouped_new_candidates.values())
         logger.info(
             "light sleep archive pre-filter: candidates=%d, already_stored=%d, new=%d, batch_duplicates=%d",
-            len(archived),
-            already_stored_thought_count,
-            len(new_candidates),
-            duplicate_candidates,
+            len(archive_preparation.archived),
+            archive_preparation.already_stored_count,
+            len(archive_preparation.new_candidates),
+            archive_preparation.duplicate_candidates,
         )
         archived_count = 0
         archived_ids: list[str] = []
         archived_texts: list[str] = []
         # Mark already-stored thoughts for STM cleanup only (no semantic re-processing)
-        for thought in archived:
-            if thought.content.strip() in already_stored:
+        for thought in archive_preparation.archived:
+            if thought.content.strip() in archive_preparation.already_stored:
                 archived_ids.append(thought.thought_id)
-        for thought in new_candidates:
-            content_group = grouped_new_candidates.get(thought.content.strip(), [thought])
+        for thought in archive_preparation.new_candidates:
+            content_group = archive_preparation.grouped_new_candidates.get(thought.content.strip(), [thought])
             try:
                 embedding = embed_text(embedding_client, thought.content, embedding_model)
             except MODEL_CLIENT_EXCEPTIONS:
@@ -246,8 +239,8 @@ class SleepManager:
             elapsed_ms(archive_started_at),
             len(buffer_thoughts),
             archived_count,
-            already_stored_thought_count,
-            duplicate_candidates,
+            archive_preparation.already_stored_count,
+            archive_preparation.duplicate_candidates,
         )
 
         # -- 2. action result archive --
@@ -315,7 +308,7 @@ class SleepManager:
         habit_started_at = time.perf_counter()
         created_habits = len(
             habit_memory.strengthen_from_sleep(
-                archived,
+                archive_preparation.archived,
                 embedding_client=embedding_client,
                 embedding_model=embedding_model,
             )
@@ -496,6 +489,76 @@ class SleepManager:
         }
 
 
+def _deep_sleep_elapsed_trigger(
+    now: datetime,
+    last_deep_sleep_at: str,
+    trigger_hours: float,
+) -> tuple[bool, float]:
+    if not last_deep_sleep_at:
+        return False, 0.0
+    try:
+        last_time = datetime.fromisoformat(last_deep_sleep_at)
+    except ValueError:
+        return False, 0.0
+    elapsed_hours = (now - last_time).total_seconds() / 3600.0
+    return elapsed_hours >= trigger_hours, elapsed_hours
+
+
+def _deep_sleep_reasons(
+    *,
+    elapsed_triggered: bool,
+    elapsed_hours: float,
+    trigger_hours: float,
+    degeneration_alert: bool,
+    failure_count: int,
+    failure_threshold: int,
+    active_memory_count: int,
+    active_memory_threshold: int,
+) -> list[str]:
+    reasons: list[str] = []
+    if elapsed_triggered:
+        reasons.append(f"elapsed={elapsed_hours:.1f}h >= {trigger_hours}h")
+    if degeneration_alert:
+        reasons.append("degeneration")
+    if failure_count >= failure_threshold:
+        reasons.append(f"failures={failure_count}")
+    if active_memory_count >= active_memory_threshold:
+        reasons.append(f"active_memories={active_memory_count}")
+    return reasons
+
+
+def _prepare_light_sleep_archive(
+    ltm: LongTermMemory,
+    buffer_thoughts: list[Thought],
+    archive_importance_threshold: float,
+) -> LightSleepArchivePreparation:
+    archived = _archive_candidates(buffer_thoughts, archive_importance_threshold)
+    already_stored = ltm.existing_contents(
+        [thought.content for thought in archived],
+        memory_type="episodic",
+    )
+    grouped_new_candidates: dict[str, list[Thought]] = {}
+    new_candidates: list[Thought] = []
+    already_stored_thought_count = 0
+    for thought in archived:
+        normalized_content = thought.content.strip()
+        if normalized_content in already_stored:
+            already_stored_thought_count += 1
+            continue
+        grouped_new_candidates.setdefault(normalized_content, []).append(thought)
+        if len(grouped_new_candidates[normalized_content]) == 1:
+            new_candidates.append(thought)
+    duplicate_candidates = sum(len(group) - 1 for group in grouped_new_candidates.values())
+    return LightSleepArchivePreparation(
+        archived=archived,
+        new_candidates=new_candidates,
+        grouped_new_candidates=grouped_new_candidates,
+        already_stored=already_stored,
+        already_stored_count=already_stored_thought_count,
+        duplicate_candidates=duplicate_candidates,
+    )
+
+
 def _archive_candidates(thoughts: list[Thought], threshold: float) -> list[Thought]:
     return [
         thought
@@ -601,7 +664,6 @@ def _store_light_sleep_semantic_memories(
         summary = _summarize_light_sleep_batch(
             auxiliary_client,
             auxiliary_model_config,
-            cycle_id=cycle_id,
             emotion=emotion,
             batch=batch,
         )
@@ -649,7 +711,6 @@ def _summarize_light_sleep_batch(
     client: ModelClient,
     model_config: dict,
     *,
-    cycle_id: int,
     emotion: EmotionSnapshot,
     batch: list[str],
 ) -> str:

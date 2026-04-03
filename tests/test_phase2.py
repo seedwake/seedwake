@@ -569,12 +569,11 @@ class CycleTimingLogTests(unittest.TestCase):
                     _execute_cycle(
                         _as_runtime(runtime),
                         cycle_id=42,
-                    identity={"self_description": "我"},
-                    stimuli=[],
-                    running_actions=[],
-                    perception_cues=[],
-                    prompt_log_file=None,
-                )
+                        identity={"self_description": "我"},
+                        stimuli=[],
+                        perception_cues=[],
+                        prompt_log_file=None,
+                    )
 
         output = "\n".join(logs.output)
         self.assertIn("cycle C42 stm get_context finished", output)
@@ -658,7 +657,6 @@ class CycleTimingLogTests(unittest.TestCase):
                 cycle_id=42,
                 identity={"self_description": "我"},
                 stimuli=[],
-                running_actions=[],
                 perception_cues=[],
                 prompt_log_file=None,
             )
@@ -1221,7 +1219,6 @@ class CycleCounterTests(unittest.TestCase):
             cycle_id,
             identity,
             current_stimuli,
-            running_actions,
             perception_cues,
             prompt_log_file,
         ) -> tuple[list[Thought], bool]:
@@ -1229,7 +1226,6 @@ class CycleCounterTests(unittest.TestCase):
                 runtime_obj,
                 identity,
                 current_stimuli,
-                running_actions,
                 perception_cues,
                 prompt_log_file,
             )

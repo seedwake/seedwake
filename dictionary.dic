@@ -26,3 +26,5 @@ overfetches
 lpush
 lrem
 requeues
+nodename
+servname

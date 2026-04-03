@@ -251,34 +251,59 @@ def _recent_action_contexts(
 ) -> list[RecentActionContext]:
     """Build recent action contexts from recent thoughts for gating."""
     cutoff = datetime.now(timezone.utc) - RECENT_ACTION_CONTEXT_WINDOW
-    contexts: list[RecentActionContext] = []
+    request_contexts = _recent_request_action_contexts(recent_send_message_requests)
+    thought_contexts = _recent_thought_action_contexts(recent_thoughts, request_contexts, cutoff)
+    return sorted([*thought_contexts, *request_contexts], key=lambda context: context.timestamp)[-9:]
+
+
+def _recent_request_action_contexts(
+    recent_send_message_requests: list[ActionRequestPayload],
+) -> list[RecentActionContext]:
     request_contexts: list[RecentActionContext] = []
     for request in recent_send_message_requests[-9:]:
         context = _send_message_context_from_request(request)
-        if context is None:
-            continue
-        request_contexts.append(context)
+        if context is not None:
+            request_contexts.append(context)
+    return request_contexts
+
+
+def _recent_thought_action_contexts(
+    recent_thoughts: list[Thought],
+    request_contexts: list[RecentActionContext],
+    cutoff: datetime,
+) -> list[RecentActionContext]:
+    contexts: list[RecentActionContext] = []
     for thought in recent_thoughts[-9:]:
         if thought.timestamp < cutoff:
             continue
         for action_request in thought_action_requests(thought):
-            sig = _action_signature(action_request)
-            if sig:
-                action_type = str(action_request.get("type") or "").strip()
-                context = RecentActionContext(
-                    action_type=action_type,
-                    signature=sig,
-                    params=_action_params_map(str(action_request.get("params") or "")),
-                    timestamp=thought.timestamp,
-                )
-                if action_type == SEND_MESSAGE_ACTION_TYPE and any(
-                    _same_submitted_send_message(context, request_context)
-                    for request_context in request_contexts
-                ):
-                    continue
+            context = _thought_action_context(thought, action_request, request_contexts)
+            if context is not None:
                 contexts.append(context)
-    contexts.extend(request_contexts)
-    return sorted(contexts, key=lambda context: context.timestamp)[-9:]
+    return contexts
+
+
+def _thought_action_context(
+    thought: Thought,
+    action_request: RawActionRequest,
+    request_contexts: list[RecentActionContext],
+) -> RecentActionContext | None:
+    sig = _action_signature(action_request)
+    if not sig:
+        return None
+    action_type = str(action_request.get("type") or "").strip()
+    context = RecentActionContext(
+        action_type=action_type,
+        signature=sig,
+        params=_action_params_map(str(action_request.get("params") or "")),
+        timestamp=thought.timestamp,
+    )
+    if action_type == SEND_MESSAGE_ACTION_TYPE and any(
+        _same_submitted_send_message(context, request_context)
+        for request_context in request_contexts
+    ):
+        return None
+    return context
 
 
 def _action_signature(action_request: RawActionRequest) -> str:
@@ -589,11 +614,14 @@ def _control_factors(
     signature = _action_signature(action_request)
     send_message_params = _action_params_map(str(action_request.get("params") or ""))
     repeated_send_message_candidate = bool(_normalized_send_message_text(send_message_params))
-    if signature and signature in {action.signature for action in recent_actions[-2:]}:
-        if action_type == SEND_MESSAGE_ACTION_TYPE and not repeated_send_message_candidate:
-            pass
-        else:
-            return [ControlFactor("exact_duplicate", 1.25)]
+    exact_duplicate_factors = _exact_duplicate_factors(
+        action_type=action_type,
+        signature=signature,
+        recent_actions=recent_actions,
+        repeated_send_message_candidate=repeated_send_message_candidate,
+    )
+    if exact_duplicate_factors is not None:
+        return exact_duplicate_factors
 
     factors: list[ControlFactor] = []
     if sleep_mode != "awake" and action_type in HEAVY_ACTION_TYPES:
@@ -621,6 +649,20 @@ def _control_factors(
             )
         )
     return factors
+
+
+def _exact_duplicate_factors(
+    *,
+    action_type: str,
+    signature: str,
+    recent_actions: list[RecentActionContext],
+    repeated_send_message_candidate: bool,
+) -> list[ControlFactor] | None:
+    if not signature or signature not in {action.signature for action in recent_actions[-2:]}:
+        return None
+    if action_type == SEND_MESSAGE_ACTION_TYPE and not repeated_send_message_candidate:
+        return None
+    return [ControlFactor("exact_duplicate", 1.25)]
 
 
 def _send_message_factors(
@@ -725,34 +767,50 @@ def _action_supports_current_reply(
 def _compose_inhibition_note(action_type: str, factors: list[ControlFactor]) -> str:
     positive_codes = {factor.code for factor in factors if factor.score > 0}
     negative_codes = {factor.code for factor in factors if factor.score < 0}
+    direct_note = _direct_inhibition_note(action_type, positive_codes, negative_codes)
+    if direct_note is not None:
+        return direct_note
+    info_note = _info_gathering_inhibition_note(action_type, positive_codes, negative_codes)
+    if info_note is not None:
+        return info_note
+    return f"最近 {action_type} 做得有点频繁，这次先不做。"
+
+
+def _direct_inhibition_note(
+    action_type: str,
+    positive_codes: set[str],
+    negative_codes: set[str],
+) -> str | None:
     if "exact_duplicate" in positive_codes:
         return f"刚做过一样的 {action_type}，不必再来一次。"
-    if "repeated_send_message" in positive_codes and "foreground_reply" in negative_codes:
-        return "这句刚对眼前这个人说过类似的话，这次别重复。"
     if "repeated_send_message" in positive_codes:
+        if "foreground_reply" in negative_codes:
+            return "这句刚对眼前这个人说过类似的话，这次别重复。"
         return "这句刚对同一处说过类似的话，这次别重复。"
     if "low_energy_heavy" in positive_codes:
         return f"现在有点累了，{action_type} 太耗精力，先不做。"
+    if "off_context_outreach" in positive_codes:
+        return "眼前的对话还没结束，先别分心去联系别人。"
+    return None
+
+
+def _info_gathering_inhibition_note(
+    action_type: str,
+    positive_codes: set[str],
+    negative_codes: set[str],
+) -> str | None:
     if (
         "conversation_defer" in positive_codes
         and "habit_impulse" in positive_codes
         and "recent_same_type_repeat" in positive_codes
-        and "supports_current_reply" not in negative_codes
     ):
+        if "supports_current_reply" in negative_codes:
+            return f"{action_type} 虽然是在回应对话，但最近做得太频繁了，这次先停一下。"
         return f"有人在说话，而且最近已经连续做了好几次 {action_type}，这次先放一放。"
-    if (
-        "conversation_defer" in positive_codes
-        and "habit_impulse" in positive_codes
-        and "recent_same_type_repeat" in positive_codes
-        and "supports_current_reply" in negative_codes
-    ):
-        return f"{action_type} 虽然是在回应对话，但最近做得太频繁了，这次先停一下。"
     if "habit_impulse" in positive_codes and "recent_same_type_repeat" in positive_codes:
         return f"最近已经连续做了好几次 {action_type}，这次先缓一缓。"
     if "conversation_defer" in positive_codes and "recent_same_type_repeat" in positive_codes:
         return f"有人在说话，{action_type} 也已经连续做了好几次，先回应眼前的人。"
     if "conversation_defer" in positive_codes and "habit_impulse" in positive_codes:
         return f"有人在说话，先放下 {action_type}，回应眼前的人。"
-    if "off_context_outreach" in positive_codes:
-        return "眼前的对话还没结束，先别分心去联系别人。"
-    return f"最近 {action_type} 做得有点频繁，这次先不做。"
+    return None
