@@ -378,6 +378,27 @@ class ModelClientTests(unittest.TestCase):
         self.assertIn("model call [openai_compatible/generate] gpt-compat", output)
         self.assertIn("status=failed", output)
 
+    def test_openai_compatible_generate_rejects_images_explicitly(self) -> None:
+        with patch.dict("os.environ", {
+            "OPENAI_COMPAT_BASE_URL": "https://api.example.com",
+            "OPENAI_COMPAT_API_KEY": "secret",
+        }, clear=False):
+            with patch("core.model_client.request.urlopen") as mock_urlopen:
+                client = create_model_client({
+                    "provider": "openai_compatible",
+                    "name": "gpt-compat",
+                    "timeout": 5,
+                })
+                with self.assertRaises(RuntimeError) as ctx:
+                    client.generate_text(
+                        "prompt-body",
+                        {"name": "gpt-compat"},
+                        images=["ZmFrZS1jYW1lcmEtZnJhbWU="],
+                    )
+
+        self.assertIn("暂不支持图像输入", str(ctx.exception))
+        mock_urlopen.assert_not_called()
+
     def test_openclaw_provider_adds_scopes_header(self) -> None:
         requests = []
 

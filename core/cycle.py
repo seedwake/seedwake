@@ -23,6 +23,7 @@ def run_cycle(
     model_config: dict,
     prompt_context: PromptBuildContext | None = None,
     prompt_log_file: TextIO | None = None,
+    images: list[str] | None = None,
 ) -> list[Thought]:
     """Execute one cycle and return parsed thoughts."""
     resolved_context = prompt_context or PromptBuildContext()
@@ -43,7 +44,7 @@ def run_cycle(
         emoji="🟢",
     )
     generation_started_at = time.perf_counter()
-    raw_output = _call_ollama(client, prompt, model_config)
+    raw_output = _call_ollama(client, prompt, model_config, images=images)
     generation_elapsed_ms = elapsed_ms(generation_started_at)
     logger.info("cycle C%s generation finished in %.1f ms (chars=%d)", cycle_id, generation_elapsed_ms, len(raw_output))
     parse_started_at = time.perf_counter()
@@ -69,13 +70,23 @@ def run_cycle(
     return thoughts
 
 
-def _call_generation_model(client: ModelClient, prompt: str, model_config: dict) -> str:
-    return client.generate_text(prompt, model_config)
+def _call_generation_model(
+    client: ModelClient,
+    prompt: str,
+    model_config: dict,
+    images: list[str] | None = None,
+) -> str:
+    return client.generate_text(prompt, model_config, images=images)
 
 
-def _call_ollama(client: ModelClient, prompt: str, model_config: dict) -> str:
+def _call_ollama(
+    client: ModelClient,
+    prompt: str,
+    model_config: dict,
+    images: list[str] | None = None,
+) -> str:
     """Backward-compatible alias for older tests and patches."""
-    return _call_generation_model(client, prompt, model_config)
+    return _call_generation_model(client, prompt, model_config, images=images)
 
 
 def write_prompt_log_block(

@@ -15,6 +15,7 @@ from core.main import (
     EngineRuntime,
     _advance_degeneration_intervention,
     _build_degeneration_intervention,
+    _capture_cycle_images,
     _detect_runtime_degeneration,
     _degeneration_reroll_reason,
     _execute_cycle,
@@ -387,6 +388,7 @@ def _build_execute_cycle_runtime(action_manager: MagicMock | None = None) -> Sim
         manas=MagicMock(),
         metacognition=MagicMock(),
         degeneration_intervention=None,
+        camera_stream_url="",
     )
     runtime.stm.get_context.return_value = []
     runtime.stm.redis_client = None
@@ -407,6 +409,7 @@ def _build_execute_cycle_runtime(action_manager: MagicMock | None = None) -> Sim
     runtime.manas.evaluate_cycle.return_value = runtime.manas.current_prompt_state.return_value
     runtime.metacognition.recent_reflections.return_value = []
     runtime.metacognition.should_reflect.return_value = False
+    runtime.primary_client.provider = "ollama"
     return runtime
 
 
@@ -904,6 +907,61 @@ class CycleTimingLogTests(unittest.TestCase):
             )
 
         action_manager.requeue_prompt_echoes.assert_called_once_with([pending_echo])
+
+    @patch("core.main._degeneration_reroll_reason", side_effect=["还是在绕回旧轨道。", None])
+    @patch("core.main.capture_camera_frame", return_value="frame-base64")
+    @patch("core.main.run_cycle")
+    def test_execute_cycle_reuses_single_camera_frame_across_reroll(
+        self,
+        mock_run_cycle: MagicMock,
+        mock_capture_camera_frame: MagicMock,
+        _mock_reroll_reason: MagicMock,
+    ) -> None:
+        runtime = _build_execute_cycle_runtime()
+        runtime.camera_stream_url = "http://localhost:8081"
+        runtime.degeneration_intervention = {
+            "source_cycle_id": 41,
+            "remaining_cycles": 2,
+            "summary": "最近一直在打转。",
+            "required_shift": "至少做一个真正动作。",
+            "suggestions": ["先回应眼前的人。"],
+            "must_externalize": True,
+        }
+        generated_thoughts = [_make_thought(42, 1, "这轮试着换个方向。")]
+        runtime.prefrontal.review_thoughts.side_effect = lambda thoughts, *_args: (thoughts, [])
+        mock_run_cycle.return_value = generated_thoughts
+
+        thoughts, degeneration_alert = _execute_cycle(
+            _as_runtime(runtime),
+            cycle_id=42,
+            identity={"self_description": "我"},
+            stimuli=[],
+            perception_cues=[],
+            prompt_log_file=None,
+        )
+
+        self.assertFalse(degeneration_alert)
+        self.assertEqual(thoughts, generated_thoughts)
+        self.assertEqual(mock_capture_camera_frame.call_count, 1)
+        self.assertEqual(mock_run_cycle.call_count, 2)
+        first_images = mock_run_cycle.call_args_list[0].kwargs["images"]
+        second_images = mock_run_cycle.call_args_list[1].kwargs["images"]
+        self.assertEqual(first_images, ["frame-base64"])
+        self.assertEqual(second_images, ["frame-base64"])
+
+    @patch("core.main.capture_camera_frame")
+    def test_capture_cycle_images_skips_non_ollama_provider(
+        self,
+        mock_capture_camera_frame: MagicMock,
+    ) -> None:
+        runtime = _build_execute_cycle_runtime()
+        runtime.camera_stream_url = "http://localhost:8081"
+        runtime.primary_client.provider = "openai_compatible"
+
+        images = _capture_cycle_images(_as_runtime(runtime))
+
+        self.assertIsNone(images)
+        mock_capture_camera_frame.assert_not_called()
 
 
 class Phase4RuntimeTests(unittest.TestCase):

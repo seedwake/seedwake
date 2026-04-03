@@ -58,7 +58,12 @@ class ModelClient:
         self.provider = provider
         self.supports_tool_calls = supports_tool_calls
 
-    def generate_text(self, prompt: str, model_config: dict) -> str:
+    def generate_text(
+        self,
+        prompt: str,
+        model_config: dict,
+        images: list[str] | None = None,
+    ) -> str:
         raise NotImplementedError
 
     def chat(
@@ -100,22 +105,33 @@ class OllamaModelClient(ModelClient):
             headers[auth_header] = auth_value
         self._client = Client(host=base_url, headers=headers, timeout=timeout)
 
-    def generate_text(self, prompt: str, model_config: dict) -> str:
+    def generate_text(
+        self,
+        prompt: str,
+        model_config: dict,
+        images: list[str] | None = None,
+    ) -> str:
         started_at = time.perf_counter()
         status = "failed"
         think_enabled = _resolve_generate_think_flag(model_config.get("think"))
         detail = f"prompt_chars={len(prompt)}, think={think_enabled}"
+        generate_kwargs: dict = {
+            "model": model_config["name"],
+            "prompt": prompt,
+            "options": {
+                "num_predict": model_config.get("num_predict", 2048),
+                "num_ctx": model_config.get("num_ctx", 32768),
+                "temperature": model_config.get("temperature", 0.8),
+            },
+            "think": think_enabled,
+        }
+        if images:
+            generate_kwargs["images"] = images
+            detail = f"prompt_chars={len(prompt)}, think={think_enabled}, images={len(images)}"
         try:
-            response = _normalize_ollama_generate_response(self._client.generate(
-                model=model_config["name"],
-                prompt=prompt,
-                options={
-                    "num_predict": model_config.get("num_predict", 2048),
-                    "num_ctx": model_config.get("num_ctx", 32768),
-                    "temperature": model_config.get("temperature", 0.8),
-                },
-                think=think_enabled,
-            ))
+            response = _normalize_ollama_generate_response(
+                self._client.generate(**generate_kwargs)
+            )
             detail = _ollama_generate_detail(prompt, response, think_enabled)
             text = _ollama_generate_text(response)
             status = "ok"
@@ -226,10 +242,20 @@ class OpenAICompatibleModelClient(ModelClient):
         self._timeout = timeout
         self._extra_headers = dict(extra_headers or {})
 
-    def generate_text(self, prompt: str, model_config: dict) -> str:
+    def generate_text(
+        self,
+        prompt: str,
+        model_config: dict,
+        images: list[str] | None = None,
+    ) -> str:
         started_at = time.perf_counter()
         status = "failed"
+        detail = f"prompt_chars={len(prompt)}"
+        if images:
+            detail = f"{detail}, images={len(images)}"
         try:
+            if images:
+                raise RuntimeError(f"{self.provider} 主生成暂不支持图像输入")
             body = self._chat_completions(
                 model=model_config["name"],
                 messages=_openai_generate_messages(prompt),
@@ -250,7 +276,7 @@ class OpenAICompatibleModelClient(ModelClient):
                 model=model_config["name"],
                 started_at=started_at,
                 status=status,
-                detail=f"prompt_chars={len(prompt)}",
+                detail=detail,
             )
 
     def chat(

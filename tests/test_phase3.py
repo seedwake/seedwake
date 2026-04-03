@@ -1364,6 +1364,28 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("## 刚才还在继续的对话", prompt)
         self.assertIn("我刚才还在和 [Alice](telegram:1) 这段对话里。", prompt)
 
+    def test_prompt_includes_visual_anchor_when_frame_is_attached(self) -> None:
+        prompt = build_prompt(
+            3,
+            {
+                "self_description": "我是 Seedwake。",
+                "core_goals": "探索和学习。",
+                "self_understanding": "我会在经验里慢慢形成自己。",
+            },
+            [_make_thought(cycle_id=2, index=1, thought_type="思考", content="之前的念头")],
+            30,
+            prompt_context=PromptBuildContext(
+                visual_input_present=True,
+                stimuli=[_conversation_stimulus(content="你在吗？", message_id=12)],
+            ),
+        )
+
+        self.assertIn("## 眼前的画面", prompt)
+        self.assertIn("附带图片是我此刻被动看到的一帧环境，不是别人要求我分析的任务。", prompt)
+        self.assertIn("如果它自然牵引了念头，可以把它纳入思考；如果没有，就不必刻意描述。", prompt)
+        self.assertIn("当对话和画面同时出现时，对话通常仍是前景，画面只是背景", prompt)
+        self.assertLess(prompt.index("## 眼前的画面"), prompt.index("## 有人对我说话了"))
+
     def test_prompt_includes_degeneration_nudge_before_next_cycle(self) -> None:
         prompt = build_prompt(
             3,

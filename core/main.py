@@ -30,6 +30,7 @@ from core.action import (
     pop_action_controls,
 )
 from core.attention import evaluate_attention, select_attention_anchor
+from core.camera import capture_camera_frame
 from core.cycle import run_cycle, write_prompt_log_block
 from core.embedding import embed_text
 from core.emotion import EmotionManager
@@ -213,6 +214,7 @@ class EngineRuntime:
     retry_delay: float
     max_retry_delay: float
     reconnect_interval: float
+    camera_stream_url: str
     bootstrap_identity: dict[str, str]
     bootstrap_habits: list[JsonObject]
     degeneration_intervention: DegenerationIntervention | None = None
@@ -366,12 +368,20 @@ def _build_runtime_components(
         retry_delay=retry_delay,
         max_retry_delay=max_retry_delay,
         reconnect_interval=reconnect_interval,
+        camera_stream_url=str(
+            config.get("perception", {}).get("camera_stream_url", "")
+        ).strip(),
         bootstrap_identity=bootstrap_identity,
         bootstrap_habits=[
             item for item in (config.get("bootstrap", {}).get("habits", []) or [])
             if isinstance(item, dict)
         ],
     )
+    if runtime.camera_stream_url and runtime.primary_client.provider != "ollama":
+        logger.warning(
+            "camera input is disabled for primary provider %s: only ollama generate currently supports images",
+            runtime.primary_client.provider,
+        )
     return runtime, identity
 
 
@@ -1091,6 +1101,7 @@ def _execute_cycle(
             cycle_id,
             stimuli,
         )
+        cycle_images = _capture_cycle_images(runtime)
         prompt_context = PromptBuildContext(
             manas_state=manas_state,
             emotion=current_emotion,
@@ -1108,6 +1119,7 @@ def _execute_cycle(
             perception_cues=perception_cues,
             recent_conversations=recent_conversations,
             reply_focus=runtime.action_manager.reply_focus_prompt_state(),
+            visual_input_present=bool(cycle_images),
         )
         reroll_reason: str | None = None
         thoughts, inhibition_notes = _generate_reviewed_thoughts(
@@ -1118,6 +1130,7 @@ def _execute_cycle(
             stimuli,
             prompt_log_file,
             prompt_context,
+            cycle_images,
         )
         if runtime.degeneration_intervention is not None:
             reroll_reason = _degeneration_reroll_reason(
@@ -1154,6 +1167,7 @@ def _execute_cycle(
                         prompt_context,
                         prefrontal_state=retry_prefrontal_state,
                     ),
+                    cycle_images,
                 )
                 reroll_reason = _degeneration_reroll_reason(
                     runtime.auxiliary_client,
@@ -1327,6 +1341,7 @@ def _generate_reviewed_thoughts(
     stimuli: list[Stimulus],
     prompt_log_file: TextIO | None,
     prompt_context: PromptBuildContext,
+    images: list[str] | None,
 ) -> tuple[list[Thought], list[str]]:
     thought_cycle_started_at = time.perf_counter()
     thoughts = run_cycle(
@@ -1338,6 +1353,7 @@ def _generate_reviewed_thoughts(
         runtime.model_config,
         prompt_context=prompt_context,
         prompt_log_file=prompt_log_file,
+        images=images,
     )
     logger.info(
         "cycle C%s thought generation finished in %.1f ms (count=%d)",
@@ -1381,6 +1397,15 @@ def _generate_reviewed_thoughts(
         f", notes={inhibition_notes}" if inhibition_notes else "",
     )
     return thoughts, inhibition_notes
+
+
+def _capture_cycle_images(runtime: EngineRuntime) -> list[str] | None:
+    if not runtime.camera_stream_url or runtime.primary_client.provider != "ollama":
+        return None
+    camera_frame = capture_camera_frame(runtime.camera_stream_url)
+    if camera_frame is None:
+        return None
+    return [camera_frame]
 
 
 def _build_degeneration_intervention(

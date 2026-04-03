@@ -181,6 +181,7 @@ class PromptBuildContext:
     perception_cues: list[str] | None = None
     recent_conversations: list[RecentConversationPrompt] | None = None
     reply_focus: ReplyFocusPromptState | None = None
+    visual_input_present: bool = False
 
 
 def build_prompt(
@@ -227,6 +228,7 @@ def build_prompt(
         passive,
         resolved_context.current_impressions or [],
         resolved_context.recent_conversations or [],
+        resolved_context.visual_input_present,
         resolved_context.reply_focus,
         conversation_labels,
     )
@@ -239,6 +241,7 @@ def build_prompt(
         visible_pending_actions,
         visible_running_actions,
         passive,
+        resolved_context.visual_input_present,
         resolved_context.perception_cues or [],
         resolved_context.recent_conversations or [],
         bool(conversations or action_echoes or visible_pending_actions or visible_running_actions),
@@ -304,6 +307,7 @@ def _append_prompt_stimulus_sections(
     passive: list[Stimulus],
     current_impressions: list[str],
     recent_conversations: list[RecentConversationPrompt],
+    visual_input_present: bool,
     reply_focus: ReplyFocusPromptState | None,
     conversation_labels: dict[str, str],
 ) -> None:
@@ -341,6 +345,12 @@ def _append_prompt_stimulus_sections(
             "recent_conversations",
             lambda: _format_recent_conversations(convos),
         )
+    if visual_input_present:
+        _append_prompt_section(
+            parts,
+            "visual_input",
+            lambda: _format_visual_input(has_conversation=bool(conversations)),
+        )
     if not conversations and reply_focus is not None:
         _append_prompt_section(parts, "reply_focus", lambda: _format_reply_focus(reply_focus, conversation_labels))
     if conversations:
@@ -356,6 +366,7 @@ def _stagnation_warning_text(
     visible_pending_actions: list[ActionRecord],
     visible_running_actions: list[ActionRecord],
     passive: list[Stimulus],
+    visual_input_present: bool,
     perception_cues: list[str],
     recent_conversations: list[RecentConversationPrompt],
     has_foreground: bool,
@@ -372,6 +383,7 @@ def _stagnation_warning_text(
             visible_pending_actions,
             visible_running_actions,
             passive,
+            visual_input_present,
             perception_cues,
             recent_conversations,
         ),
@@ -700,6 +712,7 @@ def _stagnation_sources(
     pending_actions: list[ActionRecord],
     running_actions: list[ActionRecord],
     passive: list[Stimulus],
+    visual_input_present: bool,
     perception_cues: list[str],
     recent_conversations: list[RecentConversationPrompt],
 ) -> list[str]:
@@ -716,6 +729,8 @@ def _stagnation_sources(
         sources.append("我已经发起、正在等回音的事")
     if passive:
         sources.append("此刻我注意到")
+    if visual_input_present:
+        sources.append("眼前的画面")
     if perception_cues:
         sources.append("好像有一阵子没有……")
     _ = recent_conversations
@@ -839,6 +854,16 @@ def _visible_running_actions(actions: list[ActionRecord] | None) -> list[ActionR
 
 def _format_perception_cues(cues: list[str]) -> str:
     return _render_section("好像有一阵子没有……", [f"- {cue}" for cue in cues])
+
+
+def _format_visual_input(*, has_conversation: bool) -> str:
+    lines = [
+        "附带图片是我此刻被动看到的一帧环境，不是别人要求我分析的任务。",
+        "如果它自然牵引了念头，可以把它纳入思考；如果没有，就不必刻意描述。",
+    ]
+    if has_conversation:
+        lines.append("当对话和画面同时出现时，对话通常仍是前景，画面只是背景，除非画面本身与对话直接相关。")
+    return _render_section("眼前的画面", lines)
 
 
 def _format_next_cycle(cycle_id: int) -> str:
