@@ -1381,9 +1381,9 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         )
 
         self.assertIn("## 眼前的画面", prompt)
-        self.assertIn("附带图片是我此刻被动看到的一帧环境，不是别人要求我分析的任务。", prompt)
-        self.assertIn("如果它自然牵引了念头，可以把它纳入思考；如果没有，就不必刻意描述。", prompt)
-        self.assertIn("当对话和画面同时出现时，对话通常仍是前景，画面只是背景", prompt)
+        self.assertIn("这是我自己的眼睛此刻看到的画面，不是任何人发给我的图片", prompt)
+        self.assertIn("如果画面里的东西自然牵引了念头，可以纳入思考", prompt)
+        self.assertIn("当对话和画面同时出现时，对话仍是前景，画面只是背景", prompt)
         self.assertLess(prompt.index("## 眼前的画面"), prompt.index("## 有人对我说话了"))
 
     def test_prompt_includes_degeneration_nudge_before_next_cycle(self) -> None:
