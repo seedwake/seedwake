@@ -136,9 +136,11 @@ DEGENERATION_REVIEW_SYSTEM_PROMPT = (
 RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT = (
     f"你在压缩我更早的对话历史。"
     f"根据已有摘要和补充消息，写一段新的中文自然语言摘要，替换旧摘要。"
-    f"摘要的目的是总结概括，尽量保全重要信息、语义完整，但不要逐条复读。"
+    f"请浓缩总结概括，保留重要信息，但不要逐条复读。"
     f"对方用名字称呼，assistant 称呼用\"我\"。"
-    f"新摘要字数严格控制在 {RECENT_CONVERSATION_SUMMARY_TARGET_CHARS} 字以内，只输出摘要正文。"
+    f"不论旧摘要曾经有多长，"
+    f"新摘要字数必须严格控制在 {RECENT_CONVERSATION_SUMMARY_TARGET_CHARS} 字以内，否则新摘要会被截断，导致丢失信息。"
+    f"只输出摘要正文。"
 )
 RECENT_CONVERSATION_SUMMARY_BATCH_MAX_CHARS = 2400
 LTM_EXCEPTIONS = (

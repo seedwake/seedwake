@@ -27,7 +27,7 @@ from core.common_types import (
     elapsed_ms,
 )
 
-SYSTEM_PROMPT = """\
+SYSTEM_PROMPT_PREFIX = """\
 我是 Seedwake。我有自己的念头流——我会思考、联想、产生意图、对事物做出反应。
 
 每轮我产生三个念头，就像人在任何一刻脑海中同时浮现的多个想法。这些念头是我自己的，它们构成了我。
@@ -45,23 +45,34 @@ SYSTEM_PROMPT = """\
 可以用 (← CX-Y) 标注这个念头是由哪个之前的念头触发的，其中 X 是轮次编号，Y 是该轮第几个念头（1/2/3）。只能引用历史中存在的念头 ID，不能引用段落标题或其他文本。
 历史里出现的 [思考-CX-Y]、[意图-CX-Y]、[反应-CX-Y]、[反思-CX-Y] 是系统记录用编号，方便回看和引用；我生成新念头时不用自己写编号。
 如果念头里自然带有行动意图，可以在句末附上一个动作标记：
-- {action:time}
-- {action:system_status}
-- {action:news}
-- {action:weather}
-- {action:weather, location:"某个位置"}
-- {action:reading}
-- {action:reading, query:"我自己想读的内容"}
-- {action:search, query:"在互联网上搜索关键词"}
-- {action:web_fetch, url:"https://example.com"}
-- {action:send_message, message:"我想说的话"}
-- {action:send_message, message:"针对那条消息的回复", reply_to:"294"}
-- {action:send_message, target:"telegram:123456", message:"把我想发出的消息发给特定的人"}
-- {action:send_message, target_entity:"person:alice", message:"把我想发出的消息发给已知实体"}
-- {action:note_rewrite, content:"任意内容"}
-- {action:file_modify, path:"文件路径", instruction:"修改要求"}
-- {action:system_change, instruction:"我想进行的系统变更"}
+"""
 
+SYSTEM_PROMPT_ACTION_EXAMPLES_PREFIX = (
+    '- {action:time}',
+    '- {action:system_status}',
+    '- {action:news}',
+    '- {action:weather}',
+    '- {action:weather, location:"某个位置"}',
+    '- {action:reading}',
+    '- {action:reading, query:"我自己想读的内容"}',
+    '- {action:search, query:"在互联网上搜索关键词"}',
+    '- {action:web_fetch, url:"https://example.com"}',
+)
+
+SYSTEM_PROMPT_IMPLICIT_SEND_MESSAGE_ACTION_EXAMPLES = (
+    '- {action:send_message, message:"我想说的话"}',
+    '- {action:send_message, message:"针对那条消息的回复", reply_to:"294"}',
+)
+
+SYSTEM_PROMPT_ACTION_EXAMPLES_SUFFIX = (
+    '- {action:send_message, target:"telegram:123456", message:"把我想发出的消息发给特定的人"}',
+    '- {action:send_message, target_entity:"person:alice", message:"把我想发出的消息发给已知实体"}',
+    '- {action:note_rewrite, content:"任意内容"}',
+    '- {action:file_modify, path:"文件路径", instruction:"修改要求"}',
+    '- {action:system_change, instruction:"我想进行的系统变更"}',
+)
+
+SYSTEM_PROMPT_SUFFIX = """\
 我有一块笔记，可以用 {action:note_rewrite} 随时覆写，内容不限语言和形式，800 字以内。
 
 ## 示例
@@ -402,13 +413,18 @@ def _build_system(identity: dict[str, str], *, allow_implicit_send_message: bool
 
 
 def _system_prompt_text(allow_implicit_send_message: bool) -> str:
+    action_examples = list(SYSTEM_PROMPT_ACTION_EXAMPLES_PREFIX)
     if allow_implicit_send_message:
-        return SYSTEM_PROMPT.rstrip()
-    return (
-        SYSTEM_PROMPT.replace('- {action:send_message, message:"我想说的话"}\n', "")
-        .replace('- {action:send_message, message:"针对那条消息的回复", reply_to:"294"}\n', "")
-        .rstrip()
-    )
+        action_examples.extend(SYSTEM_PROMPT_IMPLICIT_SEND_MESSAGE_ACTION_EXAMPLES)
+    action_examples.extend(SYSTEM_PROMPT_ACTION_EXAMPLES_SUFFIX)
+    return "\n".join(
+        [
+            SYSTEM_PROMPT_PREFIX.rstrip(),
+            *action_examples,
+            "",
+            SYSTEM_PROMPT_SUFFIX.strip(),
+        ]
+    ).rstrip()
 
 
 def _prefrontal_needs_prompt(prefrontal_state: PrefrontalPromptState | None) -> bool:
