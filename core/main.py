@@ -486,8 +486,8 @@ def _log_cycle_loop_finished(
         status,
         stimuli_count,
         thought_count,
-            retry_sleep_ms,
-        )
+        retry_sleep_ms,
+    )
 
 
 def _post_cycle_phase4(
@@ -518,7 +518,10 @@ def _post_cycle_phase4(
         degeneration_alert=degeneration_alert,
         active_memory_count=active_memory_count,
     ):
-        logger.info("cycle C%s entering deep sleep (buffer=%d, active_ltm=%d)", cycle_id, len(buffer_thoughts), active_memory_count)
+        logger.info(
+            "cycle C%s entering deep sleep (buffer=%d, active_ltm=%d)",
+            cycle_id, len(buffer_thoughts), active_memory_count,
+        )
         sleep_started_at = time.perf_counter()
         result = runtime.sleep.run_deep_sleep(
             cycle_id=cycle_id,
@@ -532,7 +535,10 @@ def _post_cycle_phase4(
             emotion=runtime.emotion.current(),
         )
         logger.info(
-            "cycle C%s deep sleep finished in %.1f ms (archived=%d, semantic=%d, impressions=%d, action_results=%d, habits=%d, cooled=%d, maintenance=%d, expired=%d, summary=%s, review=%s, restart=%s)",
+            "cycle C%s deep sleep finished in %.1f ms"
+            " (archived=%d, semantic=%d, impressions=%d, action_results=%d,"
+            " habits=%d, cooled=%d, maintenance=%d, expired=%d,"
+            " summary=%s, review=%s, restart=%s)",
             cycle_id,
             elapsed_ms(sleep_started_at),
             result.archived_count,
@@ -565,7 +571,9 @@ def _post_cycle_phase4(
             emotion=runtime.emotion.current(),
         )
         logger.info(
-            "cycle C%s light sleep finished in %.1f ms (archived=%d, semantic=%d, impressions=%d, action_results=%d, habits=%d, cooled=%d)",
+            "cycle C%s light sleep finished in %.1f ms"
+            " (archived=%d, semantic=%d, impressions=%d,"
+            " action_results=%d, habits=%d, cooled=%d)",
             cycle_id,
             elapsed_ms(sleep_started_at),
             result.archived_count,
@@ -1741,8 +1749,6 @@ def _normalize_cycle_text(content: str) -> str:
     normalized = re.sub(r"\{action:[^}]+\}", "", str(content))
     normalized = re.sub(r"\(←\s*[^)]+\)", "", normalized)
     return " ".join(normalized.split())
-
-
 
 
 def _recent_conversation_summary_request(

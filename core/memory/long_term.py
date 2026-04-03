@@ -233,7 +233,9 @@ class LongTermMemory:
             raise
         finally:
             logger.info(
-                "ltm search finished in %.1f ms (status=%s, top_k=%d, results=%d, entity_filter=%s, types=%d, exclude_cycles=%d)",
+                "ltm search finished in %.1f ms"
+                " (status=%s, top_k=%d, results=%d,"
+                " entity_filter=%s, types=%d, exclude_cycles=%d)",
                 elapsed_ms(started_at),
                 status,
                 k,
@@ -307,7 +309,9 @@ class LongTermMemory:
             raise
         finally:
             logger.info(
-                "ltm recent_by_time finished in %.1f ms (status=%s, top_k=%d, results=%d, entity_filter=%s, types=%d, exclude_cycles=%d)",
+                "ltm recent_by_time finished in %.1f ms"
+                " (status=%s, top_k=%d, results=%d,"
+                " entity_filter=%s, types=%d, exclude_cycles=%d)",
                 elapsed_ms(started_at),
                 status,
                 k,
@@ -705,7 +709,11 @@ def _weighted_memory_score(
     created_at: datetime,
     time_decay_factor: float,
 ) -> float:
-    created = created_at.astimezone(timezone.utc) if created_at.tzinfo is not None else created_at.replace(tzinfo=timezone.utc)
+    created = (
+        created_at.astimezone(timezone.utc)
+        if created_at.tzinfo is not None
+        else created_at.replace(tzinfo=timezone.utc)
+    )
     age_days = max(0.0, (datetime.now(timezone.utc) - created).total_seconds() / 86400.0)
     time_decay = time_decay_factor ** age_days
     return round(max(0.0, similarity) * max(0.0, importance) * time_decay, 6)

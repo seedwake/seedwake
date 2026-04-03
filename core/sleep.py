@@ -137,7 +137,10 @@ class SleepManager:
             logger.info("sleep decision: light_sleep=True (reason=degeneration, buffer=%d)", buffer_count)
             return True
         if self._shadow["energy"] <= self._drowsy_threshold:
-            logger.info("sleep decision: light_sleep=True (reason=drowsy, energy=%.1f, buffer=%d)", self._shadow["energy"], buffer_count)
+            logger.info(
+                "sleep decision: light_sleep=True (reason=drowsy, energy=%.1f, buffer=%d)",
+                self._shadow["energy"], buffer_count,
+            )
             return True
         if buffer_count >= 90:
             logger.info("sleep decision: light_sleep=True (reason=buffer_full, buffer=%d)", buffer_count)
@@ -376,19 +379,33 @@ class SleepManager:
 
         merge_started_at = time.perf_counter()
         merged = ltm.merge_exact_duplicates()
-        logger.info("deep sleep merge duplicates finished in %.1f ms (merged=%d)", elapsed_ms(merge_started_at), merged)
+        logger.info(
+            "deep sleep merge duplicates finished in %.1f ms (merged=%d)",
+            elapsed_ms(merge_started_at), merged,
+        )
 
         prune_started_at = time.perf_counter()
         pruned = ltm.prune_low_importance()
-        logger.info("deep sleep prune low importance finished in %.1f ms (pruned=%d)", elapsed_ms(prune_started_at), pruned)
+        logger.info(
+            "deep sleep prune low importance finished in %.1f ms (pruned=%d)",
+            elapsed_ms(prune_started_at), pruned,
+        )
 
         maintenance_started_at = time.perf_counter()
         maintenance_operations = ltm.run_deep_sleep_maintenance()
-        logger.info("deep sleep maintenance finished in %.1f ms (ops=%d)", elapsed_ms(maintenance_started_at), maintenance_operations)
+        logger.info(
+            "deep sleep maintenance finished in %.1f ms (ops=%d)",
+            elapsed_ms(maintenance_started_at), maintenance_operations,
+        )
 
         purge_started_at = time.perf_counter()
-        expired_count = ltm.purge_inactive_memories(older_than_days=self._inactive_purge_days)
-        logger.info("deep sleep purge inactive finished in %.1f ms (expired=%d)", elapsed_ms(purge_started_at), expired_count)
+        expired_count = ltm.purge_inactive_memories(
+            older_than_days=self._inactive_purge_days,
+        )
+        logger.info(
+            "deep sleep purge inactive finished in %.1f ms (expired=%d)",
+            elapsed_ms(purge_started_at), expired_count,
+        )
 
         summary_started_at = time.perf_counter()
         deep_summary = _generate_deep_sleep_summary(
@@ -819,8 +836,16 @@ def _impression_needs_refresh(existing_entry: LongTermEntry, entries: list[Conve
     if last_entry_time is None:
         return False
     created_at = existing_entry.created_at
-    impression_time = created_at.astimezone(timezone.utc) if created_at.tzinfo is not None else created_at.replace(tzinfo=timezone.utc)
-    entry_time = last_entry_time.astimezone(timezone.utc) if last_entry_time.tzinfo is not None else last_entry_time.replace(tzinfo=timezone.utc)
+    impression_time = (
+        created_at.astimezone(timezone.utc)
+        if created_at.tzinfo is not None
+        else created_at.replace(tzinfo=timezone.utc)
+    )
+    entry_time = (
+        last_entry_time.astimezone(timezone.utc)
+        if last_entry_time.tzinfo is not None
+        else last_entry_time.replace(tzinfo=timezone.utc)
+    )
     return entry_time > impression_time
 
 
@@ -834,7 +859,11 @@ def _summarize_impression(
     entries: list[ConversationEntry],
     emotion: EmotionSnapshot,
 ) -> str:
-    dialogue = "\n".join(_impression_entry_line(entry, subject_name) for entry in entries if _impression_entry_line(entry, subject_name))
+    dialogue = "\n".join(
+        _impression_entry_line(entry, subject_name)
+        for entry in entries
+        if _impression_entry_line(entry, subject_name)
+    )
     if not dialogue:
         return ""
     contact_hint = _impression_contact_hint(source)

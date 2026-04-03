@@ -373,7 +373,6 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
     return max(-1.0, min(1.0, dot / (left_norm * right_norm)))
 
 
-
 def _normalize_text(text: str) -> str:
     return " ".join(str(text).replace("\n", " ").split())
 

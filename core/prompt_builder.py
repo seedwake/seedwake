@@ -442,8 +442,6 @@ def _emotion_alert(emotion: EmotionSnapshot) -> str:
     return "\n".join(alerts)
 
 
-
-
 def _format_recent_reflections(reflections: list[ReflectionPromptEntry]) -> str:
     seen: set[str] = set()
     lines: list[str] = []
@@ -717,7 +715,6 @@ def _trim_stagnation_prefix(candidate: str) -> str:
     while len(trimmed) >= 3 and trimmed[:1] in {"和", "与"}:
         trimmed = trimmed[1:]
     return trimmed
-
 
 
 def _format_running_actions(actions: list[ActionRecord], conversation_labels: dict[str, str]) -> str:

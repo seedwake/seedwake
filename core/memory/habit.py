@@ -377,7 +377,9 @@ class HabitMemory:
                 if limit is None:
                     cur.execute(
                         """
-                        SELECT id, pattern, category, strength, activation_count, last_activated, embedding, signal_type, signal_payload
+                        SELECT id, pattern, category, strength,
+                               activation_count, last_activated,
+                               embedding, signal_type, signal_payload
                         FROM habit_seeds
                         WHERE strength > 0.01
                         ORDER BY updated_at DESC, activation_count DESC, strength DESC
@@ -386,7 +388,9 @@ class HabitMemory:
                 else:
                     cur.execute(
                         """
-                        SELECT id, pattern, category, strength, activation_count, last_activated, embedding, signal_type, signal_payload
+                        SELECT id, pattern, category, strength,
+                               activation_count, last_activated,
+                               embedding, signal_type, signal_payload
                         FROM habit_seeds
                         WHERE strength > 0.01
                         ORDER BY strength DESC, activation_count DESC, updated_at DESC
@@ -887,8 +891,6 @@ def _habit_recency_bonus(last_activated: datetime | None) -> float:
     tz = last_activated.tzinfo or datetime.now().astimezone().tzinfo
     age_days = max(0.0, (datetime.now(tz) - last_activated).total_seconds() / 86400.0)
     return max(0.0, 1.0 - min(age_days / 7.0, 1.0))
-
-
 
 
 def _embed_habit_pattern(

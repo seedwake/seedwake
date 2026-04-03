@@ -178,7 +178,11 @@ class PrefrontalManager:
             guidance = payload.get("guidance")
             inhibition_notes = payload.get("inhibition_notes")
             plan_mode = bool(payload.get("plan_mode"))
-            if not isinstance(goal_stack, list) or not isinstance(guidance, list) or not isinstance(inhibition_notes, list):
+            if (
+                not isinstance(goal_stack, list)
+                or not isinstance(guidance, list)
+                or not isinstance(inhibition_notes, list)
+            ):
                 return
             self._last_state = {
                 "goal_stack": [str(item) for item in goal_stack],
