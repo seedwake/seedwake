@@ -746,7 +746,7 @@ def _summarize_light_sleep_batch(
         return ""
     prompt = (
         "把下面这些我最近的经历压缩成一条更抽象的语义记忆。"
-        "用第一人称（我），保留事实、关系、认识或稳定结论，"
+        "用第一人称\"我\"，保留事实、关系、认识或稳定结论，"
         "不要逐条复读，不要项目符号，控制在 180 字以内。\n\n"
         f"当前情绪：{emotion['summary']}\n"
         "经历：\n"
@@ -756,7 +756,7 @@ def _summarize_light_sleep_batch(
         response = client.chat(
             model=str(model_config["name"]),
             messages=[
-                {"role": "system", "content": "你在压缩自己的短期经历，用（我）做主语，只输出一条中文语义记忆。"},
+                {"role": "system", "content": "你在压缩自己的短期经历，用\"我\"做主语，只输出一条中文语义记忆。"},
                 {"role": "user", "content": prompt},
             ],
             options={"temperature": 0.2, "max_tokens": 160},
@@ -895,7 +895,7 @@ def _summarize_impression(
         response = client.chat(
             model=str(model_config["name"]),
             messages=[
-                {"role": "system", "content": "你在生成我对某人的印象摘要，用（我）做主语，只输出一段中文摘要。"},
+                {"role": "system", "content": "你在生成我对某人的印象摘要，用\"我\"做主语，只输出一段中文摘要。"},
                 {"role": "user", "content": prompt},
             ],
             options={"temperature": 0.2, "max_tokens": 180},
@@ -1025,7 +1025,7 @@ def _generate_deep_sleep_summary(
         response = client.chat(
             model=str(model_config["name"]),
             messages=[
-                {"role": "system", "content": "你在总结自己的一次深睡整理，用（我）做主语。只输出一句中文总结。"},
+                {"role": "system", "content": "你在总结自己的一次深睡整理，用\"我\"做主语。只输出一句中文总结。"},
                 {"role": "user", "content": prompt},
             ],
             options={"temperature": 0.2, "max_tokens": 80},
@@ -1072,7 +1072,7 @@ def _generate_deep_sleep_review(
         response = client.chat(
             model=str(model_config["name"]),
             messages=[
-                {"role": "system", "content": "你在做自己的深睡自评，用（我）做主语，只输出一段中文总结。"},
+                {"role": "system", "content": "你在做自己的深睡自评，用\"我\"做主语，只输出一段中文总结。"},
                 {"role": "user", "content": prompt},
             ],
             options={"temperature": 0.2, "max_tokens": 220},
