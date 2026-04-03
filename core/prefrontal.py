@@ -23,6 +23,7 @@ from core.common_types import (
     HabitPromptEntry,
     PrefrontalPromptState,
     RawActionRequest,
+    ReplyFocusPromptState,
     SleepStateSnapshot,
 )
 
@@ -129,10 +130,12 @@ class PrefrontalManager:
         sleep_state: SleepStateSnapshot,
         active_habits: list[HabitPromptEntry],
         recent_send_message_requests: list[ActionRequestPayload] | None = None,
+        reply_focus: ReplyFocusPromptState | None = None,
     ) -> tuple[list[Thought], list[str]]:
         if not self._inhibition_enabled:
             return thoughts, []
         conversation_signal = _foreground_conversation_signal(stimuli)
+        reply_focus_source = _reply_focus_source(reply_focus)
         recent_actions = _recent_action_contexts(
             recent_thoughts,
             recent_send_message_requests or [],
@@ -155,6 +158,7 @@ class PrefrontalManager:
                 inhibition_note = _inhibition_note(
                     action_request,
                     conversation_signal=conversation_signal,
+                    reply_focus_source=reply_focus_source,
                     sleep_mode=str(sleep_state["mode"]),
                     recent_actions=recent_actions,
                     manifested_impulses=manifested_impulses,
@@ -410,6 +414,12 @@ def _foreground_conversation_signal(stimuli: list[Stimulus]) -> ConversationSign
     )
 
 
+def _reply_focus_source(reply_focus: ReplyFocusPromptState | None) -> str:
+    if reply_focus is None:
+        return ""
+    return str(reply_focus.get("source") or "").strip()
+
+
 def _merged_conversation_count(stimulus: Stimulus) -> int:
     merged_count = stimulus.metadata.get("merged_count")
     if isinstance(merged_count, int) and merged_count > 0:
@@ -445,13 +455,14 @@ def _supports_foreground_reply(
 def _send_message_target_key(
     params: dict[str, str],
     conversation_signal: ConversationSignal | None,
+    reply_focus_source: str = "",
 ) -> str:
     explicit_target = _explicit_send_message_target_key(params)
     if explicit_target:
         return explicit_target
     if conversation_signal is not None:
         return conversation_signal.source
-    return ""
+    return reply_focus_source
 
 
 def _explicit_send_message_target_key(params: dict[str, str]) -> str:
@@ -598,6 +609,7 @@ def _inhibition_note(
     action_request: RawActionRequest,
     *,
     conversation_signal: ConversationSignal | None,
+    reply_focus_source: str,
     sleep_mode: str,
     recent_actions: list[RecentActionContext],
     manifested_impulses: dict[str, float],
@@ -609,6 +621,7 @@ def _inhibition_note(
     factors = _control_factors(
         action_request=action_request,
         conversation_signal=conversation_signal,
+        reply_focus_source=reply_focus_source,
         sleep_mode=sleep_mode,
         recent_actions=recent_actions,
         manifested_impulses=manifested_impulses,
@@ -634,6 +647,7 @@ def _control_factors(
     *,
     action_request: RawActionRequest,
     conversation_signal: ConversationSignal | None,
+    reply_focus_source: str,
     sleep_mode: str,
     recent_actions: list[RecentActionContext],
     manifested_impulses: dict[str, float],
@@ -661,6 +675,7 @@ def _control_factors(
             _send_message_factors(
                 action_request=action_request,
                 conversation_signal=conversation_signal,
+                reply_focus_source=reply_focus_source,
                 recent_actions=recent_actions,
             )
         )
@@ -698,10 +713,11 @@ def _send_message_factors(
     *,
     action_request: RawActionRequest,
     conversation_signal: ConversationSignal | None,
+    reply_focus_source: str,
     recent_actions: list[RecentActionContext],
 ) -> list[ControlFactor]:
     params = _action_params_map(str(action_request.get("params") or ""))
-    target_key = _send_message_target_key(params, conversation_signal)
+    target_key = _send_message_target_key(params, conversation_signal, reply_focus_source)
     repeated_message_count = _recent_similar_send_message_count(
         recent_actions,
         _explicit_send_message_target_key(params) or target_key,

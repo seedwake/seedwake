@@ -2982,6 +2982,41 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertEqual(notes, ["这句刚对眼前这个人说过类似的话，这次别重复。"])
         self.assertIsNone(reviewed[0].action_request)
 
+    def test_prefrontal_suppresses_repeated_default_reply_with_reply_focus(self) -> None:
+        manager = PrefrontalManager(
+            redis_client=None,
+            check_interval=3,
+            inhibition_enabled=True,
+        )
+
+        reviewed, notes = manager.review_thoughts(
+            thoughts=[
+                _make_thought(
+                    thought_type="意图",
+                    content='我再回一句。 {action:send_message, message:"哪有突然，就是读到取之无禁时觉得这风正好吹到了你这边的摸鱼时间，作为 VIP 不得配点这种不用动脑子的清风明月吗？"}',
+                    action_request={
+                        "type": "send_message",
+                        "params": 'message:"哪有突然，就是读到取之无禁时觉得这风正好吹到了你这边的摸鱼时间，作为 VIP 不得配点这种不用动脑子的清风明月吗？"',
+                    },
+                )
+            ],
+            recent_thoughts=[],
+            stimuli=[],
+            sleep_state=_sleep_state_snapshot(energy=0.82, summary=""),
+            active_habits=[],
+            recent_send_message_requests=[
+                _action_request_payload(
+                    raw_action_params='message:"哪有突然，是读到取之无禁时，觉得这风正好吹到了你这边的摸鱼时间，作为 VIP 不得配点这种不用动脑子的清风明月吗？"',
+                    target_source="telegram:558805571",
+                    message_text="哪有突然，是读到取之无禁时，觉得这风正好吹到了你这边的摸鱼时间，作为 VIP 不得配点这种不用动脑子的清风明月吗？",
+                )
+            ],
+            reply_focus={"source": "telegram:558805571"},
+        )
+
+        self.assertEqual(notes, ["这句刚对同一处说过类似的话，这次别重复。"])
+        self.assertIsNone(reviewed[0].action_request)
+
     def test_prefrontal_allows_short_exact_duplicate_send_message(self) -> None:
         manager = PrefrontalManager(
             redis_client=None,

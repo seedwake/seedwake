@@ -1363,6 +1363,7 @@ def _generate_reviewed_thoughts(
         prompt_context.sleep_state,
         prompt_context.active_habits,
         runtime.action_manager.recent_send_message_requests(),
+        prompt_context.reply_focus,
     )
     logger.info(
         "cycle C%s prefrontal review finished in %.1f ms (inhibited=%d%s)",
