@@ -991,6 +991,15 @@ def _execute_cycle(
             embedding_client=runtime.embedding_client,
             embedding_model=runtime.embedding_model,
         )
+        manifested = [h for h in active_habits if h.get("manifested")]
+        if active_habits:
+            logger.info(
+                "cycle C%s active habits: %d total, %d manifested%s",
+                cycle_id,
+                len(active_habits),
+                len(manifested),
+                f" [{', '.join(h['pattern'][:30] for h in manifested)}]" if manifested else "",
+            )
         prefrontal_state = runtime.prefrontal.current_state(
             cycle_id,
             identity,
@@ -1080,11 +1089,13 @@ def _execute_cycle(
             active_habits=active_habits,
         )
         thoughts = attention_result.thoughts
+        attention_weights = {t.thought_id: round(t.attention_weight, 3) for t in thoughts}
         logger.info(
-            "cycle C%s attention evaluation finished in %.1f ms (anchor=%s)",
+            "cycle C%s attention evaluation finished in %.1f ms (anchor=%s, weights=%s)",
             cycle_id,
             elapsed_ms(attention_started_at),
             attention_result.anchor_thought_id,
+            attention_weights,
         )
         inhibition_started_at = time.perf_counter()
         thoughts, inhibition_notes = runtime.prefrontal.review_thoughts(
@@ -1096,13 +1107,16 @@ def _execute_cycle(
             runtime.action_manager.recent_send_message_requests(),
         )
         logger.info(
-            "cycle C%s prefrontal review finished in %.1f ms (inhibited=%d)",
+            "cycle C%s prefrontal review finished in %.1f ms (inhibited=%d%s)",
             cycle_id,
             elapsed_ms(inhibition_started_at),
             len(inhibition_notes),
+            f", notes={inhibition_notes}" if inhibition_notes else "",
         )
         failure_count = _failed_action_echo_count(stimuli)
         degeneration_alert = _detect_runtime_degeneration(recent_thoughts, thoughts)
+        if degeneration_alert:
+            logger.info("cycle C%s degeneration detected", cycle_id)
         manas_started_at = time.perf_counter()
         manas_state = runtime.manas.evaluate_cycle(
             cycle_id=cycle_id,
@@ -1171,10 +1185,15 @@ def _execute_cycle(
             inhibited_actions=len(inhibition_notes),
             degeneration_alert=degeneration_alert,
         )
+        updated_emotion = runtime.emotion.current()
+        emotion_dims = {k: round(v, 2) for k, v in updated_emotion["dimensions"].items() if v > 0.05}
         logger.info(
-            "cycle C%s emotion update finished in %.1f ms",
+            "cycle C%s emotion update finished in %.1f ms (dominant=%s, dims=%s, summary=%s)",
             cycle_id,
             elapsed_ms(emotion_started_at),
+            updated_emotion["dominant"],
+            emotion_dims,
+            updated_emotion["summary"][:60],
         )
         stm_started_at = time.perf_counter()
         runtime.stm.append(thoughts)
