@@ -950,18 +950,19 @@ class CycleTimingLogTests(unittest.TestCase):
         self.assertEqual(second_images, ["frame-base64"])
 
     @patch("core.main.capture_camera_frame")
-    def test_capture_cycle_images_skips_non_ollama_provider(
+    def test_capture_cycle_images_allows_openai_compatible_provider(
         self,
         mock_capture_camera_frame: MagicMock,
     ) -> None:
         runtime = _build_execute_cycle_runtime()
         runtime.camera_stream_url = "http://localhost:8081"
         runtime.primary_client.provider = "openai_compatible"
+        mock_capture_camera_frame.return_value = "frame-base64"
 
         images = _capture_cycle_images(_as_runtime(runtime))
 
-        self.assertIsNone(images)
-        mock_capture_camera_frame.assert_not_called()
+        self.assertEqual(images, ["frame-base64"])
+        mock_capture_camera_frame.assert_called_once_with("http://localhost:8081")
 
 
 class Phase4RuntimeTests(unittest.TestCase):

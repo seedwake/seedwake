@@ -77,7 +77,7 @@ perception:
   system_status_warn_load_ratio: 1.0
   system_status_warn_memory_ratio: 0.9
   system_status_warn_disk_ratio: 0.9
-  # Camera MJPEG stream URL for visual perception (currently used by Ollama primary generate)
+  # Camera MJPEG stream URL for visual perception (used by primary generate for multimodal-capable providers)
   # Leave empty to disable camera input
   # camera_stream_url: "http://localhost:8081"
 

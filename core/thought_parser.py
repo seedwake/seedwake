@@ -67,7 +67,8 @@ def parse_thoughts(raw_output: str, cycle_id: int) -> list[Thought]:
 
 def fallback_thought(raw_output: str, cycle_id: int) -> Thought:
     """Wrap unparseable raw output as a single thought."""
-    return _make_thought(cycle_id, 1, "思考", _clip_text(raw_output))
+    content = _clip_text(raw_output) or "（本轮生成为空）"
+    return _make_thought(cycle_id, 1, "思考", content)
 
 
 def thought_action_requests(thought: Thought) -> list[RawActionRequest]:

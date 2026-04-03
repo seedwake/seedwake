@@ -221,10 +221,12 @@ class SleepManager:
             if thought.content.strip() in archive_preparation.already_stored:
                 archived_ids.append(thought.thought_id)
         for thought in archive_preparation.new_candidates:
+            if not thought.content.strip():
+                continue
             content_group = archive_preparation.grouped_new_candidates.get(thought.content.strip(), [thought])
             try:
                 embedding = embed_text(embedding_client, thought.content, embedding_model)
-            except MODEL_CLIENT_EXCEPTIONS:
+            except (*MODEL_CLIENT_EXCEPTIONS, IndexError):
                 continue
             entry_id = ltm.store(
                 content=thought.content,

@@ -31,9 +31,11 @@ OPENAI_COMPAT_GENERATE_SYSTEM_PROMPT = (
 )
 OPENAI_COMPAT_GENERATE_USER_MARKER = "\u200b"
 OPENAI_COMPAT_GENERATE_USER_GUARD = (
-    "最后一条 user message 只是内部周期唤醒标记，"
+    "最后一条 user message 里的文本只是内部周期唤醒标记，"
     "不代表有人对我说话，也不是我需要回应的外部刺激。"
-    "不要提及它，也不要把它解释成对话内容。"
+    "如果其中附带图片，那是我此刻被动看到的一帧环境，不是别人要求我分析的任务；"
+    "只有在它自然牵引念头时才纳入思考。"
+    "不要提及这个唤醒标记，也不要把它解释成对话内容。"
 )
 MODEL_CLIENT_EXCEPTIONS = (
     OllamaRequestError,
@@ -83,10 +85,14 @@ class ModelClient:
         raise NotImplementedError
 
 
-def build_generation_request_log(client: ModelClient, prompt: str) -> str:
+def build_generation_request_log(
+    client: ModelClient,
+    prompt: str,
+    images: list[str] | None = None,
+) -> str:
     if client.provider not in {"openclaw", "openai_compatible"}:
         return prompt
-    return _format_generation_messages_for_log(_openai_generate_messages(prompt))
+    return _format_generation_messages_for_log(_openai_generate_messages(prompt, images=images))
 
 
 class OllamaModelClient(ModelClient):
@@ -191,6 +197,8 @@ class OllamaModelClient(ModelClient):
         status = "failed"
         try:
             response = self._client.embed(model=model, input=text)
+            if not response.embeddings:
+                raise ValueError(f"embed returned empty embeddings for {len(text)} chars")
             embedding = list(response.embeddings[0])
             status = "ok"
             return embedding
@@ -254,11 +262,9 @@ class OpenAICompatibleModelClient(ModelClient):
         if images:
             detail = f"{detail}, images={len(images)}"
         try:
-            if images:
-                raise RuntimeError(f"{self.provider} 主生成暂不支持图像输入")
             body = self._chat_completions(
                 model=model_config["name"],
-                messages=_openai_generate_messages(prompt),
+                messages=_openai_generate_messages(prompt, images=images),
                 tools=None,
                 options={
                     "temperature": model_config.get("temperature", 0.8),
@@ -592,7 +598,10 @@ def _log_model_call(
     )
 
 
-def _openai_generate_messages(prompt: str) -> list[JsonObject]:
+def _openai_generate_messages(
+    prompt: str,
+    images: list[str] | None = None,
+) -> list[JsonObject]:
     return [
         {
             "role": "system",
@@ -602,8 +611,29 @@ def _openai_generate_messages(prompt: str) -> list[JsonObject]:
                 f"{prompt}"
             ),
         },
-        {"role": "user", "content": OPENAI_COMPAT_GENERATE_USER_MARKER},
+        {"role": "user", "content": _openai_generate_user_content(images)},
     ]
+
+
+def _openai_generate_user_content(images: list[str] | None) -> str | list[JsonObject]:
+    if not images:
+        return OPENAI_COMPAT_GENERATE_USER_MARKER
+    content_parts: list[JsonObject] = [{
+        "type": "text",
+        "text": OPENAI_COMPAT_GENERATE_USER_MARKER,
+    }]
+    for image in images:
+        content_parts.append(_openai_generate_image_part(image))
+    return content_parts
+
+
+def _openai_generate_image_part(image_base64: str) -> JsonObject:
+    return {
+        "type": "image_url",
+        "image_url": {
+            "url": f"data:image/jpeg;base64,{image_base64}",
+        },
+    }
 
 
 def _openai_message_content(response: JsonObject) -> str:
@@ -617,15 +647,35 @@ def _format_generation_messages_for_log(messages: list[JsonObject]) -> str:
     parts: list[str] = []
     for message in messages:
         role = str(message.get("role") or "message").upper()
-        content = _generation_log_message_content(str(message.get("content") or ""))
+        content = _generation_log_message_content(message.get("content"))
         parts.append(f"[{role}]\n{content}")
     return "\n\n".join(parts)
 
 
-def _generation_log_message_content(content: str) -> str:
-    if content == OPENAI_COMPAT_GENERATE_USER_MARKER:
+def _generation_log_message_content(content: JsonValue) -> str:
+    if isinstance(content, list):
+        return _generation_log_parts_content(content)
+    content_text = str(content or "")
+    if content_text == OPENAI_COMPAT_GENERATE_USER_MARKER:
         return "\\u200b"
-    return content
+    return content_text
+
+
+def _generation_log_parts_content(parts: list[JsonValue]) -> str:
+    rendered: list[str] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            rendered.append(str(part))
+            continue
+        part_type = str(part.get("type") or "")
+        if part_type == "text":
+            rendered.append(_generation_log_message_content(part.get("text")))
+            continue
+        if part_type == "image_url":
+            rendered.append("[image attached]")
+            continue
+        rendered.append(str(part))
+    return "\n".join(rendered)
 
 
 def _normalize_provider(raw_provider: JsonValue) -> str:

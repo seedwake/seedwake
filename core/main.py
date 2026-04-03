@@ -377,11 +377,6 @@ def _build_runtime_components(
             if isinstance(item, dict)
         ],
     )
-    if runtime.camera_stream_url and runtime.primary_client.provider != "ollama":
-        logger.warning(
-            "camera input is disabled for primary provider %s: only ollama generate currently supports images",
-            runtime.primary_client.provider,
-        )
     return runtime, identity
 
 
@@ -1400,7 +1395,7 @@ def _generate_reviewed_thoughts(
 
 
 def _capture_cycle_images(runtime: EngineRuntime) -> list[str] | None:
-    if not runtime.camera_stream_url or runtime.primary_client.provider != "ollama":
+    if not runtime.camera_stream_url:
         return None
     camera_frame = capture_camera_frame(runtime.camera_stream_url)
     if camera_frame is None:

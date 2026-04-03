@@ -40,34 +40,46 @@ def run_cycle(
     write_prompt_log_block(
         prompt_log_file,
         title=f"PROMPT C{cycle_id}",
-        prompt=build_generation_request_log(client, prompt),
+        prompt=build_generation_request_log(client, prompt, images=images),
         emoji="🟢",
     )
-    generation_started_at = time.perf_counter()
-    raw_output = _call_ollama(client, prompt, model_config, images=images)
-    generation_elapsed_ms = elapsed_ms(generation_started_at)
-    logger.info("cycle C%s generation finished in %.1f ms (chars=%d)", cycle_id, generation_elapsed_ms, len(raw_output))
-    parse_started_at = time.perf_counter()
-    thoughts = parse_thoughts(raw_output, cycle_id)
-    parse_elapsed_ms = elapsed_ms(parse_started_at)
-    logger.info("cycle C%s thought parsing finished in %.1f ms (count=%d)", cycle_id, parse_elapsed_ms, len(thoughts))
-
-    if not thoughts:
-        thoughts = [fallback_thought(raw_output, cycle_id)]
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        generation_started_at = time.perf_counter()
+        raw_output = _call_ollama(client, prompt, model_config, images=images)
+        generation_elapsed_ms = elapsed_ms(generation_started_at)
+        logger.info(
+            "cycle C%s generation finished in %.1f ms (chars=%d, attempt=%d)",
+            cycle_id, generation_elapsed_ms, len(raw_output), attempt,
+        )
+        parse_started_at = time.perf_counter()
+        thoughts = parse_thoughts(raw_output, cycle_id)
+        parse_elapsed_ms = elapsed_ms(parse_started_at)
+        logger.info(
+            "cycle C%s thought parsing finished in %.1f ms (count=%d)",
+            cycle_id, parse_elapsed_ms, len(thoughts),
+        )
+        if thoughts:
+            return thoughts
         if not raw_output.strip():
             fallback_reason = "empty_response"
         elif len(raw_output) < 10:
             fallback_reason = f"too_short ({len(raw_output)} chars)"
         else:
             fallback_reason = f"no_thought_headers_parsed ({len(raw_output)} chars)"
+        if attempt < max_attempts:
+            logger.warning(
+                "cycle C%s generation attempt %d failed (reason=%s), retrying",
+                cycle_id, attempt, fallback_reason,
+            )
+            continue
         logger.warning(
-            "cycle C%s used fallback thought (reason=%s, raw_preview=%s)",
-            cycle_id,
-            fallback_reason,
+            "cycle C%s used fallback thought after %d attempts (reason=%s, raw_preview=%s)",
+            cycle_id, max_attempts, fallback_reason,
             repr(raw_output[:200]) if raw_output else "(empty)",
         )
-
-    return thoughts
+        return [fallback_thought(raw_output, cycle_id)]
+    return [fallback_thought("", cycle_id)]
 
 
 def _call_generation_model(
