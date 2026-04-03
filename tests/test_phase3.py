@@ -4299,7 +4299,7 @@ class ActionManagerTests(unittest.TestCase):
     def test_note_rewrite_native_action_overwrites_note_and_persists_to_redis(self) -> None:
         queue = StimulusQueue(redis_client=None)
         redis_stub = ListRedisStub()
-        first_content = "第一版笔记" * 200
+        first_content = "第一版笔记" * 500
         second_content = "改成第二版"
         manager = _build_action_manager(
             queue,
@@ -4326,7 +4326,7 @@ class ActionManagerTests(unittest.TestCase):
         finally:
             manager.shutdown()
 
-        expected_first = first_content[:800].rstrip() + "..."
+        expected_first = first_content[:2000].rstrip() + "..."
         self.assertEqual(created_first[0].status, "succeeded")
         assert created_first[0].result is not None
         self.assertEqual(created_first[0].result["data"]["content"], expected_first)

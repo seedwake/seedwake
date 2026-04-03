@@ -45,7 +45,7 @@ ACTION_REDIS_KEY = "seedwake:actions"
 ACTION_CONTROL_KEY = "seedwake:action_control"
 NEWS_SEEN_REDIS_KEY = "seedwake:news_seen"
 NOTE_REDIS_KEY = "seedwake:note"
-NOTE_MAX_CHARS = 800
+NOTE_MAX_CHARS = 2000
 TELEGRAM_SEND_FINISHED_LOG = "telegram send finished in %.1f ms (target=%s, status=%s)"
 TELEGRAM_SOURCE_PREFIX = "telegram:"
 OPENCLAW_ACTION_TYPES = {"search", "web_fetch", "system_change", "custom", "weather", "reading", "file_modify"}
@@ -1712,7 +1712,7 @@ def _planner_tools() -> list[JsonObject]:
                     "properties": {
                         "content": {
                             "type": "string",
-                            "description": "要完整覆写到笔记里的内容，800 字以内。",
+                            "description": "要完整覆写到笔记里的内容，1000 字以内。",
                         },
                         "timeout_seconds": {
                             "type": "integer",
