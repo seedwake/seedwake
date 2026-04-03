@@ -1292,7 +1292,7 @@ def _summarize_recent_conversation(
                     {"role": "system", "content": RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
-                options={"temperature": 0.2, "max_tokens": 180},
+                options={"temperature": 0.2, "max_tokens": 300},
             )
         except MODEL_CLIENT_EXCEPTIONS as exc:
             logger.warning("recent conversation summary failed for %s: %s", source_name, exc)

@@ -906,7 +906,7 @@ def _summarize_impression(
                 {"role": "system", "content": "你在生成我对某人的印象摘要，用\"我\"做主语，只输出一段中文摘要。"},
                 {"role": "user", "content": prompt},
             ],
-            options={"temperature": 0.2, "max_tokens": 180},
+            options={"temperature": 0.2, "max_tokens": 300},
         )
     except MODEL_CLIENT_EXCEPTIONS:
         return ""
@@ -1036,7 +1036,7 @@ def _generate_deep_sleep_summary(
                 {"role": "system", "content": "你在总结自己的一次深睡整理，用\"我\"做主语。只输出一句中文总结。"},
                 {"role": "user", "content": prompt},
             ],
-            options={"temperature": 0.2, "max_tokens": 80},
+            options={"temperature": 0.2, "max_tokens": 120},
         )
     except MODEL_CLIENT_EXCEPTIONS:
         return ""

@@ -162,7 +162,7 @@ class MetacognitionManager:
                     {"role": "system", "content": REFLECTION_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
-                options={"temperature": 0.2, "max_tokens": 160},
+                options={"temperature": 0.2, "max_tokens": 200},
             )
         except MODEL_CLIENT_EXCEPTIONS:
             return None
