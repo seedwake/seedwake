@@ -1205,6 +1205,7 @@ class ActionPlanner:
         news_feed_urls: list[str],
         worker_agent_id: str,
         ops_worker_agent_id: str,
+        prompt_log_callback: Callable[[str, str, str], None] | None = None,
     ) -> None:
         self._client = client
         self._model_name = model_config["name"]
@@ -1213,10 +1214,30 @@ class ActionPlanner:
         self._news_feed_urls = [item.strip() for item in news_feed_urls if item.strip()]
         self._worker_agent_id = worker_agent_id.strip()
         self._ops_worker_agent_id = ops_worker_agent_id.strip()
+        self._prompt_log_callback = prompt_log_callback
         self._options = {
             "num_ctx": model_config.get("num_ctx", 32768),
             "temperature": 0.1,
         }
+
+    def _log_planner_prompt(
+        self,
+        thought_id: str,
+        messages: list[dict[str, str]],
+        mode: str,
+    ) -> None:
+        if self._prompt_log_callback is None:
+            return
+        parts = []
+        for msg in messages:
+            role = msg.get("role", "unknown").upper()
+            content = msg.get("content", "")
+            parts.append(f"[{role}]\n{content}")
+        self._prompt_log_callback(
+            f"PLANNER {thought_id} ({mode})",
+            "\n\n".join(parts),
+            "🔵",
+        )
 
     def plan(
         self,
@@ -1228,9 +1249,11 @@ class ActionPlanner:
         action_request = thought.action_request or {}
         raw_action_type = str(action_request.get("type") or "")
         if self._client.supports_tool_calls:
+            messages = _planner_messages(thought, conversation_source=conversation_source)
+            self._log_planner_prompt(thought.thought_id, messages, mode="tool")
             response = self._client.chat(
                 model=self._model_name,
-                messages=_planner_messages(thought, conversation_source=conversation_source),
+                messages=messages,
                 tools=_planner_tools(),
                 options=self._options,
             )
@@ -1277,9 +1300,11 @@ class ActionPlanner:
             )
             return plan
 
+        json_messages = _planner_json_messages(thought, conversation_source=conversation_source)
+        self._log_planner_prompt(thought.thought_id, json_messages, mode="json")
         response = self._client.chat(
             model=self._model_name,
-            messages=_planner_json_messages(thought, conversation_source=conversation_source),
+            messages=json_messages,
             options={**self._options, "max_tokens": 512},
         )
         message = response.get("message")
@@ -1315,6 +1340,7 @@ def create_action_manager(
     news_seen_max_items: int = 5000,
     log_callback: Callable[[str], None] | None = None,
     event_callback: Callable[[str, JsonObject], None] | None = None,
+    prompt_log_callback: Callable[[str, str, str], None] | None = None,
 ) -> ActionManager:
     planner = ActionPlanner(
         planner_client,
@@ -1324,6 +1350,7 @@ def create_action_manager(
         list(news_feed_urls or []),
         str(action_config.get("worker_agent_id", "seedwake-worker")),
         str(action_config.get("ops_worker_agent_id", "seedwake-ops")),
+        prompt_log_callback=prompt_log_callback,
     )
     openclaw_executor = OpenClawGatewayExecutor(
         gateway_url=_read_env("OPENCLAW_GATEWAY_URL"),

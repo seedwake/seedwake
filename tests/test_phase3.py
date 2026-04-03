@@ -3543,7 +3543,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             priority=2,
             source="action:act_send",
             content='已成功发送给 telegram:1：“我在。”',
-            timestamp=datetime.now(timezone.utc) - timedelta(seconds=601),
+            timestamp=datetime.now(timezone.utc) - timedelta(seconds=5401),
             action_id="act_send",
             metadata={
                 "origin": "action",
@@ -3555,7 +3555,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         recent = load_recent_action_echoes(
             _as_conversation_redis(redis_client),
-            current_cycle_id=10,
+            current_cycle_id=20,
             exclude_action_ids=set(),
         )
 

@@ -230,6 +230,7 @@ def main() -> None:
     runtime, identity = _build_runtime_components(
         config,
         log_file,
+        prompt_log_file,
         primary_client,
         auxiliary_client,
         embedding_client,
@@ -256,6 +257,7 @@ def _create_connections(
 def _build_runtime_components(
     config: dict,
     log_file: TextIO | None,
+    prompt_log_file: TextIO | None,
     primary_client: ModelClient,
     auxiliary_client: ModelClient,
     embedding_client: ModelClient,
@@ -338,6 +340,9 @@ def _build_runtime_components(
         news_seen_max_items=int((config.get("perception", {}) or {}).get("news_seen_max_items", 5000)),
         log_callback=lambda text: _output(log_file, text),
         event_callback=lambda event_type, payload: _publish_event(stm.redis_client, event_type, payload),
+        prompt_log_callback=lambda title, prompt, emoji: write_prompt_log_block(
+            prompt_log_file, title=title, prompt=prompt, emoji=emoji,
+        ),
     )
     runtime = EngineRuntime(
         primary_client=primary_client,
@@ -1122,6 +1127,7 @@ def _execute_cycle(
                 thoughts,
                 stimuli,
                 recent_conversations,
+                prompt_log_file,
             )
             if reroll_reason:
                 logger.info("cycle C%s degeneration intervention reroll triggered: %s", cycle_id, reroll_reason)
@@ -1156,6 +1162,7 @@ def _execute_cycle(
                     thoughts,
                     stimuli,
                     recent_conversations,
+                    prompt_log_file,
                 )
         failure_count = _failed_action_echo_count(stimuli)
         degeneration_alert = _detect_runtime_degeneration(recent_thoughts, thoughts)
@@ -1170,6 +1177,7 @@ def _execute_cycle(
                 stimuli=stimuli,
                 recent_conversations=recent_conversations,
                 note_text=note_text,
+                prompt_log_file=prompt_log_file,
             )
         else:
             runtime.degeneration_intervention = _advance_degeneration_intervention(
@@ -1385,6 +1393,7 @@ def _build_degeneration_intervention(
     stimuli: list[Stimulus],
     recent_conversations: list[RecentConversationPrompt],
     note_text: str,
+    prompt_log_file: TextIO | None = None,
 ) -> DegenerationIntervention:
     fallback = _fallback_degeneration_intervention(
         cycle_id=cycle_id,
@@ -1398,6 +1407,12 @@ def _build_degeneration_intervention(
         stimuli=stimuli,
         recent_conversations=recent_conversations,
         note_text=note_text,
+    )
+    write_prompt_log_block(
+        prompt_log_file,
+        title=f"DEGENERATION INTERVENTION C{cycle_id}",
+        prompt=f"[SYSTEM]\n{DEGENERATION_INTERVENTION_SYSTEM_PROMPT}\n\n[USER]\n{request}",
+        emoji="🟠",
     )
     try:
         response = client.chat(
@@ -1433,6 +1448,7 @@ def _degeneration_reroll_reason(
     thoughts: list[Thought],
     stimuli: list[Stimulus],
     recent_conversations: list[RecentConversationPrompt],
+    prompt_log_file: TextIO | None = None,
 ) -> str | None:
     qualifying_actions = _qualifying_external_actions(thoughts)
     if intervention["must_externalize"] and not qualifying_actions:
@@ -1443,6 +1459,12 @@ def _degeneration_reroll_reason(
         stimuli=stimuli,
         recent_conversations=recent_conversations,
         qualifying_actions=qualifying_actions,
+    )
+    write_prompt_log_block(
+        prompt_log_file,
+        title=f"DEGENERATION REVIEW C{intervention['source_cycle_id']}",
+        prompt=f"[SYSTEM]\n{DEGENERATION_REVIEW_SYSTEM_PROMPT}\n\n[USER]\n{request}",
+        emoji="🟡",
     )
     try:
         response = client.chat(
@@ -1469,6 +1491,11 @@ def _degeneration_reroll_reason(
         return None
     reroll = bool(payload.get("reroll"))
     reason = _single_line(str(payload.get("reason") or ""))
+    logger.info(
+        "degeneration review result: reroll=%s, reason=%s",
+        reroll,
+        reason or "(none)",
+    )
     if reroll:
         return reason or "这一轮仍然在沿着旧轨道改写，没有真正完成转向。"
     return None
