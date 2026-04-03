@@ -1,6 +1,7 @@
 """Shared structured types and utilities."""
 
 import itertools
+import re
 import time
 from typing import NotRequired, TypedDict
 
@@ -311,6 +312,28 @@ def coerce_json_object(value: object) -> JsonObject | None:
     if not isinstance(value, dict):
         return None
     return {str(key): coerce_json_value(item) for key, item in value.items()}
+
+
+def canonical_person_entity_tag(entity_tag: str) -> str | None:
+    normalized = entity_tag.strip().lower()
+    if not normalized:
+        return None
+    if normalized.startswith("entity:"):
+        normalized = normalized.removeprefix("entity:")
+    if not normalized.startswith("person:"):
+        return None
+    if normalized == "person:":
+        return None
+    return normalized
+
+
+def person_entity_tag_from_telegram_username(username: str) -> str | None:
+    normalized = username.strip().lstrip("@").lower()
+    if not normalized:
+        return None
+    if re.fullmatch(r"[a-z0-9_]+", normalized) is None:
+        return None
+    return f"person:{normalized}"
 
 
 def bigram_similarity(left: str, right: str) -> float:

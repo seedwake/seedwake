@@ -29,19 +29,21 @@ from core.main import (
     _open_log,
     _open_prompt_log,
     _retrieve_associations,
+    _resolve_contact_target_for_entity,
     _store_to_ltm,
 )
 from core.memory.short_term import LATEST_CYCLE_KEY
 from core.memory.identity import load_identity
 from core.memory.long_term import LongTermEntry, LongTermMemory
 # noinspection PyProtectedMember
-from core.sleep import SleepManager, _archive_action_result_memories, _light_sleep_trace_line
+from core.sleep import SleepManager, _archive_action_result_memories, _light_sleep_trace_line, _update_impression_memories
 # noinspection PyProtectedMember
 from core.memory.short_term import ShortTermMemory, _thought_to_dict, _dict_to_thought
-from core.stimulus import Stimulus
+from core.stimulus import Stimulus, append_conversation_history
 from core.thought_parser import Thought
 from core.common_types import EmotionSnapshot, JsonObject, ManasPromptState, PrefrontalPromptState, SleepStateSnapshot
 from core.model_client import ModelClient
+from test_support import ListRedisStub
 
 
 def _make_thought(cycle_id: int = 1, index: int = 1, content: str = "test") -> Thought:
@@ -605,6 +607,22 @@ class LongTermMemoryTests(unittest.TestCase):
         target = ltm.resolve_telegram_target_for_entity("person:alice")
 
         self.assertEqual(target, "telegram:123456")
+
+    def test_resolve_contact_target_falls_back_to_recent_conversation_username(self) -> None:
+        redis_client = ListRedisStub()
+        append_conversation_history(
+            redis_client,
+            role="user",
+            source="telegram:558805571",
+            content="你好",
+            metadata={"telegram_username": "Flight5586", "telegram_full_name": "Flight5586"},
+            timestamp=datetime.now(timezone.utc),
+        )
+        ltm = LongTermMemory(None)
+
+        target = _resolve_contact_target_for_entity(redis_client, ltm, "person:flight5586")
+
+        self.assertEqual(target, "telegram:558805571")
 
     def test_store_skips_exact_duplicate_content(self) -> None:
         mock_conn = MagicMock()
@@ -1195,6 +1213,48 @@ class Phase4RuntimeTests(unittest.TestCase):
         line = _light_sleep_trace_line(thought)
 
         self.assertEqual(line, "[意图] 我想直接回一句。")
+
+    @patch("core.sleep.embed_text", return_value=[0.1, 0.2])
+    @patch("core.sleep._summarize_impression", return_value="关系: 朋友。联系方式: telegram:558805571。")
+    def test_update_impression_memories_stores_person_alias_tag(
+        self,
+        _mock_summarize: MagicMock,
+        _mock_embed: MagicMock,
+    ) -> None:
+        redis_client = ListRedisStub()
+        append_conversation_history(
+            redis_client,
+            role="user",
+            source="telegram:558805571",
+            content="你好",
+            metadata={"telegram_username": "Flight5586", "telegram_full_name": "Flight5586"},
+            timestamp=datetime.now(timezone.utc),
+        )
+        ltm = MagicMock()
+        ltm.recent_by_time.return_value = []
+        ltm.upsert_impression.return_value = 1
+
+        updated = _update_impression_memories(
+            redis_client,
+            ltm,
+            MagicMock(),
+            "embed-model",
+            MagicMock(),
+            {"name": "aux"},
+            cycle_id=12,
+            emotion=_emotion_snapshot(summary="平静 0.40"),
+        )
+
+        self.assertEqual(updated, 1)
+        ltm.upsert_impression.assert_called_once_with(
+            primary_entity_tag="telegram:558805571",
+            related_entity_tags=["person:flight5586"],
+            content="关系: 朋友。联系方式: telegram:558805571。",
+            embedding=[0.1, 0.2],
+            source_cycle_id=12,
+            importance=0.68,
+            emotion_context=unittest.mock.ANY,
+        )
 
     @patch("core.sleep.embed_text", return_value=[0.1, 0.2])
     def test_archive_action_result_memories_returns_duplicate_ids_for_cleanup(

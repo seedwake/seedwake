@@ -23,7 +23,14 @@ from core.stimulus import (
     load_conversation_history,
 )
 from core.thought_parser import Thought, strip_action_markers
-from core.common_types import ConversationEntry, EmotionSnapshot, JsonObject, SleepStateSnapshot, elapsed_ms
+from core.common_types import (
+    ConversationEntry,
+    EmotionSnapshot,
+    JsonObject,
+    SleepStateSnapshot,
+    elapsed_ms,
+    person_entity_tag_from_telegram_username,
+)
 
 SLEEP_STATE_KEY = "seedwake:sleep_state"
 LIGHT_SLEEP_SEMANTIC_BATCH_MAX_CHARS = 1800
@@ -801,7 +808,8 @@ def _update_impression_memories(
         except MODEL_CLIENT_EXCEPTIONS:
             continue
         entry_id = ltm.upsert_impression(
-            entity_tag=source,
+            primary_entity_tag=source,
+            related_entity_tags=_impression_related_entity_tags(entries),
             content=impression,
             embedding=embedding,
             source_cycle_id=cycle_id,
@@ -917,6 +925,20 @@ def _impression_subject_name(source: str, entries: list[ConversationEntry]) -> s
         if username:
             return username
     return source
+
+
+def _impression_related_entity_tags(entries: list[ConversationEntry]) -> list[str]:
+    tags: list[str] = []
+    seen: set[str] = set()
+    for entry in reversed(entries):
+        metadata = entry.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        person_tag = person_entity_tag_from_telegram_username(str(metadata.get("telegram_username") or ""))
+        if person_tag and person_tag not in seen:
+            seen.add(person_tag)
+            tags.append(person_tag)
+    return tags
 
 
 def _impression_contact_hint(source: str) -> str:

@@ -382,7 +382,8 @@ class LongTermMemory:
     def upsert_impression(
         self,
         *,
-        entity_tag: str,
+        primary_entity_tag: str,
+        related_entity_tags: list[str] | None,
         content: str,
         embedding: list[float],
         source_cycle_id: int | None,
@@ -395,9 +396,10 @@ class LongTermMemory:
         if conn is None:
             return None
         normalized_content = content.strip()
-        normalized_tag = entity_tag.strip()
+        normalized_tag = primary_entity_tag.strip()
         if not normalized_content or not normalized_tag:
             return None
+        entity_tags = _normalized_impression_entity_tags(normalized_tag, related_entity_tags)
         vec_literal = _format_vector(embedding)
         try:
             entry_id: int | None = None
@@ -425,7 +427,7 @@ class LongTermMemory:
                     (
                         normalized_content,
                         vec_literal,
-                        [normalized_tag, "_impression"],
+                        entity_tags,
                         source_cycle_id,
                         importance,
                         _jsonb_or_none(emotion_context),
@@ -671,6 +673,21 @@ def _entity_tag_candidates(entity_tag: str) -> list[str]:
         canonical = normalized.removeprefix("entity:")
         return [canonical, legacy]
     return [normalized, f"entity:{normalized}"]
+
+
+def _normalized_impression_entity_tags(
+    primary_entity_tag: str,
+    related_entity_tags: list[str] | None,
+) -> list[str]:
+    tags: list[str] = []
+    seen: set[str] = set()
+    for tag in [primary_entity_tag, *(related_entity_tags or []), "_impression"]:
+        normalized = tag.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        tags.append(normalized)
+    return tags
 
 
 def _row_first_int(row: tuple[int | None, ...] | list[int | None] | None) -> int | None:

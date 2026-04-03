@@ -51,6 +51,7 @@ from core.stimulus import (
     RECENT_CONVERSATION_SUMMARY_MAX_CHARS,
     Stimulus,
     StimulusQueue,
+    load_conversation_history,
     load_recent_action_echoes,
     load_recent_conversations,
     remember_recent_action_echoes,
@@ -59,6 +60,7 @@ from core.thought_parser import Thought, thought_action_requests
 from core.common_types import (
     ConversationEntry,
     DegenerationIntervention,
+    canonical_person_entity_tag,
     coerce_json_object,
     detect_rewritten_repetition,
     EventPayload,
@@ -69,6 +71,7 @@ from core.common_types import (
     RecentConversationPrompt,
     RawActionRequest,
     StatusEventPayload,
+    person_entity_tag_from_telegram_username,
     rewritten_pair_match_counts,
     elapsed_ms,
 )
@@ -329,7 +332,7 @@ def _build_runtime_components(
         primary_client,
         model_config,
         config.get("actions", {}),
-        contact_resolver=ltm.resolve_telegram_target_for_entity,
+        contact_resolver=lambda entity: _resolve_contact_target_for_entity(redis_client, ltm, entity),
         news_feed_urls=list((config.get("perception", {}) or {}).get("news_feed_urls", [])),
         news_seen_ttl_hours=int((config.get("perception", {}) or {}).get("news_seen_ttl_hours", 720)),
         news_seen_max_items=int((config.get("perception", {}) or {}).get("news_seen_max_items", 5000)),
@@ -2532,6 +2535,37 @@ def _as_manas_redis(redis_client: redis_lib.Redis | None) -> ManasRedisLike | No
 
 def _as_sleep_redis(redis_client: redis_lib.Redis | None) -> SleepRedisLike | None:
     return redis_client  # type: ignore[return-value]
+
+
+def _resolve_contact_target_for_entity(
+    redis_client: redis_lib.Redis | None,
+    ltm: LongTermMemory,
+    entity_tag: str,
+) -> str | None:
+    target = ltm.resolve_telegram_target_for_entity(entity_tag)
+    if target:
+        return target
+    return _resolve_recent_telegram_target_for_entity(_as_conversation_redis(redis_client), entity_tag)
+
+
+def _resolve_recent_telegram_target_for_entity(
+    redis_client: ConversationRedisLike | None,
+    entity_tag: str,
+) -> str | None:
+    person_tag = canonical_person_entity_tag(entity_tag)
+    if redis_client is None or person_tag is None:
+        return None
+    history = load_conversation_history(redis_client, limit=240)
+    for entry in reversed(history):
+        source = str(entry.get("source") or "").strip()
+        if not source.startswith("telegram:"):
+            continue
+        metadata = entry.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if person_entity_tag_from_telegram_username(str(metadata.get("telegram_username") or "")) == person_tag:
+            return source
+    return None
 
 
 def _load_config(path: str) -> dict:
