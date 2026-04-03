@@ -1,6 +1,7 @@
 """Metacognition and reflection generation for Phase 4."""
 
 import json
+import logging
 import re
 from datetime import datetime, timezone
 
@@ -21,6 +22,8 @@ METACOGNITION_REDIS_EXCEPTIONS = (
     ValueError,
     OSError,
 )
+logger = logging.getLogger(__name__)
+
 REFLECTION_SYSTEM_PROMPT = (
     "你在做一次元认知反思。"
     "回看最近的念头流、情绪、目标、习气和失败情况，"
@@ -84,21 +87,39 @@ class MetacognitionManager:
         stimuli_changed: bool,
         manas_reflection_requested: bool = False,
     ) -> bool:
+        cycles_since = cycle_id - self._last_reflection_cycle
+        dominant = emotion["dominant"]
+        dominant_strength = emotion["dimensions"].get(dominant, 0.0)
+        reason = ""
         if manas_reflection_requested and _manas_reflection_due(
             cycle_id,
             self._last_reflection_cycle,
             self._reflection_interval,
         ):
+            reason = "manas_requested"
+        elif cycles_since >= self._reflection_interval:
+            reason = f"interval_reached ({cycles_since} >= {self._reflection_interval})"
+        elif dominant_strength >= 0.75:
+            reason = f"strong_emotion ({dominant}={dominant_strength:.2f})"
+        elif degeneration_alert or failure_count >= 2:
+            reason = f"degeneration={degeneration_alert} failures={failure_count}"
+        elif stimuli_changed and dominant_strength >= 0.65:
+            reason = f"stimuli_changed + emotion ({dominant}={dominant_strength:.2f})"
+        if reason:
+            logger.info(
+                "metacognition should_reflect=True (reason=%s, last_reflect=C%d)",
+                reason,
+                self._last_reflection_cycle,
+            )
             return True
-        if cycle_id - self._last_reflection_cycle >= self._reflection_interval:
-            return True
-        dominant_strength = emotion["dimensions"].get(emotion["dominant"], 0.0)
-        if dominant_strength >= 0.75:
-            return True
-        if degeneration_alert or failure_count >= 2:
-            return True
-        if stimuli_changed and dominant_strength >= 0.65:
-            return True
+        logger.info(
+            "metacognition should_reflect=False (cycles_since=%d, %s=%.2f, stimuli=%s, degeneration=%s)",
+            cycles_since,
+            dominant,
+            dominant_strength,
+            stimuli_changed,
+            degeneration_alert,
+        )
         return False
 
     def generate_reflection(

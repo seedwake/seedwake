@@ -1696,7 +1696,14 @@ def _detect_runtime_degeneration(recent_thoughts: list[Thought], current_thought
         _cycle_text_similarity(cycle_texts[0], cycle_texts[2]),
         _cycle_text_similarity(cycle_texts[1], cycle_texts[2]),
     ]
-    return all(value >= 0.6 for value in pairwise)
+    detected = all(value >= 0.6 for value in pairwise)
+    if detected:
+        logger.info(
+            "degeneration detected: cycles=%s similarities=[%.2f, %.2f, %.2f]",
+            recent_cycle_ids,
+            *pairwise,
+        )
+    return detected
 
 
 def _normalize_cycle_text(content: str) -> str:

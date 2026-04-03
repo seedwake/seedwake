@@ -2873,7 +2873,7 @@ def _stimulus_content(
     if _action_result_succeeded(status, result) and action.type == "note_rewrite":
         return summary
     if _action_result_succeeded(status, result) and action.type in {"reading", "web_fetch"}:
-        return _reading_stimulus_content(summary, result.get("data"))
+        return _reading_stimulus_content(action, summary, result.get("data"))
     if _action_result_succeeded(status, result) and action.type == "news":
         return _news_stimulus_content(summary, result.get("data"))
     if stimulus_type == "action_result":
@@ -2996,7 +2996,10 @@ def _send_message_stimulus_content(summary: str, data: JsonValue, succeeded: boo
     return summary
 
 
-def _reading_stimulus_content(summary: str, data: JsonValue) -> str:
+READING_STIMULUS_INTENT_MAX_CHARS = 120
+
+
+def _reading_stimulus_content(action: ActionRecord, summary: str, data: JsonValue) -> str:
     if not isinstance(data, dict):
         return summary
     excerpt, _ = _clip_prompt_text(
@@ -3004,6 +3007,9 @@ def _reading_stimulus_content(summary: str, data: JsonValue) -> str:
         READING_STIMULUS_EXCERPT_MAX_CHARS,
     )
     parts: list[str] = []
+    intent_line = _reading_stimulus_intent_line(action)
+    if intent_line:
+        parts.append(intent_line)
     source_line = _reading_source_line(data)
     if source_line:
         parts.append(source_line)
@@ -3014,6 +3020,62 @@ def _reading_stimulus_content(summary: str, data: JsonValue) -> str:
     if not parts:
         return summary
     return "\n".join(parts)
+
+
+def _reading_stimulus_intent_line(action: ActionRecord) -> str:
+    if action.type == "reading":
+        focus = _reading_request_focus(action.request)
+        if focus:
+            clipped, _ = _clip_prompt_text(focus, READING_STIMULUS_INTENT_MAX_CHARS)
+            return f"这次我是围绕“{clipped}”去读的。"
+        return "这是我刚主动去读到的。"
+    if action.type == "web_fetch":
+        url = _web_fetch_request_url(action.request)
+        if url:
+            clipped, _ = _clip_prompt_text(url, READING_STIMULUS_INTENT_MAX_CHARS)
+            return f"这是我刚抓取这个网页时看到的：{clipped}"
+        return "这是我刚抓取网页时看到的。"
+    return ""
+
+
+def _reading_request_focus(request: ActionRequestPayload) -> str:
+    raw_params = _request_raw_params(request)
+    focus = _extract_action_first_param(raw_params, "query", "topic", "keywords")
+    if focus:
+        return _compact_prompt_text(focus)
+    task = str(request.get("task") or "").strip()
+    if task.startswith("围绕“"):
+        start = len("围绕“")
+        end = task.find("”", start)
+        if end > start:
+            return _compact_prompt_text(task[start:end])
+    return ""
+
+
+def _web_fetch_request_url(request: ActionRequestPayload) -> str:
+    raw_params = _request_raw_params(request)
+    url = _extract_action_first_param(raw_params, "url", "link")
+    if url:
+        return _compact_prompt_text(url)
+    task = str(request.get("task") or "").strip()
+    fallback_url = _first_url_in_text(task)
+    if fallback_url:
+        return _compact_prompt_text(fallback_url)
+    return ""
+
+
+def _request_raw_params(request: ActionRequestPayload) -> str:
+    raw_action = request.get("raw_action")
+    if not isinstance(raw_action, dict):
+        return ""
+    return str(raw_action.get("params") or "").strip()
+
+
+def _first_url_in_text(text: str) -> str:
+    match = re.search(r"https?://[^\s\u3002\uff0c\uff1b\uff1a\uff09\uff08]+", text)
+    if not match:
+        return ""
+    return match.group(0).rstrip(".,;:!?)]}>\u3002\uff0c\uff1b\uff1a")
 
 
 NEWS_STIMULUS_MAX_ITEMS = 5

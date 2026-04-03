@@ -122,11 +122,17 @@ class SleepManager:
         return self.current()
 
     def should_light_sleep(self, *, degeneration_alert: bool, buffer_thoughts: list[Thought]) -> bool:
+        buffer_count = len(buffer_thoughts)
         if degeneration_alert:
+            logger.info("sleep decision: light_sleep=True (reason=degeneration, buffer=%d)", buffer_count)
             return True
         if self._shadow["energy"] <= self._drowsy_threshold:
+            logger.info("sleep decision: light_sleep=True (reason=drowsy, energy=%.1f, buffer=%d)", self._shadow["energy"], buffer_count)
             return True
-        return len(buffer_thoughts) >= 90
+        if buffer_count >= 90:
+            logger.info("sleep decision: light_sleep=True (reason=buffer_full, buffer=%d)", buffer_count)
+            return True
+        return False
 
     def should_deep_sleep(
         self,
@@ -138,6 +144,7 @@ class SleepManager:
     ) -> bool:
         last = self._shadow["last_deep_sleep_at"]
         elapsed_triggered = False
+        elapsed_hours = 0.0
         if last:
             try:
                 last_time = datetime.fromisoformat(last)
@@ -151,7 +158,19 @@ class SleepManager:
             or failure_count >= self._deep_sleep_failure_threshold
             or active_memory_count >= self._deep_sleep_active_memory_threshold
         )
-        return elapsed_triggered or systemic_triggered
+        result = elapsed_triggered or systemic_triggered
+        if result:
+            reasons = []
+            if elapsed_triggered:
+                reasons.append(f"elapsed={elapsed_hours:.1f}h >= {self._deep_sleep_trigger_hours}h")
+            if degeneration_alert:
+                reasons.append("degeneration")
+            if failure_count >= self._deep_sleep_failure_threshold:
+                reasons.append(f"failures={failure_count}")
+            if active_memory_count >= self._deep_sleep_active_memory_threshold:
+                reasons.append(f"active_memories={active_memory_count}")
+            logger.info("sleep decision: deep_sleep=True (reasons=%s)", ", ".join(reasons))
+        return result
 
     def run_light_sleep(
         self,

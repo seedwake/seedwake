@@ -4652,7 +4652,7 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(stimulus.type, "reading")
         self.assertEqual(
             stimulus.content,
-            "来源：Example Article (https://example.com/article)\n原文：The answer lies in the logs.",
+            "这次我是围绕“意识”去读的。\n来源：Example Article (https://example.com/article)\n原文：The answer lies in the logs.",
         )
 
     def test_reading_stimulus_truncates_long_excerpt_without_note_or_extra_hint(self) -> None:
@@ -4691,6 +4691,7 @@ class ActionManagerTests(unittest.TestCase):
             manager.shutdown()
 
         stimulus = queue.pop_many(limit=1)[0]
+        self.assertIn("这次我是围绕“长文”去读的。", stimulus.content)
         self.assertIn("来源：Long Article (https://example.com/long)", stimulus.content)
         self.assertIn("原文：", stimulus.content)
         self.assertNotIn(long_excerpt, stimulus.content)
@@ -4735,7 +4736,52 @@ class ActionManagerTests(unittest.TestCase):
         stimulus = queue.pop_many(limit=1)[0]
         self.assertEqual(
             stimulus.content,
-            "来源：Mind Notes (https://example.com/mind)\n摘要：这段材料讨论了意识与自我边界的关系。",
+            "这次我是围绕“意识”去读的。\n来源：Mind Notes (https://example.com/mind)\n摘要：这段材料讨论了意识与自我边界的关系。",
+        )
+
+    def test_web_fetch_stimulus_uses_clean_url_from_task_when_raw_params_missing(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        planner = _Planner(ActionPlan(
+            "web_fetch",
+            "openclaw",
+            "抓取并提取这个网页的主要内容：https://example.com/page。返回简洁摘要和关键信息。",
+            30,
+            "测试",
+        ))
+        executor = _OpenClawExecutor(_action_result(
+            summary="抓到页面摘要",
+            data={
+                "source": {
+                    "title": "Fetched Page",
+                    "url": "https://example.com/page",
+                },
+                "excerpt_original": "Fetched excerpt.",
+            },
+            run_id="run_fetch_1",
+            session_key="agent:seedwake-worker:seedwake:action:act_C1-1",
+        ))
+        manager = ActionManager(
+            redis_client=None,
+            stimulus_queue=queue,
+            planner=planner,
+            openclaw_executor=executor,
+            auto_execute=[],
+            require_confirmation=[],
+            forbidden=[],
+        )
+
+        try:
+            manager.submit_from_thoughts([
+                _make_thought(action_request={"type": "web_fetch", "params": ""})
+            ])
+            manager.shutdown()
+        finally:
+            manager.shutdown()
+
+        stimulus = queue.pop_many(limit=1)[0]
+        self.assertEqual(
+            stimulus.content,
+            "这是我刚抓取这个网页时看到的：https://example.com/page\n来源：Fetched Page (https://example.com/page)\n原文：Fetched excerpt.",
         )
 
     def test_planner_ignore_emits_feedback_stimulus(self) -> None:

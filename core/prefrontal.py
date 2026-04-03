@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 import json
+import logging
 import re
 
 import redis as redis_lib
@@ -41,6 +42,7 @@ INHIBITION_THRESHOLD = 1.0
 SEND_MESSAGE_REPEAT_MIN_CHARS = 6
 SEND_MESSAGE_SIMILARITY_THRESHOLD = 0.94
 RECENT_ACTION_CONTEXT_WINDOW = timedelta(hours=1)
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -130,6 +132,14 @@ class PrefrontalManager:
             recent_send_message_requests or [],
         )
         manifested_impulses = _manifested_impulse_scores(active_habits)
+        if conversation_signal:
+            logger.info(
+                "prefrontal context: conversation_foreground=%s urgency=%.2f, recent_actions=%d, impulses=%s",
+                conversation_signal.source,
+                conversation_signal.urgency,
+                len(recent_actions),
+                manifested_impulses or "none",
+            )
         notes: list[str] = []
         reviewed_thoughts: list[Thought] = []
         for thought in thoughts:
@@ -551,6 +561,16 @@ def _inhibition_note(
         thought_requests=thought_requests,
     )
     total_score = sum(factor.score for factor in factors)
+    if factors:
+        factor_summary = ", ".join(f"{f.code}={f.score:+.2f}" for f in factors)
+        logger.info(
+            "prefrontal gate %s: score=%.2f threshold=%.2f %s [%s]",
+            action_type,
+            total_score,
+            INHIBITION_THRESHOLD,
+            "INHIBIT" if total_score >= INHIBITION_THRESHOLD else "PASS",
+            factor_summary,
+        )
     if total_score < INHIBITION_THRESHOLD:
         return None
     return _compose_inhibition_note(action_type, factors)
