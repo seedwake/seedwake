@@ -627,6 +627,22 @@ class LongTermMemoryTests(unittest.TestCase):
 
         self.assertEqual(target, "telegram:558805571")
 
+    def test_resolve_contact_target_falls_back_to_recent_conversation_full_name(self) -> None:
+        redis_client = ListRedisStub()
+        append_conversation_history(
+            redis_client,
+            role="user",
+            source="telegram:558805571",
+            content="你好",
+            metadata={"telegram_username": "", "telegram_full_name": "Flight5586"},
+            timestamp=datetime.now(timezone.utc),
+        )
+        ltm = LongTermMemory(None)
+
+        target = _resolve_contact_target_for_entity(redis_client, ltm, "person:flight5586")
+
+        self.assertEqual(target, "telegram:558805571")
+
     def test_store_skips_exact_duplicate_content(self) -> None:
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
@@ -1309,6 +1325,48 @@ class Phase4RuntimeTests(unittest.TestCase):
             primary_entity_tag="telegram:558805571",
             related_entity_tags=["person:flight5586"],
             content="关系: 朋友。联系方式: telegram:558805571。",
+            embedding=[0.1, 0.2],
+            source_cycle_id=12,
+            importance=0.68,
+            emotion_context=unittest.mock.ANY,
+        )
+
+    @patch("core.sleep.embed_text", return_value=[0.1, 0.2])
+    @patch("core.sleep._summarize_impression", return_value="关系: 朋友。联系方式: telegram:8469901143。")
+    def test_update_impression_memories_stores_username_and_full_name_alias_tags(
+        self,
+        _mock_summarize: MagicMock,
+        _mock_embed: MagicMock,
+    ) -> None:
+        redis_client = ListRedisStub()
+        append_conversation_history(
+            redis_client,
+            role="user",
+            source="telegram:8469901143",
+            content="你好",
+            metadata={"telegram_username": "jamboberq", "telegram_full_name": "Jam Boberq"},
+            timestamp=datetime.now(timezone.utc),
+        )
+        ltm = MagicMock()
+        ltm.recent_by_time.return_value = []
+        ltm.upsert_impression.return_value = 1
+
+        updated = _update_impression_memories(
+            redis_client,
+            ltm,
+            MagicMock(),
+            "embed-model",
+            MagicMock(),
+            {"name": "aux"},
+            cycle_id=12,
+            emotion=_emotion_snapshot(summary="平静 0.40"),
+        )
+
+        self.assertEqual(updated, 1)
+        ltm.upsert_impression.assert_called_once_with(
+            primary_entity_tag="telegram:8469901143",
+            related_entity_tags=["person:jamboberq", "person:jam boberq"],
+            content="关系: 朋友。联系方式: telegram:8469901143。",
             embedding=[0.1, 0.2],
             source_cycle_id=12,
             importance=0.68,

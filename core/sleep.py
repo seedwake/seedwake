@@ -29,7 +29,7 @@ from core.common_types import (
     JsonObject,
     SleepStateSnapshot,
     elapsed_ms,
-    person_entity_tag_from_telegram_username,
+    person_entity_tags_from_telegram_identity,
 )
 
 SLEEP_STATE_KEY = "seedwake:sleep_state"
@@ -936,8 +936,13 @@ def _impression_related_entity_tags(entries: list[ConversationEntry]) -> list[st
         metadata = entry.get("metadata")
         if not isinstance(metadata, dict):
             continue
-        person_tag = person_entity_tag_from_telegram_username(str(metadata.get("telegram_username") or ""))
-        if person_tag and person_tag not in seen:
+        person_tags = person_entity_tags_from_telegram_identity(
+            username=str(metadata.get("telegram_username") or ""),
+            full_name=str(metadata.get("telegram_full_name") or ""),
+        )
+        for person_tag in person_tags:
+            if person_tag in seen:
+                continue
             seen.add(person_tag)
             tags.append(person_tag)
     return tags

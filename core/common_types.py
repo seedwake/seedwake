@@ -341,6 +341,31 @@ def person_entity_tag_from_telegram_username(username: str) -> str | None:
     return f"person:{normalized}"
 
 
+def person_entity_tag_from_telegram_full_name(full_name: str) -> str | None:
+    normalized = re.sub(r"\s+", " ", full_name.strip()).lower()
+    if not normalized:
+        return None
+    return f"person:{normalized}"
+
+
+def person_entity_tags_from_telegram_identity(
+    *,
+    username: str,
+    full_name: str,
+) -> list[str]:
+    tags: list[str] = []
+    seen: set[str] = set()
+    for tag in (
+        person_entity_tag_from_telegram_username(username),
+        person_entity_tag_from_telegram_full_name(full_name),
+    ):
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        tags.append(tag)
+    return tags
+
+
 def bigram_similarity(left: str, right: str) -> float:
     """Jaccard similarity of character bigrams between two strings."""
     if len(left) < 2 or len(right) < 2:

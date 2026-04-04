@@ -72,7 +72,7 @@ from core.common_types import (
     RecentConversationPrompt,
     RawActionRequest,
     StatusEventPayload,
-    person_entity_tag_from_telegram_username,
+    person_entity_tags_from_telegram_identity,
     rewritten_pair_match_counts,
     ThoughtEventPayload,
     elapsed_ms,
@@ -2625,7 +2625,11 @@ def _resolve_recent_telegram_target_for_entity(
         metadata = entry.get("metadata")
         if not isinstance(metadata, dict):
             continue
-        if person_entity_tag_from_telegram_username(str(metadata.get("telegram_username") or "")) == person_tag:
+        person_tags = person_entity_tags_from_telegram_identity(
+            username=str(metadata.get("telegram_username") or ""),
+            full_name=str(metadata.get("telegram_full_name") or ""),
+        )
+        if person_tag in person_tags:
             return source
     return None
 
