@@ -49,7 +49,6 @@ from core.runtime import connect_redis_from_env, load_yaml_config
 from core.sleep import SleepManager, SleepRedisLike
 from core.stimulus import (
     ConversationRedisLike,
-    RECENT_CONVERSATION_SUMMARY_MAX_CHARS,
     Stimulus,
     StimulusQueue,
     load_conversation_history,
@@ -1839,11 +1838,12 @@ def _summarize_recent_conversation(
             user_prompt,
         )
         batch_started_at = time.perf_counter()
+        system_prompt = _conversation_summary_system_prompt(current_summary)
         try:
             response = client.chat(
                 model=str(model_config["name"]),
                 messages=[
-                    {"role": "system", "content": RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
                 options={"temperature": 0.2, "max_tokens": 300},
@@ -2323,7 +2323,7 @@ def _recent_conversation_summary_request(
         f"对方名字：{source_name}\n\n"
         f"已有摘要：\n{existing}\n\n"
         f"需要并入的新旧消息（按时间顺序）：\n{transcript}\n\n"
-        "请输出一段新的摘要（严格遵守字数限制，不要超过），用来完整替换上面的旧摘要。"
+        "请输出一段新的摘要（严格遵守字数限制，不要超过），用来替换上面的旧摘要。"
     )
 
 
@@ -2373,14 +2373,30 @@ def _clip_recent_conversation_summary_content(content: str, max_chars: int) -> s
     return content[: max_chars - 3].rstrip() + "..."
 
 
+def _conversation_summary_system_prompt(existing_summary: str) -> str:
+    existing_len = len(existing_summary)
+    if existing_len > RECENT_CONVERSATION_SUMMARY_TARGET_CHARS * 2:
+        return (
+            RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT
+            + f"旧摘要已严重超出字数限制（{existing_len} 字），"
+            f"务必大幅压缩，只保留最核心的信息，确保新摘要在 {RECENT_CONVERSATION_SUMMARY_TARGET_CHARS} 字以内。"
+        )
+    if existing_len > RECENT_CONVERSATION_SUMMARY_TARGET_CHARS:
+        return (
+            RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT
+            + f"旧摘要已超出字数限制（{existing_len} 字），"
+            f"请在保留重要信息的前提下压缩到 {RECENT_CONVERSATION_SUMMARY_TARGET_CHARS} 字以内。"
+        )
+    return RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT
+
+
 def _clean_recent_conversation_summary(raw_summary: JsonValue) -> str:
+    """Clean LLM output but do NOT truncate — store the full text."""
     summary = " ".join(str(raw_summary or "").split()).strip()
     for prefix in ("摘要：", "对话摘要：", "新的摘要："):
         if summary.startswith(prefix):
             summary = summary[len(prefix):].strip()
-    if len(summary) <= RECENT_CONVERSATION_SUMMARY_MAX_CHARS:
-        return summary
-    return summary[: RECENT_CONVERSATION_SUMMARY_MAX_CHARS - 3].rstrip() + "..."
+    return summary
 
 
 def _sanitize_ltm_content(content: str) -> str:

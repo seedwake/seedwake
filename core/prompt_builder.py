@@ -9,7 +9,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 from core.action import ActionRecord
-from core.stimulus import Stimulus
+from core.stimulus import RECENT_CONVERSATION_SUMMARY_MAX_CHARS, Stimulus
 from core.thought_parser import Thought
 from core.common_types import (
     DegenerationIntervention,
@@ -574,7 +574,7 @@ def _format_recent_conversations(conversations: list[RecentConversationPrompt]) 
         last_time = _recent_conversation_local_time(conversation["last_timestamp"])
         lines.append(f'与 {conversation["source_label"]} 的近期对话（最后一条消息时间：{last_time}）：')
         lines.append("")
-        summary = str(conversation.get("summary") or "").strip()
+        summary = _truncate_conversation_summary(str(conversation.get("summary") or "").strip())
         if summary:
             lines.append(f"更早的对话摘要：{summary}")
             lines.append("")
@@ -1087,6 +1087,12 @@ def _conversation_label_map(
 def _known_target_label(target: str, conversation_labels: dict[str, str]) -> str:
     normalized = str(target or "").strip()
     return conversation_labels.get(normalized, normalized)
+
+
+def _truncate_conversation_summary(summary: str) -> str:
+    if not summary or len(summary) <= RECENT_CONVERSATION_SUMMARY_MAX_CHARS:
+        return summary
+    return summary[: RECENT_CONVERSATION_SUMMARY_MAX_CHARS - 3].rstrip() + "..."
 
 
 def _recent_conversation_local_time(raw_timestamp: str) -> str:
