@@ -1828,17 +1828,17 @@ def _summarize_recent_conversation(
             current_summary,
             transcript,
         )
+        system_prompt = _conversation_summary_system_prompt(current_summary)
         _write_recent_conversation_summary_prompt_log(
             prompt_log_file,
             cycle_id,
             source_name,
             index,
             total_batches,
-            RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT,
+            system_prompt,
             user_prompt,
         )
         batch_started_at = time.perf_counter()
-        system_prompt = _conversation_summary_system_prompt(current_summary)
         try:
             response = client.chat(
                 model=str(model_config["name"]),
