@@ -436,16 +436,12 @@ def _system_prompt_text(allow_implicit_send_message: bool, *, note_text: str = "
     if allow_implicit_send_message:
         action_examples.extend(SYSTEM_PROMPT_IMPLICIT_SEND_MESSAGE_ACTION_EXAMPLES)
     action_examples.extend(SYSTEM_PROMPT_ACTION_EXAMPLES_SUFFIX)
-    suffix = SYSTEM_PROMPT_SUFFIX.strip()
-    note_warning = _note_length_warning(note_text)
-    if note_warning:
-        suffix = f"{suffix}\n{note_warning}"
     return "\n".join(
         [
             SYSTEM_PROMPT_PREFIX.rstrip(),
             *action_examples,
             "",
-            suffix,
+            _system_prompt_suffix_with_note_warning(note_text),
         ]
     ).rstrip()
 
@@ -561,6 +557,17 @@ def _note_length_warning(note_text: str) -> str:
             f"下次覆写请压缩到 {NOTE_SOFT_LIMIT} 字以内，避免被截断丢失信息。"
         )
     return ""
+
+
+def _system_prompt_suffix_with_note_warning(note_text: str) -> str:
+    suffix = SYSTEM_PROMPT_SUFFIX.strip()
+    note_warning = _note_length_warning(note_text)
+    if not note_warning:
+        return suffix
+    note_intro, separator, remainder = suffix.partition("\n\n## 示例")
+    if not separator:
+        return f"{suffix}\n{note_warning}"
+    return f"{note_intro}\n{note_warning}\n\n## 示例{remainder}"
 
 
 def _split_stimuli(stimuli: list[Stimulus]) -> tuple[list[Stimulus], list[Stimulus], list[Stimulus]]:

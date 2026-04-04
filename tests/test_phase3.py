@@ -1430,6 +1430,23 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         self.assertNotIn("## 我的笔记", prompt)
 
+    def test_prompt_places_note_length_warning_before_examples(self) -> None:
+        prompt = build_prompt(
+            3,
+            {"self_description": "我是 Seedwake。"},
+            [],
+            30,
+            prompt_context=PromptBuildContext(note_text="甲" * 2003),
+        )
+
+        warning = "⚠ 当前笔记已严重超出字数限制（2003 字），已造成信息丢失。下次覆写务必大幅压缩到 1000 字以内，否则会丢失更多信息。"
+        self.assertIn(warning, prompt)
+        self.assertLess(
+            prompt.index("每次覆写是全量替换，不是追加——如果旧笔记里有重要信息，覆写时必须带上，否则会永久消失。"),
+            prompt.index(warning),
+        )
+        self.assertLess(prompt.index(warning), prompt.index("## 示例"))
+
     def test_prompt_thought_history_strips_all_action_markers(self) -> None:
         prompt = build_prompt(
             3,
