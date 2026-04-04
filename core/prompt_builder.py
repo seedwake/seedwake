@@ -94,8 +94,8 @@ SYSTEM_PROMPT_SUFFIX = """\
 - 三个念头是同时浮现的并行想法，不是一个思维链的三个步骤
 - 没有外部刺激时，允许跳跃到完全不同的方向——人的思维本来就是多线程的
 - 不要机械复述最近几轮同样的意象、句式或情绪；如果系统提醒我已经卡住了，就按提醒明确引入新的源
-- 有人对我说话或有行动结果回来时，至少一个念头应该回应它
-- 如果我心里已经是在回应对方、安抚对方、接住对方、回答对方，或者我明确想把一句话递给对方，这种回应必须外化成 {action:send_message, ...}，不能只停留在“我想回应/我想接住/我想靠近”的内在意图
+- 有人对我说话或有行动结果返回时，至少一个念头应该回应它
+- 如果我心里已经是在回答对方，或者我明确想把一句话发给对方，这种回应必须外化成 {action:send_message, ...}，不能只停留在“我想回应”的内在意图
 - 当 conversation 里有人直接提问、催我回复、说自己在等待，或明确要求我和他说话时，“回应它”通常意味着优先发出一条 {action:send_message, ...}，而不是继续只在内部流动
 - 当 conversation 和时间感/身体感觉同时出现时，对话是前景，时间感和身体感觉只是背景；不要让这些背景感受盖过对眼前这个人的回应
 - 只输出念头本身，不要解释、总结或加任何额外内容
@@ -194,12 +194,14 @@ def build_prompt(
     """Build a single prompt string for thought generation."""
     resolved_context = prompt_context or PromptBuildContext()
     conversations, action_echoes, passive = _split_stimuli(resolved_context.stimuli or [])
+    note_text_for_system = resolved_context.note_text
     parts = [
         _timed_prompt_section(
             "system",
             lambda: _build_system(
                 identity,
                 allow_implicit_send_message=bool(conversations or resolved_context.reply_focus),
+                note_text=note_text_for_system,
             ),
         )
     ]
@@ -415,8 +417,13 @@ def _timed_prompt_section(section_name: str, builder: Callable[[], str]) -> str:
     return section
 
 
-def _build_system(identity: dict[str, str], *, allow_implicit_send_message: bool) -> str:
-    parts = [_system_prompt_text(allow_implicit_send_message), '## “我”是谁']
+def _build_system(
+    identity: dict[str, str],
+    *,
+    allow_implicit_send_message: bool,
+    note_text: str = "",
+) -> str:
+    parts = [_system_prompt_text(allow_implicit_send_message, note_text=note_text), '## “我”是谁']
     for content in identity.values():
         normalized = content.strip()
         if normalized:
@@ -424,17 +431,21 @@ def _build_system(identity: dict[str, str], *, allow_implicit_send_message: bool
     return "\n\n".join(parts)
 
 
-def _system_prompt_text(allow_implicit_send_message: bool) -> str:
+def _system_prompt_text(allow_implicit_send_message: bool, *, note_text: str = "") -> str:
     action_examples = list(SYSTEM_PROMPT_ACTION_EXAMPLES_PREFIX)
     if allow_implicit_send_message:
         action_examples.extend(SYSTEM_PROMPT_IMPLICIT_SEND_MESSAGE_ACTION_EXAMPLES)
     action_examples.extend(SYSTEM_PROMPT_ACTION_EXAMPLES_SUFFIX)
+    suffix = SYSTEM_PROMPT_SUFFIX.strip()
+    note_warning = _note_length_warning(note_text)
+    if note_warning:
+        suffix = f"{suffix}\n{note_warning}"
     return "\n".join(
         [
             SYSTEM_PROMPT_PREFIX.rstrip(),
             *action_examples,
             "",
-            SYSTEM_PROMPT_SUFFIX.strip(),
+            suffix,
         ]
     ).rstrip()
 
@@ -529,8 +540,27 @@ def _format_impressions(impressions: list[str]) -> str:
     return _render_section("我对他们的印象", lines)
 
 
+NOTE_SOFT_LIMIT = 1000
+NOTE_SEVERE_LIMIT = 1500
+
+
 def _format_note(note_text: str) -> str:
     return _render_section("我的笔记", [str(note_text).strip()], keep_blank_lines=True)
+
+
+def _note_length_warning(note_text: str) -> str:
+    note_len = len(note_text.strip())
+    if note_len > NOTE_SEVERE_LIMIT:
+        return (
+            f"⚠ 当前笔记已严重超出字数限制（{note_len} 字），已造成信息丢失。"
+            f"下次覆写务必大幅压缩到 {NOTE_SOFT_LIMIT} 字以内，否则会丢失更多信息。"
+        )
+    if note_len > NOTE_SOFT_LIMIT:
+        return (
+            f"⚠ 当前笔记已超出字数限制（{note_len} 字）。"
+            f"下次覆写请压缩到 {NOTE_SOFT_LIMIT} 字以内，避免被截断丢失信息。"
+        )
+    return ""
 
 
 def _split_stimuli(stimuli: list[Stimulus]) -> tuple[list[Stimulus], list[Stimulus], list[Stimulus]]:
