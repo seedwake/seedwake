@@ -2323,7 +2323,7 @@ def _recent_conversation_summary_request(
         f"对方名字：{source_name}\n\n"
         f"已有摘要：\n{existing}\n\n"
         f"需要并入的新旧消息（按时间顺序）：\n{transcript}\n\n"
-        "请输出一段新的摘要，用来完整替换上面的旧摘要。"
+        "请输出一段新的摘要（严格遵守字数限制，不要超过），用来完整替换上面的旧摘要。"
     )
 
 
