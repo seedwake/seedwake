@@ -554,7 +554,7 @@ def _note_length_warning(note_text: str) -> str:
     if note_len > NOTE_SOFT_LIMIT:
         return (
             f"⚠ 当前笔记已超出字数限制（{note_len} 字）。"
-            f"下次覆写请压缩到 {NOTE_SOFT_LIMIT} 字以内，避免被截断丢失信息。"
+            f"下次覆写要压缩到 {NOTE_SOFT_LIMIT} 字以内，避免被截断丢失信息。"
         )
     return ""
 
