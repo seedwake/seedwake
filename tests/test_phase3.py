@@ -288,6 +288,7 @@ def _action_request_payload(
     message_text: str | None = None,
     reply_to_message_id: str | None = None,
     submitted_at: str | None = None,
+    status: str | None = None,
 ) -> ActionRequestPayload:
     payload: ActionRequestPayload = {
         "task": task,
@@ -302,6 +303,8 @@ def _action_request_payload(
         payload["reply_to_message_id"] = reply_to_message_id
     if submitted_at:
         payload["submitted_at"] = submitted_at
+    if status:
+        payload["status"] = status
     return payload
 
 
@@ -3038,6 +3041,46 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         self.assertEqual(notes, ["这句刚对同一处说过类似的话，这次别重复。"])
         self.assertIsNone(reviewed[0].action_request)
+
+    def test_prefrontal_allows_retry_after_failed_send_message(self) -> None:
+        manager = PrefrontalManager(
+            redis_client=None,
+            check_interval=3,
+            inhibition_enabled=True,
+        )
+
+        reviewed, notes = manager.review_thoughts(
+            thoughts=[
+                _make_thought(
+                    thought_type="意图",
+                    content='我再发一次。 {action:send_message, target:"telegram:1", message:"我现在就在这里等你。"}',
+                    action_request={"type": "send_message", "params": 'target:"telegram:1", message:"我现在就在这里等你。"'},
+                )
+            ],
+            recent_thoughts=[
+                _make_thought(
+                    cycle_id=11,
+                    index=1,
+                    thought_type="意图",
+                    content='刚才发过。 {action:send_message, target:"telegram:1", message:"我现在就在这里等你。"}',
+                    action_request={"type": "send_message", "params": 'target:"telegram:1", message:"我现在就在这里等你。"'},
+                )
+            ],
+            stimuli=[],
+            sleep_state=_sleep_state_snapshot(energy=0.82, summary=""),
+            active_habits=[],
+            recent_send_message_requests=[
+                _action_request_payload(
+                    raw_action_params='target:"telegram:1", message:"我现在就在这里等你。"',
+                    target_source="telegram:1",
+                    message_text="我现在就在这里等你。",
+                    status="failed",
+                )
+            ],
+        )
+
+        self.assertEqual(notes, [])
+        self.assertIsNotNone(reviewed[0].action_request)
 
     def test_prefrontal_allows_short_exact_duplicate_send_message(self) -> None:
         manager = PrefrontalManager(
@@ -5994,6 +6037,101 @@ class ActionManagerTests(unittest.TestCase):
 
         self.assertEqual(len(requests), 1)
         self.assertEqual(requests[0]["message_text"], "刚才那句")
+        self.assertEqual(requests[0]["status"], "succeeded")
+
+    def test_recent_send_message_requests_preserve_failed_status(self) -> None:
+        manager = _build_action_manager(
+            StimulusQueue(redis_client=None),
+            _Planner(None),
+        )
+
+        try:
+            now = datetime.now(timezone.utc)
+            with manager._lock:
+                manager._actions = {
+                    "act_failed": ActionRecord(
+                        action_id="act_failed",
+                        type="send_message",
+                        request={
+                            "task": "向 telegram:1 发送消息：重试那句",
+                            "reason": "测试",
+                            "raw_action": {"type": "send_message", "params": 'message:"重试那句"'},
+                            "target_source": "telegram:1",
+                            "message_text": "重试那句",
+                        },
+                        executor="native",
+                        status="failed",
+                        source_thought_id="C3-1",
+                        source_content="重试那句",
+                        submitted_at=now - timedelta(minutes=5),
+                    )
+                }
+            requests = manager.recent_send_message_requests()
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["message_text"], "重试那句")
+        self.assertEqual(requests[0]["status"], "failed")
+
+    def test_recent_send_message_requests_keep_nine_countable_when_failed_exists(self) -> None:
+        manager = _build_action_manager(
+            StimulusQueue(redis_client=None),
+            _Planner(None),
+        )
+
+        try:
+            now = datetime.now(timezone.utc)
+            actions: dict[str, ActionRecord] = {}
+            for index in range(10):
+                submitted_at = now - timedelta(minutes=11 - index)
+                actions[f"act_ok_{index}"] = ActionRecord(
+                    action_id=f"act_ok_{index}",
+                    type="send_message",
+                    request={
+                        "task": f"向 telegram:1 发送消息：成功{index}",
+                        "reason": "测试",
+                        "raw_action": {"type": "send_message", "params": f'message:"成功{index}"'},
+                        "target_source": "telegram:1",
+                        "message_text": f"成功{index}",
+                    },
+                    executor="native",
+                    status="succeeded",
+                    source_thought_id=f"C{index}-1",
+                    source_content=f"成功{index}",
+                    submitted_at=submitted_at,
+                )
+            actions["act_failed"] = ActionRecord(
+                action_id="act_failed",
+                type="send_message",
+                request={
+                    "task": "向 telegram:1 发送消息：失败那句",
+                    "reason": "测试",
+                    "raw_action": {"type": "send_message", "params": 'message:"失败那句"'},
+                    "target_source": "telegram:1",
+                    "message_text": "失败那句",
+                },
+                executor="native",
+                status="failed",
+                source_thought_id="CF-1",
+                source_content="失败那句",
+                submitted_at=now - timedelta(seconds=30),
+            )
+            with manager._lock:
+                manager._actions = actions
+            requests = manager.recent_send_message_requests()
+        finally:
+            manager.shutdown()
+
+        countable_messages = [
+            str(request.get("message_text") or "")
+            for request in requests
+            if str(request.get("status") or "") in {"pending", "running", "succeeded"}
+        ]
+        self.assertEqual(len(countable_messages), 9)
+        self.assertEqual(countable_messages[0], "成功1")
+        self.assertEqual(countable_messages[-1], "成功9")
+        self.assertIn("失败那句", [str(request.get("message_text") or "") for request in requests])
 
     def test_restore_action_request_payload_preserves_reply_to_message_id(self) -> None:
         payload = _coerce_action_request_payload(

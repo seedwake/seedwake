@@ -65,6 +65,7 @@ class RecentActionContext:
     signature: str
     params: dict[str, str]
     timestamp: datetime
+    request_status: str = ""
 
 
 class PrefrontalManager:
@@ -286,14 +287,19 @@ def _recent_action_contexts(
     cutoff = datetime.now(timezone.utc) - RECENT_ACTION_CONTEXT_WINDOW
     request_contexts = _recent_request_action_contexts(recent_send_message_requests)
     thought_contexts = _recent_thought_action_contexts(recent_thoughts, request_contexts, cutoff)
-    return sorted([*thought_contexts, *request_contexts], key=lambda context: context.timestamp)[-9:]
+    countable_request_contexts = [
+        context
+        for context in request_contexts
+        if _request_status_counts_for_repeat_suppression(context.request_status)
+    ]
+    return sorted([*thought_contexts, *countable_request_contexts], key=lambda context: context.timestamp)[-9:]
 
 
 def _recent_request_action_contexts(
     recent_send_message_requests: list[ActionRequestPayload],
 ) -> list[RecentActionContext]:
     request_contexts: list[RecentActionContext] = []
-    for request in recent_send_message_requests[-9:]:
+    for request in recent_send_message_requests:
         context = _send_message_context_from_request(request)
         if context is not None:
             request_contexts.append(context)
@@ -536,6 +542,7 @@ def _send_message_context_from_request(
         signature=f"{SEND_MESSAGE_ACTION_TYPE}:{_canonical_params_from_map(params)}",
         params=params,
         timestamp=_request_submitted_at(request),
+        request_status=str(request.get("status") or "").strip(),
     )
 
 
@@ -603,6 +610,10 @@ def _recent_similar_send_message_count(
             continue
         recent_matches += 1
     return recent_matches
+
+
+def _request_status_counts_for_repeat_suppression(status: str) -> bool:
+    return status in {"", "pending", "running", "succeeded"}
 
 
 def _inhibition_note(
