@@ -1,13 +1,13 @@
 # Seedwake · The Continuity of Mind
 
+> A continuously running AI thought-stream engine, organized around the Buddhist concept of *santāna* — the continuity of mind.
+
 <p align="center">
   <a href="./README_ZH.md">🌐 中文文档</a> ·
   <a href="#disclaimer">📖 About</a> ·
   <a href="#how-it-runs">🚀 Deployment</a> ·
   <a href="#contributing">🤝 Contributing</a>
 </p>
-
-> A continuously running AI thought-stream engine, organized around the Buddhist concept of *santāna* — the continuity of mind.
 
 ---
 
