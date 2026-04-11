@@ -41,7 +41,7 @@ from core.attention import _habit_resonance_score, evaluate_attention
 from core.emotion import _llm_fusion_weight
 # noinspection PyProtectedMember
 from core.main import (
-    _print_stimuli,
+    _stimulus_display_content,
     _filter_prompt_running_actions,
     _restart_argv,
     _resolve_prompt_action_state,
@@ -1147,19 +1147,16 @@ class StimulusQueueTests(unittest.TestCase):
         self.assertEqual(len(second_round), 1)
         self.assertEqual(second_round[0].source, "telegram:2")
 
-    def test_print_stimuli_flattens_merged_conversation_for_logs(self) -> None:
+    def test_stimulus_display_flattens_merged_conversation_for_logs(self) -> None:
         queue = StimulusQueue(redis_client=None)
         queue.push("conversation", 1, "telegram:1", "你好")
         queue.push("conversation", 1, "telegram:1", "你在做什么？")
         selected = _select_cycle_stimuli(queue)
 
-        log_buffer = io.StringIO()
-        with patch("sys.stdout", new=io.StringIO()):
-            _print_stimuli(log_buffer, selected)
-
-        output = log_buffer.getvalue()
-        self.assertIn("[conversation] 你好 | 你在做什么？", output)
-        self.assertNotIn("[conversation] 你好\n你在做什么？", output)
+        self.assertEqual(len(selected), 1)
+        display_text = _stimulus_display_content(selected[0])
+        self.assertEqual(display_text, "你好 | 你在做什么？")
+        self.assertNotIn("\n", display_text)
 
     def test_select_cycle_stimuli_drops_background_passive_stimuli_during_conversation(self) -> None:
         queue = StimulusQueue(redis_client=None)

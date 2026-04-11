@@ -346,7 +346,7 @@ def _build_runtime_components(
         news_feed_urls=list((config.get("perception", {}) or {}).get("news_feed_urls", [])),
         news_seen_ttl_hours=int((config.get("perception", {}) or {}).get("news_seen_ttl_hours", 720)),
         news_seen_max_items=int((config.get("perception", {}) or {}).get("news_seen_max_items", 5000)),
-        log_callback=lambda text: _output(log_file, text),
+        log_callback=lambda text: _output_action_event(log_file, text),
         event_callback=lambda event_type, payload: _publish_event(stm.redis_client, event_type, payload),
         prompt_log_callback=lambda title, prompt, emoji: write_prompt_log_block(
             prompt_log_file, title=title, prompt=prompt, emoji=emoji,
@@ -464,6 +464,7 @@ def _run_engine_loop(
                 stimuli,
                 perception_cues,
                 prompt_log_file,
+                log_file,
             )
         except KeyboardInterrupt:
             raise
@@ -510,7 +511,6 @@ def _run_engine_loop(
             )
             continue
 
-        _finish_cycle(log_file, cycle_id, stimuli, new_thoughts)
         _publish_event(runtime.stm.redis_client, "thoughts", _thought_event_payload(cycle_id, new_thoughts))
         if _safe_post_cycle_phase4(runtime, cycle_id, stimuli):
             _graceful_restart_core(log_file, prompt_log_file, runtime.action_manager)
@@ -1036,6 +1036,7 @@ def _execute_cycle(
     stimuli: list[Stimulus],
     perception_cues: list[str],
     prompt_log_file: TextIO | None,
+    log_file: TextIO | None,
 ) -> tuple[list[Thought], bool]:
     cycle_started_at = time.perf_counter()
     cycle_status = "failed"
@@ -1237,6 +1238,12 @@ def _execute_cycle(
             elapsed_ms(habit_observe_started_at),
             observed_habits,
         )
+        # Show the cycle in the terminal before action submission so that any
+        # action-submitted events fire AFTER the cycle's own thoughts. The log
+        # file is written only after submission succeeds (see _record_cycle_log
+        # call below) so retries never leave duplicate log records even though
+        # the terminal may occasionally show the same cycle twice on retry.
+        _display_cycle_terminal(cycle_id, stimuli, thoughts)
         action_submit_started_at = time.perf_counter()
         created_actions = runtime.action_manager.submit_from_thoughts(thoughts, stimuli=stimuli)
         logger.info(
@@ -1245,6 +1252,7 @@ def _execute_cycle(
             elapsed_ms(action_submit_started_at),
             len(created_actions),
         )
+        _record_cycle_log(log_file, cycle_id, stimuli, thoughts)
         cycle_status = "ok"
         return thoughts, degeneration_alert
     except Exception:
@@ -2035,14 +2043,61 @@ def _handle_cycle_failure(
     return min(retry_delay * 2, max_retry_delay)
 
 
-def _finish_cycle(
+def _display_cycle_terminal(
+    cycle_id: int,
+    stimuli: list[Stimulus],
+    thoughts: list[Thought],
+) -> None:
+    """Print a cycle block to the terminal.
+
+    Called before action submission so action-event lines from the submission
+    step naturally appear after the cycle's own thoughts. Safe to call on
+    retry (the log record is written separately by _record_cycle_log only on
+    success, so the log stays authoritative even when the terminal shows the
+    same cycle twice).
+    """
+    print()
+    print(f"{C_DIM}── C{cycle_id} ──{C_RESET}")
+
+    if stimuli:
+        stimuli_header = t("main.stimuli_header")
+        print(f"{C_DIM}{stimuli_header}{C_RESET}")
+        for stimulus in stimuli:
+            display_content = _stimulus_display_content(stimulus)
+            print(f"  {C_DIM}[{stimulus.type}]{C_RESET} {display_content}")
+
+    for thought in thoughts:
+        color = C_TYPE.get(thought.type, "")
+        display_type = localized_thought_type(thought.type)
+        trigger = f" {C_DIM}(← {thought.trigger_ref}){C_RESET}" if thought.trigger_ref else ""
+        print(f"  {color}[{display_type}]{C_RESET} {thought.content}{trigger}")
+
+
+def _record_cycle_log(
     log_file: TextIO | None,
     cycle_id: int,
     stimuli: list[Stimulus],
     thoughts: list[Thought],
 ) -> None:
-    _print_stimuli(log_file, stimuli)
-    _print_cycle(log_file, cycle_id, thoughts)
+    """Write a completed cycle to the log file as a single multi-line record.
+
+    Called only after action submission succeeds, so a retry never leaves a
+    duplicate log entry for the same cycle attempt.
+    """
+    lines: list[str] = [f"── C{cycle_id} ──"]
+
+    if stimuli:
+        lines.append(t("main.stimuli_header"))
+        for stimulus in stimuli:
+            display_content = _stimulus_display_content(stimulus)
+            lines.append(f"  [{stimulus.type}] {display_content}")
+
+    for thought in thoughts:
+        display_type = localized_thought_type(thought.type)
+        plain_trigger = f" (← {thought.trigger_ref})" if thought.trigger_ref else ""
+        lines.append(f"  [{display_type}] {thought.content}{plain_trigger}")
+
+    _write_log_message(log_file, "\n".join(lines))
 
 
 def _sanitize_cycle_trigger_refs(thoughts: list[Thought], recent_thoughts: list[Thought]) -> None:
@@ -2606,33 +2661,6 @@ def _connect_pg() -> psycopg.Connection | None:
 
 # -- Terminal output -------------------------------------------------------
 
-def _print_cycle(log_file: TextIO | None, cycle_id: int, thoughts: list[Thought]) -> None:
-    print(f"\n{C_DIM}── C{cycle_id} ──{C_RESET}")
-    lines = [f"── C{cycle_id} ──"]
-    for thought in thoughts:
-        color = C_TYPE.get(thought.type, "")
-        display_type = localized_thought_type(thought.type)
-        trigger = f" {C_DIM}(← {thought.trigger_ref}){C_RESET}" if thought.trigger_ref else ""
-        print(f"  {color}[{display_type}]{C_RESET} {thought.content}{trigger}")
-        plain_trigger = f" (← {thought.trigger_ref})" if thought.trigger_ref else ""
-        lines.append(f"  [{display_type}] {thought.content}{plain_trigger}")
-    _write_log_message(log_file, "\n".join(lines))
-
-
-def _print_stimuli(log_file: TextIO | None, stimuli: list[Stimulus]) -> None:
-    if not stimuli:
-        return
-
-    header = t("main.stimuli_header")
-    print(f"{C_DIM}{header}{C_RESET}")
-    lines = [header]
-    for stimulus in stimuli:
-        display_content = _stimulus_display_content(stimulus)
-        print(f"  {C_DIM}[{stimulus.type}]{C_RESET} {display_content}")
-        lines.append(f"  [{stimulus.type}] {display_content}")
-    _write_log_message(log_file, "\n".join(lines))
-
-
 def _push_passive_stimuli(stimulus_queue: StimulusQueue, stimuli: list[PerceptionStimulusPayload]) -> None:
     for stimulus in stimuli:
         stimulus_queue.push(
@@ -2647,6 +2675,13 @@ def _push_passive_stimuli(stimulus_queue: StimulusQueue, stimuli: list[Perceptio
 def _output(log_file: TextIO | None, text: str) -> None:
     print(text)
     _write_log_message(log_file, text)
+
+
+def _output_action_event(log_file: TextIO | None, text: str) -> None:
+    """Emit an action-manager event with a visual prefix so it is not confused with section headers."""
+    plain_line = f"  » {text}"
+    print(f"  {C_DIM}»{C_RESET} {text}")
+    _write_log_message(log_file, plain_line)
 
 
 def _stimulus_display_content(stimulus: Stimulus) -> str:
@@ -2669,7 +2704,8 @@ def _print_error(
     retry_delay: float,
 ) -> None:
     msg = f"── C{cycle_id} ERROR: {error} (retry in {retry_delay:.1f}s)"
-    print(f"\n\033[31m{msg}\033[0m", file=sys.stderr)
+    print(file=sys.stderr)
+    print(f"\033[31m{msg}\033[0m", file=sys.stderr)
     _write_log_message(log_file, msg, level=logging.WARNING, exc_info=True)
 
 
@@ -2837,7 +2873,8 @@ def _install_signal_handler(
         if shutting_down:
             return
         shutting_down = True
-        print(f"\n\n{C_DIM}{t('main.shutdown')}{C_RESET}")
+        print()
+        print(f"{C_DIM}{t('main.shutdown')}{C_RESET}")
         drained = action_manager.shutdown_with_timeout(wait_timeout_seconds=5.0)
         if log_file:
             log_file.close()

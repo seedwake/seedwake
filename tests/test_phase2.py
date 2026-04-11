@@ -915,6 +915,7 @@ class CycleTimingLogTests(unittest.TestCase):
                     stimuli=[],
                     perception_cues=[],
                     prompt_log_file=None,
+                    log_file=None,
                 )
 
         output = "\n".join(logs.output)
@@ -945,10 +946,13 @@ class CycleTimingLogTests(unittest.TestCase):
                 stimuli=[],
                 perception_cues=[],
                 prompt_log_file=None,
+                log_file=None,
             )
 
         action_manager.requeue_prompt_echoes.assert_called_once_with([pending_echo])
 
+    @patch("core.main._record_cycle_log")
+    @patch("core.main._display_cycle_terminal")
     @patch("core.main._degeneration_reroll_reason", side_effect=["还是在绕回旧轨道。", None])
     @patch("core.main.capture_camera_frame", return_value="frame-base64")
     @patch("core.main.run_cycle")
@@ -957,6 +961,8 @@ class CycleTimingLogTests(unittest.TestCase):
         mock_run_cycle: MagicMock,
         mock_capture_camera_frame: MagicMock,
         _mock_reroll_reason: MagicMock,
+        _mock_display_cycle_terminal: MagicMock,
+        _mock_record_cycle_log: MagicMock,
     ) -> None:
         runtime = _build_execute_cycle_runtime()
         runtime.camera_stream_url = "http://localhost:8081"
@@ -979,6 +985,7 @@ class CycleTimingLogTests(unittest.TestCase):
             stimuli=[],
             perception_cues=[],
             prompt_log_file=None,
+            log_file=None,
         )
 
         self.assertFalse(degeneration_alert)
@@ -1619,6 +1626,7 @@ class CycleCounterTests(unittest.TestCase):
             current_stimuli,
             perception_cues,
             prompt_log_file,
+            log_file,
         ) -> tuple[list[Thought], bool]:
             _ = (
                 runtime_obj,
@@ -1626,6 +1634,7 @@ class CycleCounterTests(unittest.TestCase):
                 current_stimuli,
                 perception_cues,
                 prompt_log_file,
+                log_file,
             )
             execute_calls.append(cycle_id)
             execute_attempts["count"] += 1
@@ -1633,24 +1642,19 @@ class CycleCounterTests(unittest.TestCase):
                 raise ConnectionRefusedError("refused")
             return [_make_thought(cycle_id, 1, "ok")], False
 
-        def finish_cycle(log_file, cycle_id, current_stimuli, thoughts) -> None:
-            _ = (log_file, cycle_id, current_stimuli, thoughts)
-            raise KeyboardInterrupt
-
         with self.assertLogs("core.main", level="INFO") as logs:
             with (
                 patch("core.main._next_cycle_id", return_value=294) as next_cycle_id,
                 patch("core.main._prepare_cycle", side_effect=prepare_cycle),
                 patch("core.main._execute_cycle", side_effect=execute_cycle),
                 patch("core.main._handle_cycle_failure", return_value=2.0) as handle_failure,
-                patch("core.main._finish_cycle", side_effect=finish_cycle) as finish_cycle_mock,
+                patch("core.main._safe_post_cycle_phase4", side_effect=KeyboardInterrupt),
             ):
                 with self.assertRaises(KeyboardInterrupt):
                     _run_engine_loop(log_file=None, prompt_log_file=None, runtime=_as_runtime(runtime), identity={})
 
         next_cycle_id.assert_called_once_with(runtime.stm, 0)
         handle_failure.assert_called_once()
-        finish_cycle_mock.assert_called_once()
         self.assertEqual(prepare_calls, [294, 294])
         self.assertEqual(execute_calls, [294, 294])
         output = "\n".join(logs.output)
@@ -1694,7 +1698,6 @@ class CycleCounterTests(unittest.TestCase):
             patch("core.main._next_cycle_id", return_value=301),
             patch("core.main._prepare_cycle", side_effect=prepare_cycle),
             patch("core.main._execute_cycle", return_value=(generated, False)),
-            patch("core.main._finish_cycle"),
             patch("core.main._publish_event") as publish_event,
             patch("core.main._safe_post_cycle_phase4", side_effect=KeyboardInterrupt),
         ):
