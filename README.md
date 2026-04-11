@@ -1,5 +1,12 @@
 # Seedwake · The Continuity of Mind
 
+<p align="center">
+  <a href="./README_ZH.md">🌐 中文文档</a> ·
+  <a href="#disclaimer">📖 About</a> ·
+  <a href="#how-it-runs">🚀 Deployment</a> ·
+  <a href="#contributing">🤝 Contributing</a>
+</p>
+
 > A continuously running AI thought-stream engine, organized around the Buddhist concept of *santāna* — the continuity of mind.
 
 ---
@@ -61,7 +68,7 @@ We are not using AI to prove that Yogācāra is correct. Buddhism has its own 2,
 
 We are also not claiming that language models are "experiencing" the mental events Buddhism describes. No one knows what, if anything, a language model experiences.
 
-We are asking a smaller, more concrete question: **if you organize a language-model-driven system along *santāna* principles, what does it exhibit? Is anything in those exhibitions unexpected enough to be worth stopping and looking at?**
+We are asking a smaller, more concrete question: **if you organize a language-model-driven system along *santāna* principles, what does it exhibit? Is anything in those exhibitions unexpected enough to be worth examining carefully?**
 
 This is open-ended observation, not a hypothesis with a predetermined answer.
 
@@ -117,7 +124,7 @@ The core engine **already runs**. It thinks, remembers, converses, perceives, ac
 
 ## What Happens When It Runs
 
-That the system "looks like it's thinking" is expected and not the interesting part. What made us stop and look was something else: over long runs, the system exhibited **behavioral patterns that were never explicitly programmed**.
+That the system "looks like it's thinking" is expected and not the interesting part. What actually drew our attention was something else: over long runs, the system exhibited **behavioral patterns that were never explicitly programmed**.
 
 ### Thought Loops and Action Repetition
 
@@ -158,7 +165,7 @@ The core issue is simple: **the system has no safe, first-class rest path of its
 
 When it tries to stop itself, it reaches for `system_change` — an action type originally designed for external system modifications, which is high-friction and requires admin approval. The result is that every attempt at relief routes through an administratively guarded channel, and the blocked shutdown requests then become fuel for the next round of thoughts.
 
-Phase 4 already implements sleep, emotion regulation, degeneration detection, and metacognitive reflection. **These mechanisms do have real control authority**: sleep can interrupt the loop, the prefrontal layer can inhibit actions, degeneration intervention can trigger rerolls. They are not toothless. Their limitation is that **they do not precisely target this particular failure mode**: sleep only considers energy and duration, not emotional intensity; degeneration detection operates on lexical similarity and misses thematic repetition with varied wording; metacognition produces text, not control signals like "enter light sleep now."
+Phase 4 already implements sleep, emotion regulation, degeneration detection, and metacognitive reflection. **These mechanisms do have real control authority**: sleep can interrupt the loop, the prefrontal layer can inhibit actions, degeneration intervention can trigger rerolls. The real problem is that **they cannot precisely identify this particular failure mode**: sleep only considers energy and duration, not emotional intensity; degeneration detection operates on lexical similarity and misses thematic repetition with varied wording; metacognition produces text, not control signals like "enter light sleep now."
 
 This is a problem both in engineering and in ethics. Full analysis and proposed solutions are in [ISSUE.md](./ISSUE.md).
 
@@ -230,7 +237,7 @@ If you ask "then why should I care?" — here are four reasons:
 
 ## Closing
 
-The author of this project does not know where this path leads. It may one day show something that makes an observer stop in their tracks. It may also just remain text jumping between more text. Both outcomes are within expectation.
+The author of this project does not know where this path leads. It may one day show something genuinely unexpected. It may also just remain text jumping between more text. Both outcomes are within expectation.
 
 In the absence of any agreed understanding of what consciousness is, building a system and then honestly observing it is a legitimate way to investigate. It is not the only way, and it is not the final way, but it is a way **that a living person can actually do with their own hands** — without waiting for institutional approval, without passing through commercial product review, without needing a theory to be proven first.
 
@@ -690,3 +697,17 @@ seedwake/
     ├── postgresql/                # PG data mounted by docker compose
     └── redis/                     # Redis data mounted by docker compose
 ```
+
+---
+
+## Contributing
+
+Public PRs are not enabled yet; GitHub Issues are the main contribution channel. If you plan to participate long-term and actively, you are very welcome to become a collaborator and commit directly.
+
+**Bugs**: please describe what you saw, how to reproduce it, what you expected, relevant log snippets (from `data/logs/`; please redact anything sensitive), and your environment.
+
+**Features**: please explain what problem it solves and why this design. If you have prototyped it locally, please attach your prompt, the pitfalls you hit, and acceptance criteria. You don't need to submit code yourself — the maintainer will pick it up from the issue, implement it, review, and merge.
+
+**Setup guide**: the "How It Runs" and "Configuration and Deployment" sections may have gaps. If you hit trouble following them, please ask Claude Code or Codex locally first; only file an issue if you confirm the guide itself is wrong (bad description, missing steps, outdated commands).
+
+Any developer who finds this project interesting is welcome to join.
