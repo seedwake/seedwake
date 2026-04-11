@@ -20,7 +20,7 @@ models:
     name: "qwen3.5:27b"
     num_predict: 4096
     num_ctx: 131072
-    temperature: 0.8
+    temperature: 1
 
   # 辅助模型：记忆整理、睡眠任务、反思、对话摘要、情绪推断等（Phase 2+）
   auxiliary:
@@ -36,7 +36,7 @@ models:
     name: "qwen3-embedding"
 
 short_term_memory:
-  context_window_size: 30       # prompt 上下文里保留多少轮念头
+  context_window_size: 15       # prompt 上下文里保留多少轮念头
   buffer_size: 500              # Redis 短期记忆 buffer 里保留多少轮
 
 long_term_memory:
@@ -139,7 +139,7 @@ prompt:
 
 bootstrap:
   habits:
-    - pattern: "遇到技术问题时倾向于先查文档"
+    - pattern: "遇到一个不熟悉的词，会想弄清它的来处"
       category: "cognitive"
       strength: 0.2
   identity:

@@ -22,7 +22,7 @@ models:
     name: "qwen3.5:27b"
     num_predict: 4096
     num_ctx: 131072
-    temperature: 0.8
+    temperature: 1
 
   # Auxiliary model for memory consolidation, sleep tasks, etc. (Phase 2+)
   auxiliary:
@@ -38,7 +38,7 @@ models:
     name: "qwen3-embedding"
 
 short_term_memory:
-  context_window_size: 30       # rounds kept in prompt context
+  context_window_size: 15       # rounds kept in prompt context
   buffer_size: 500              # total rounds in Redis buffer
 
 long_term_memory:
@@ -141,7 +141,7 @@ prompt:
 
 bootstrap:
   habits:
-    - pattern: "tends to check documentation first when facing technical problems"
+    - pattern: "when meeting an unfamiliar word, wants to trace its origin"
       category: "cognitive"
       strength: 0.2
   identity:
