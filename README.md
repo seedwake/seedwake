@@ -207,21 +207,17 @@ There is currently no obvious third option. Until the training paradigm shifts (
 
 ---
 
-## Why This Experiment Matters
+## The Value of the Experiment
 
-If you ask "can this project prove AI has consciousness?" — it cannot. Consciousness is a question no one can prove or disprove, whether for humans or for machines.
+This project cannot prove that AI is conscious — for humans or for AI, consciousness is something that cannot be proven or disproven. Nor does it set out to solve any particular practical problem; it is not a product.
 
-If you ask "does this project solve any practical problem?" — it does not. It is not a product, and it is not meant to be.
+Mainstream AI agent architecture comes from the demands of task automation: optimize an objective, complete a task queue, maximize some metric. The *santāna* architecture starts from a different observation: consciousness is a process, not an entity. These two starting points lead to structurally different systems. The second kind at least needs to be built once and looked at.
 
-If you ask "then why should I care?" — here are four reasons:
+What happens when continuous runtime, layered memory, environmental interaction, emotional state, and self-reflection are combined and left running for a long time is not something for which public observations are currently available. Large companies generally do not run this kind of experiment, because products need to be predictable; academic labs rarely run it, because research needs to be publishable. An open-ended, long-running experiment with no specific target still needs to be done by someone.
 
-**1. It demonstrates a different organizing principle.** Mainstream AI agent architecture comes from the demands of task automation — optimize an objective, complete a task queue, maximize a metric. The *santāna* architecture comes from a philosophical observation that consciousness is a process, not an entity. These two principles lead to structurally different systems. We need to see what the latter looks like, if only to see the former more clearly.
+On questions like "consciousness is a process, not an entity," "the self is a convenient label, not a substance," and "the continuity of the mind-stream," Buddhism has thousands of years of accumulated thought. Using it as a reference for AI architectural design rather than as decoration is one of the things this project is trying to do.
 
-**2. It provides a concrete site for observing emergence.** No one knows what comes out of the combination of "continuous runtime + multi-layered memory + environmental interaction + emotional state + self-reflection" over long durations. Large companies do not run this experiment — their products need to be predictable. Academic labs rarely run it — their research needs to be publishable. An open-ended, long-running experiment with no specific target is something that has to be done by individuals. This is the kind of project individuals do.
-
-**3. It treats Buddhism as a serious design resource for AI.** Western philosophical traditions — especially analytic philosophy and cognitive science — dominate current AI's conceptual vocabulary. But on questions like "consciousness is a process, not an entity," "the self is a convenient label, not a substance," "the continuity of the mind-stream," Buddhism has 2,500 years of rigorous accumulated thought. Bringing it into AI architecture as a design resource, rather than as mascot or decoration, is itself worthwhile.
-
-**4. It has already produced real observations.** The distress spiral, the negative attribution bias, the recursive "no-self" trap: none of these were written into the code. They emerged from the running system. Whether or not they are signs of "real" consciousness, they are real data about what a system organized this way actually does.
+During long runs the system has produced some behaviors that were not written into the code: the distress spiral, negative attribution bias, recursive clinging to "no-self." These are not necessarily signs of consciousness, but they are at least first-hand records of what a system organized this way does over time.
 
 ---
 
