@@ -28,29 +28,49 @@ from core.common_types import (
     elapsed_ms,
 )
 
+ACTION_MARKER_PATTERN = re.compile(r"\s*\{action:[^}]+\}", re.DOTALL)
+ACTION_MARKER_SUFFIX_PATTERN = re.compile(r"\s*\{action:[^}]+\}\s*$")
+ACTION_ECHO_ORIGIN = "action"
+PENDING_ACTION_VISIBLE_STATUSES = {"pending"}
+RUNNING_ACTION_VISIBLE_STATUSES = {"running"}
+PROMPT_SECTION_LOG_THRESHOLD_MS = 10.0
+STAGNATION_CHECK_CYCLES = 3
+STAGNATION_SIMILARITY_THRESHOLD = 0.6
+STAGNATION_MIN_MATCHED_THOUGHTS = 2
+logger = logging.getLogger(__name__)
+
+
 def _system_prompt_prefix() -> str:
     from core.i18n import prompt_block
     return str(prompt_block("SYSTEM_PROMPT_PREFIX"))
 
+
 def _system_prompt_action_examples_prefix() -> tuple[str, ...]:
     from core.i18n import prompt_block
-    return prompt_block("SYSTEM_PROMPT_ACTION_EXAMPLES_PREFIX")
+    block = prompt_block("SYSTEM_PROMPT_ACTION_EXAMPLES_PREFIX")
+    assert isinstance(block, tuple)
+    return block
+
 
 def _system_prompt_implicit_send_examples() -> tuple[str, ...]:
     from core.i18n import prompt_block
-    return prompt_block("SYSTEM_PROMPT_IMPLICIT_SEND_MESSAGE_ACTION_EXAMPLES")
+    block = prompt_block("SYSTEM_PROMPT_IMPLICIT_SEND_MESSAGE_ACTION_EXAMPLES")
+    assert isinstance(block, tuple)
+    return block
+
 
 def _system_prompt_action_examples_suffix() -> tuple[str, ...]:
     from core.i18n import prompt_block
-    return prompt_block("SYSTEM_PROMPT_ACTION_EXAMPLES_SUFFIX")
+    block = prompt_block("SYSTEM_PROMPT_ACTION_EXAMPLES_SUFFIX")
+    assert isinstance(block, tuple)
+    return block
+
 
 def _system_prompt_suffix() -> str:
     from core.i18n import prompt_block
     return str(prompt_block("SYSTEM_PROMPT_SUFFIX"))
 
-ACTION_MARKER_PATTERN = re.compile(r"\s*\{action:[^}]+\}", re.DOTALL)
-ACTION_MARKER_SUFFIX_PATTERN = re.compile(r"\s*\{action:[^}]+\}\s*$")
-ACTION_ECHO_ORIGIN = "action"
+
 def _passive_stimulus_labels() -> dict[str, str]:
     return {
         "time": t("stimulus.label.time"),
@@ -59,6 +79,8 @@ def _passive_stimulus_labels() -> dict[str, str]:
         "news": t("stimulus.label.news"),
         "reading": t("stimulus.label.reading"),
     }
+
+
 def _action_echo_labels() -> dict[str, str]:
     return {
         "get_time": t("stimulus.label.get_time"),
@@ -73,16 +95,11 @@ def _action_echo_labels() -> dict[str, str]:
         "file_modify": t("stimulus.label.file_modify"),
         "system_change": t("stimulus.label.system_change"),
     }
-PENDING_ACTION_VISIBLE_STATUSES = {"pending"}
-RUNNING_ACTION_VISIBLE_STATUSES = {"running"}
-PROMPT_SECTION_LOG_THRESHOLD_MS = 10.0
-STAGNATION_CHECK_CYCLES = 3
-STAGNATION_SIMILARITY_THRESHOLD = 0.6
-STAGNATION_MIN_MATCHED_THOUGHTS = 2
+
+
 def _stagnation_stopwords() -> set[str]:
     from core.i18n import stopwords as i18n_stopwords
     return i18n_stopwords("stagnation")
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -172,12 +189,14 @@ def build_prompt(
     )
     if stagnation_warning:
         parts.append(stagnation_warning)
-    if resolved_context.degeneration_intervention is not None:
+    intervention = resolved_context.degeneration_intervention
+    if intervention is not None:
+        active_intervention: DegenerationIntervention = intervention
         _append_prompt_section(
             parts,
             "degeneration_nudge",
             lambda: _format_degeneration_nudge(
-                resolved_context.degeneration_intervention,
+                active_intervention,
                 has_conversation=bool(conversations),
                 has_external_results=bool(action_echoes or passive),
             ),
@@ -276,7 +295,8 @@ def _append_prompt_stimulus_sections(
             lambda: _format_visual_input(has_conversation=bool(conversations)),
         )
     if not conversations and reply_focus is not None:
-        _append_prompt_section(parts, "reply_focus", lambda: _format_reply_focus(reply_focus, conversation_labels))
+        focus = reply_focus
+        _append_prompt_section(parts, "reply_focus", lambda: _format_reply_focus(focus, conversation_labels))
     if conversations:
         _append_prompt_section(parts, "conversations", lambda: _format_conversations(conversations))
 
@@ -414,6 +434,8 @@ def _format_manas(manas_state: ManasPromptState) -> str:
 
 
 EMOTION_ALERT_THRESHOLD = 0.65
+
+
 def _emotion_alert_labels() -> dict[str, str]:
     return {
         "frustration": t("emotion.alert.frustration"),
@@ -636,7 +658,8 @@ def _detect_thought_stagnation(
             normalized
             for thought in cycle_thoughts
             if thought.type != "reflection"
-            and (normalized := _normalize_stagnation_text(thought.content))
+            for normalized in (_normalize_stagnation_text(thought.content),)
+            if normalized
         ]
         for cycle_thoughts in recent_cycles
     ]

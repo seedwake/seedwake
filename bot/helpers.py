@@ -43,7 +43,11 @@ def format_action_event(payload: ActionEventPayload) -> str:
     summary = _event_summary_text(str(payload.get("summary") or ""))
     if not action_id:
         return ""
-    prefix = t("bot.action_confirm_prefix") if bool(payload.get("awaiting_confirmation")) else t("bot.action_update_prefix")
+    prefix = (
+        t("bot.action_confirm_prefix")
+        if bool(payload.get("awaiting_confirmation"))
+        else t("bot.action_update_prefix")
+    )
     return (
         f"{prefix}\n"
         f"{action_id} [{action_type}/{executor}] {status}\n"

@@ -6,7 +6,9 @@ from urllib import error
 
 from core.cycle import run_cycle, write_prompt_log_block
 from core.i18n import init as _init_i18n, localized_thought_type
+# noinspection PyProtectedMember
 from core.metacognition import _extract_reflection_content
+# noinspection PyProtectedMember
 from core.model_client import (
     _openai_compat_generate_system_prompt,
     _openai_compat_generate_user_guard,
@@ -16,6 +18,7 @@ from core.model_client import (
 from core.thought_parser import fallback_thought, parse_thoughts
 
 
+# noinspection PyPep8Naming
 def setUpModule() -> None:
     _init_i18n("zh")
 
@@ -247,6 +250,27 @@ class CycleTests(unittest.TestCase):
         self.assertIn("无法解析的输出", thoughts[0].content)
 
 
+def _fake_openai_chat_response() -> tuple[list, object]:
+    """Build a fake urlopen that returns a canned chat.completions response.
+
+    Returns (captured_requests, fake_urlopen_callable).
+    """
+    captured: list = []
+
+    def fake_urlopen(req, timeout):
+        _ = timeout
+        captured.append(req)
+        response = MagicMock()
+        response.read.return_value = (
+            '{"choices":[{"message":{"content":"[思考] a\\n[意图] b\\n[反应] c"}}]}'.encode("utf-8")
+        )
+        cm = MagicMock()
+        cm.__enter__.return_value = response
+        return cm
+
+    return captured, fake_urlopen
+
+
 class ModelClientTests(unittest.TestCase):
     def test_create_model_client_defaults_to_ollama(self) -> None:
         client = create_model_client({"name": "test-model"})
@@ -292,18 +316,7 @@ class ModelClientTests(unittest.TestCase):
         self.assertTrue(client.supports_tool_calls)
 
     def test_openai_compatible_generate_uses_chat_completions(self) -> None:
-        requests = []
-
-        def fake_urlopen(req, timeout):
-            _ = timeout
-            requests.append(req)
-            response = MagicMock()
-            response.read.return_value = (
-                '{"choices":[{"message":{"content":"[思考] a\\n[意图] b\\n[反应] c"}}]}'.encode("utf-8")
-            )
-            cm = MagicMock()
-            cm.__enter__.return_value = response
-            return cm
+        requests, fake_urlopen = _fake_openai_chat_response()
 
         with patch.dict("os.environ", {
             "OPENAI_COMPAT_BASE_URL": "https://api.example.com",
@@ -416,18 +429,7 @@ class ModelClientTests(unittest.TestCase):
         self.assertIn("status=failed", output)
 
     def test_openai_compatible_generate_supports_multimodal_chat_completions(self) -> None:
-        requests = []
-
-        def fake_urlopen(req, timeout):
-            _ = timeout
-            requests.append(req)
-            response = MagicMock()
-            response.read.return_value = (
-                '{"choices":[{"message":{"content":"[思考] a\\n[意图] b\\n[反应] c"}}]}'.encode("utf-8")
-            )
-            cm = MagicMock()
-            cm.__enter__.return_value = response
-            return cm
+        requests, fake_urlopen = _fake_openai_chat_response()
 
         with patch.dict("os.environ", {
             "OPENAI_COMPAT_BASE_URL": "https://api.example.com",

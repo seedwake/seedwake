@@ -336,7 +336,7 @@ class ActionManager:
         conversation_source: str | None,
     ) -> None:
         raw_action_type = str((thought.action_request or {}).get("type") or "custom")
-        request = action.request
+        action_request_payload = action.request
         logger.info(
             "planner produced action for %s (raw_type=%s, action_type=%s, executor=%s, "
             "conversation_source=%s, target_source=%s, target_entity=%s, reply_to=%s)",
@@ -345,9 +345,9 @@ class ActionManager:
             action.type,
             action.executor,
             str(conversation_source or "-"),
-            str(request.get("target_source") or "-"),
-            str(request.get("target_entity") or "-"),
-            str(request.get("reply_to_message_id") or "-"),
+            str(action_request_payload.get("target_source") or "-"),
+            str(action_request_payload.get("target_entity") or "-"),
+            str(action_request_payload.get("reply_to_message_id") or "-"),
         )
 
     def apply_controls(self, controls: list[ActionControl]) -> None:
@@ -891,7 +891,7 @@ class ActionManager:
         source = self._current_reply_focus_source()
         if source is None:
             return None
-        return {"source": source}
+        return ReplyFocusPromptState(source=source)
 
     def _remember_reply_focus(self, source: str) -> None:
         normalized_source = str(source).strip()

@@ -35,6 +35,7 @@ from core.common_types import ActionEventPayload, EventEnvelope, ThoughtEventPay
 from test_support import slice_window
 
 
+# noinspection PyPep8Naming
 def setUpModule() -> None:
     _init_i18n("zh")
 
@@ -222,7 +223,10 @@ class TelegramBotHelpersTests(unittest.TestCase):
             },
         }
         with patch("bot.main._read_env", return_value="12345:secret"):
-            create_application(config=config, redis_client=cast(redis_lib.Redis, FakeRedis()))
+            create_application(
+                config=config,
+                redis_client=cast(redis_lib.Redis, cast(object, FakeRedis())),
+            )
         try:
             self.assertEqual(format_status_event({"message": "ok"}), "System status: ok")
         finally:

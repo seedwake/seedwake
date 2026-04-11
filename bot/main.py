@@ -415,7 +415,11 @@ async def _handle_control_command(
         _mark_redis_unavailable(context.application)
         await _reply_text(update, t("bot.redis_submit_failed"))
         return
-    await _reply_text(update, t("bot.decision_submitted", decision=t("bot.decision_approve") if approved else t("bot.decision_reject"), action_id=action_id))
+    decision_label = t("bot.decision_approve") if approved else t("bot.decision_reject")
+    await _reply_text(
+        update,
+        t("bot.decision_submitted", decision=decision_label, action_id=action_id),
+    )
 
 
 async def _ensure_chat_user(
@@ -646,10 +650,11 @@ def _coerce_thought_payload(payload: JsonObject) -> ThoughtEventPayload | None:
     normalized_lines = [str(line) for line in lines if isinstance(line, str)]
     if len(normalized_lines) != len(lines):
         return None
-    return {
+    thought_payload: ThoughtEventPayload = {
         "cycle_id": cycle_id,
         "lines": normalized_lines,
     }
+    return thought_payload
 
 
 if __name__ == "__main__":

@@ -23,13 +23,17 @@ MANAS_REDIS_EXCEPTIONS = (
     ValueError,
     OSError,
 )
+logger = logging.getLogger(__name__)
+
+
 def _self_continuity_anchor() -> str:
     from core.i18n import prompt_block
     return str(prompt_block("SELF_CONTINUITY_ANCHOR"))
+
+
 def _externalized_self_anchor() -> str:
     from core.i18n import prompt_block
     return str(prompt_block("EXTERNALIZED_SELF_ANCHOR"))
-logger = logging.getLogger(__name__)
 
 
 class ManasRedisLike(Protocol):

@@ -140,7 +140,7 @@ class BackendTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "BACKEND_API_TOKEN not configured"):
                     create_app(
                         config={"language": "en", "admins": []},
-                        redis_client=cast(redis_lib.Redis, FakeRedis()),
+                        redis_client=cast(redis_lib.Redis, cast(object, FakeRedis())),
                     )
 
     def test_conversation_history_is_read_only(self) -> None:

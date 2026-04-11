@@ -25,13 +25,19 @@ DEFAULT_TOOL_CALL_SUPPORT = {
     "openclaw": False,
     "openai_compatible": True,
 }
+OPENAI_COMPAT_GENERATE_USER_MARKER = "\u200b"
+
+
 def _openai_compat_generate_system_prompt() -> str:
     from core.i18n import prompt_block
     return str(prompt_block("OPENAI_COMPAT_GENERATE_SYSTEM_PROMPT"))
-OPENAI_COMPAT_GENERATE_USER_MARKER = "\u200b"
+
+
 def _openai_compat_generate_user_guard() -> str:
     from core.i18n import prompt_block
     return str(prompt_block("OPENAI_COMPAT_GENERATE_USER_GUARD"))
+
+
 MODEL_CLIENT_EXCEPTIONS = (
     OllamaRequestError,
     OllamaResponseError,

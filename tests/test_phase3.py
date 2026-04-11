@@ -113,14 +113,17 @@ from core.common_types import (
     NewsItem,
     PrefrontalPromptState,
     RawActionRequest,
+    RecentConversationMessage,
     RecentConversationPrompt,
     ReflectionPromptEntry,
+    ReplyFocusPromptState,
     SleepStateSnapshot,
 )
 from core.thought_parser import Thought
 from test_support import ListRedisStub
 
 
+# noinspection PyPep8Naming
 def setUpModule() -> None:
     _init_i18n("zh")
 
@@ -1384,16 +1387,16 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             [_make_thought(cycle_id=2, index=1, thought_type="thinking", content="之前的念头")],
             30,
             prompt_context=PromptBuildContext(
-                reply_focus={"source": "telegram:1"},
+                reply_focus=ReplyFocusPromptState(source="telegram:1"),
                 recent_conversations=[
-                    {
-                        "source": "telegram:1",
-                        "source_name": "Alice",
-                        "source_label": "[Alice](telegram:1)",
-                        "summary": "",
-                        "last_timestamp": "2026-04-03T12:00:00+03:00",
-                        "messages": [],
-                    }
+                    RecentConversationPrompt(
+                        source="telegram:1",
+                        source_name="Alice",
+                        source_label="[Alice](telegram:1)",
+                        summary="",
+                        last_timestamp="2026-04-03T12:00:00+03:00",
+                        messages=[],
+                    )
                 ],
             ),
         )
@@ -3134,7 +3137,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                     message_text="哪有突然，是读到取之无禁时，觉得这风正好吹到了你这边的摸鱼时间，作为 VIP 不得配点这种不用动脑子的清风明月吗？",
                 )
             ],
-            reply_focus={"source": "telegram:558805571"},
+            reply_focus=ReplyFocusPromptState(source="telegram:558805571"),
         )
 
         self.assertEqual(notes, ["这句刚对同一处说过类似的话，这次别重复。"])
@@ -3426,16 +3429,19 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertNotIn("[Alice](telegram:1)：最近这句", prompt)
 
     def test_build_prompt_uses_english_conversation_punctuation_when_language_is_en(self) -> None:
-        recent_conversations = [{
-            "source": "telegram:1",
-            "source_label": "[Alice](telegram:1)",
-            "last_timestamp": "2026-04-03T10:00:00+00:00",
-            "summary": 'Alice said "earlier line", and I replied "got it."',
-            "messages": [
-                {"speaker_name": "Alice", "content": "latest line"},
-                {"speaker_name": "I", "content": "I am here."},
-            ],
-        }]
+        recent_conversations: list[RecentConversationPrompt] = [
+            RecentConversationPrompt(
+                source="telegram:1",
+                source_name="Alice",
+                source_label="[Alice](telegram:1)",
+                last_timestamp="2026-04-03T10:00:00+00:00",
+                summary='Alice said "earlier line", and I replied "got it."',
+                messages=[
+                    RecentConversationMessage(role="user", speaker_name="Alice", content="latest line", timestamp=""),
+                    RecentConversationMessage(role="assistant", speaker_name="I", content="I am here.", timestamp=""),
+                ],
+            )
+        ]
 
         try:
             _init_i18n("en")
@@ -4453,15 +4459,18 @@ class PerceptionManagerTests(unittest.TestCase):
         self.assertNotIn("。", summary)
 
     def test_sleep_impression_entry_line_uses_english_punctuation_when_language_is_en(self) -> None:
+        entry = ConversationEntry(
+            entry_id="",
+            role="user",
+            source="",
+            content="hello there",
+            timestamp="",
+            stimulus_id=None,
+            metadata={},
+        )
         try:
             _init_i18n("en")
-            line = _impression_entry_line(
-                {
-                    "role": "user",
-                    "content": "hello there",
-                },
-                "Alice",
-            )
+            line = _impression_entry_line(entry, "Alice")
         finally:
             _init_i18n("zh")
 

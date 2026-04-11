@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import FrameType
-from typing import Protocol, TextIO
+from typing import Protocol, TextIO, cast
 
 import psycopg
 import redis as redis_lib
@@ -141,6 +141,8 @@ def _recent_conversation_summary_base_prompt() -> str:
     return str(prompt_block("CONVERSATION_SUMMARY_SYSTEM_PROMPT")).format(
         target_chars=RECENT_CONVERSATION_SUMMARY_TARGET_CHARS,
     )
+
+
 RECENT_CONVERSATION_SUMMARY_BATCH_MAX_CHARS = 2400
 LTM_EXCEPTIONS = (
     psycopg.Error,
@@ -338,7 +340,9 @@ def _build_runtime_components(
         primary_client,
         model_config,
         config.get("actions", {}),
-        contact_resolver=lambda entity: _resolve_contact_target_for_entity(redis_client, ltm, entity),
+        contact_resolver=lambda entity: _resolve_contact_target_for_entity(
+            _as_conversation_redis(redis_client), ltm, entity,
+        ),
         news_feed_urls=list((config.get("perception", {}) or {}).get("news_feed_urls", [])),
         news_seen_ttl_hours=int((config.get("perception", {}) or {}).get("news_seen_ttl_hours", 720)),
         news_seen_max_items=int((config.get("perception", {}) or {}).get("news_seen_max_items", 5000)),
@@ -1280,7 +1284,7 @@ def _load_recent_conversations(
 
 def _exclude_current_impressions_from_context(
     ltm_context: list[str] | None,
-    current_impressions: list[str],
+    current_impressions: list[str] | None,
 ) -> list[str] | None:
     if not ltm_context or not current_impressions:
         return ltm_context
@@ -1327,10 +1331,10 @@ def _generate_cycle_thoughts(
     if not reroll_reason:
         return thoughts, inhibition_notes, reroll_reason, prefrontal_state
     logger.info("cycle C%s degeneration intervention reroll triggered: %s", cycle_id, reroll_reason)
-    retry_intervention = {
-        **runtime.degeneration_intervention,
-        "retry_feedback": reroll_reason,
-    }
+    retry_intervention = cast(
+        DegenerationIntervention,
+        cast(object, {**runtime.degeneration_intervention, "retry_feedback": reroll_reason}),
+    )
     retry_prefrontal_state = runtime.prefrontal.current_state(
         cycle_id,
         identity,
@@ -1434,6 +1438,11 @@ def _generate_reviewed_thoughts(
     prompt_context: PromptBuildContext,
     images: list[str] | None,
 ) -> tuple[list[Thought], list[str]]:
+    prefrontal_state = prompt_context.prefrontal_state
+    assert prefrontal_state is not None, "prefrontal_state must be set before reviewing thoughts"
+    sleep_state = prompt_context.sleep_state
+    assert sleep_state is not None, "sleep_state must be set before reviewing thoughts"
+    active_habits = prompt_context.active_habits or []
     thought_cycle_started_at = time.perf_counter()
     thoughts = run_cycle(
         runtime.primary_client,
@@ -1457,9 +1466,9 @@ def _generate_reviewed_thoughts(
         thoughts,
         recent_thoughts,
         stimuli,
-        goal_stack=prompt_context.prefrontal_state["goal_stack"],
+        goal_stack=prefrontal_state["goal_stack"],
         emotion=prompt_context.emotion,
-        active_habits=prompt_context.active_habits,
+        active_habits=active_habits,
     )
     thoughts = attention_result.thoughts
     attention_weights = {thought.thought_id: round(thought.attention_weight, 3) for thought in thoughts}
@@ -1475,8 +1484,8 @@ def _generate_reviewed_thoughts(
         thoughts,
         recent_thoughts,
         stimuli,
-        prompt_context.sleep_state,
-        prompt_context.active_habits,
+        sleep_state,
+        active_habits,
         runtime.action_manager.recent_send_message_requests(),
         prompt_context.reply_focus,
     )
@@ -1629,11 +1638,17 @@ def _advance_degeneration_intervention(
     remaining_cycles = int(intervention["remaining_cycles"]) - 1
     if remaining_cycles <= 0:
         return None
-    return {
-        **intervention,
-        "remaining_cycles": remaining_cycles,
-        "retry_feedback": unresolved_reason,
-    }
+    return cast(
+        DegenerationIntervention,
+        cast(
+            object,
+            {
+                **intervention,
+                "remaining_cycles": remaining_cycles,
+                "retry_feedback": unresolved_reason,
+            },
+        ),
+    )
 
 
 def _qualifying_external_actions(thoughts: list[Thought]) -> list[RawActionRequest]:
@@ -2384,7 +2399,8 @@ def _detect_runtime_degeneration(recent_thoughts: list[Thought], current_thought
             normalized
             for thought in grouped[cycle_id]
             if thought.type != "reflection"
-            and (normalized := _normalize_cycle_text(thought.content))
+            for normalized in (_normalize_cycle_text(thought.content),)
+            if normalized
         ]
         for cycle_id in recent_cycle_ids
     ]
@@ -2724,14 +2740,14 @@ def _as_sleep_redis(redis_client: redis_lib.Redis | None) -> SleepRedisLike | No
 
 
 def _resolve_contact_target_for_entity(
-    redis_client: redis_lib.Redis | None,
+    redis_client: ConversationRedisLike | None,
     ltm: LongTermMemory,
     entity_tag: str,
 ) -> str | None:
     target = ltm.resolve_telegram_target_for_entity(entity_tag)
     if target:
         return target
-    return _resolve_recent_telegram_target_for_entity(_as_conversation_redis(redis_client), entity_tag)
+    return _resolve_recent_telegram_target_for_entity(redis_client, entity_tag)
 
 
 def _resolve_recent_telegram_target_for_entity(

@@ -1,7 +1,7 @@
 """Shared helpers for test doubles."""
 
 from core.action import ActionRedisLike
-from core.stimulus import ConversationRedisLike
+from core.sleep import SleepRedisLike
 
 
 def slice_window(items: list, start: int, end: int) -> list:
@@ -12,7 +12,7 @@ def slice_window(items: list, start: int, end: int) -> list:
     return items[start:end + 1]
 
 
-class ListRedisStub(ActionRedisLike, ConversationRedisLike):
+class ListRedisStub(ActionRedisLike, SleepRedisLike):
     def __init__(self):
         self.lists = {}
         self.hashes = {}
@@ -61,10 +61,10 @@ class ListRedisStub(ActionRedisLike, ConversationRedisLike):
     def hgetall(self, key):
         return dict(self.hashes.get(key, {}))
 
-    def get(self, key):
+    def get(self, key: str) -> str | bytes | None:
         return self.values.get(key)
 
-    def set(self, key, value):
+    def set(self, key: str, value: str) -> bool:
         self.values[key] = value
         return True
 

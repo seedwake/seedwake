@@ -21,17 +21,6 @@ from core.common_types import EmotionSnapshot, elapsed_ms
 
 EMOTION_STATE_KEY = "seedwake:emotion_state"
 DEFAULT_EMOTION_DIMENSIONS = ["curiosity", "calm", "frustration", "satisfaction", "concern"]
-def _emotion_labels() -> dict[str, str]:
-    return {
-        "curiosity": t("emotion.dim.curiosity"),
-        "calm": t("emotion.dim.calm"),
-        "frustration": t("emotion.dim.frustration"),
-        "satisfaction": t("emotion.dim.satisfaction"),
-        "concern": t("emotion.dim.concern"),
-    }
-def _emotion_inference_system_prompt() -> str:
-    from core.i18n import prompt_block
-    return str(prompt_block("EMOTION_INFERENCE_SYSTEM_PROMPT"))
 EMOTION_REDIS_EXCEPTIONS = (
     redis_lib.RedisError,
     json.JSONDecodeError,
@@ -40,6 +29,21 @@ EMOTION_REDIS_EXCEPTIONS = (
     OSError,
 )
 logger = logging.getLogger(__name__)
+
+
+def _emotion_labels() -> dict[str, str]:
+    return {
+        "curiosity": t("emotion.dim.curiosity"),
+        "calm": t("emotion.dim.calm"),
+        "frustration": t("emotion.dim.frustration"),
+        "satisfaction": t("emotion.dim.satisfaction"),
+        "concern": t("emotion.dim.concern"),
+    }
+
+
+def _emotion_inference_system_prompt() -> str:
+    from core.i18n import prompt_block
+    return str(prompt_block("EMOTION_INFERENCE_SYSTEM_PROMPT"))
 
 
 class EmotionManager:

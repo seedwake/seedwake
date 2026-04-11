@@ -35,12 +35,14 @@ _reflection_header_label: str | None = None
 def _reflection_header_pattern() -> re.Pattern:
     global _reflection_header_pat, _reflection_header_label
     label = t("metacognition.reflection_header_label")
-    if _reflection_header_pat is None or _reflection_header_label != label:
-        _reflection_header_label = label
-        _reflection_header_pat = re.compile(
+    pattern = _reflection_header_pat
+    if pattern is None or _reflection_header_label != label:
+        pattern = re.compile(
             rf"^\[{re.escape(label)}(?:-C\d+-\d+)?]\s*(?P<content>.+)$", re.MULTILINE,
         )
-    return _reflection_header_pat
+        _reflection_header_pat = pattern
+        _reflection_header_label = label
+    return pattern
 
 
 def _reflection_system_prompt() -> str:

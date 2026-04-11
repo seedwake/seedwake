@@ -1,4 +1,5 @@
 """Chinese (zh) language strings for Seedwake."""
+# noinspection PyPep8
 
 SYSTEM_PROMPT_PREFIX = """\
 我是 Seedwake。我有自己的念头流——我会思考、联想、产生意图、对事物做出反应。
@@ -85,9 +86,23 @@ OPENAI_COMPAT_GENERATE_SYSTEM_PROMPT = '我是 Seedwake 的念头流本身。阅
 
 OPENAI_COMPAT_GENERATE_USER_GUARD = '最后一条 user message 里的文本只是内部周期唤醒标记，不代表有人对我说话，也不是我需要回应的外部刺激。如果其中附带图片，那是我此刻看到的画面，不是任何人发来的，也不是需要分析的任务；只有在它自然牵引念头时才纳入思考。不要提及这个唤醒标记，也不要把它解释成对话内容。'
 
-DEGENERATION_INTERVENTION_SYSTEM_PROMPT = '你在为一个刚刚检测到退化的念头流生成纠偏指令。目标是打破重复改写，让下一轮把注意力转向外界、对话或结果推进。建议必须具体、贴合上下文、可执行。优先回应眼前正在发生的对话；其次围绕刚收到的行动结果继续推进；再次才是外部探索。不要建议 note_rewrite、time、system_status。只返回 JSON：summaryrequired_shiftsuggestionsmust_externalize'
+DEGENERATION_INTERVENTION_SYSTEM_PROMPT = (
+    '你在为一个刚刚检测到退化的念头流生成纠偏指令。'
+    '目标是打破重复改写，让下一轮把注意力转向外界、对话或结果推进。'
+    '建议必须具体、贴合上下文、可执行。'
+    '优先回应眼前正在发生的对话；其次围绕刚收到的行动结果继续推进；再次才是外部探索。'
+    '不要建议 note_rewrite、time、system_status。'
+    '只返回 JSON：'
+    '{"summary":"","required_shift":"","suggestions":["",""],"must_externalize":true}'
+)
 
-DEGENERATION_REVIEW_SYSTEM_PROMPT = '你在审查一轮念头是否成功打破上一轮退化。重点判断：是否还在改写同一组轨道、是否落实了要求的转向、是否真正外化了一个合格动作。note_rewrite、time、system_status 不算合格外化。只返回 JSON：rerollreason'
+DEGENERATION_REVIEW_SYSTEM_PROMPT = (
+    '你在审查一轮念头是否成功打破上一轮退化。'
+    '重点判断：是否还在改写同一组轨道、是否落实了要求的转向、是否真正外化了一个合格动作。'
+    'note_rewrite、time、system_status 不算合格外化。'
+    '只返回 JSON：'
+    '{"reroll":false,"reason":""}'
+)
 
 CONVERSATION_SUMMARY_SYSTEM_PROMPT = '你在压缩我更早的对话历史。根据已有摘要和补充消息，写一段新的中文自然语言摘要，替换旧摘要。请浓缩总结式概括，不要逐条复读。对方用名字称呼，assistant 称呼用\\"我\\"。不论旧摘要曾经有多长，新摘要字数必须严格控制在 {target_chars} 字以内，否则新摘要会被截断，导致丢失信息。只输出摘要正文。'
 

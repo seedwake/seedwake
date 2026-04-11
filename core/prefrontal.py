@@ -258,7 +258,10 @@ def _degeneration_guidance(intervention: DegenerationIntervention) -> list[str]:
     ]
     if intervention["must_externalize"]:
         guidance.append(t("prefrontal.guidance.degeneration.must_externalize"))
-    guidance.extend(t("prefrontal.guidance.degeneration.suggestion", suggestion=suggestion) for suggestion in intervention["suggestions"][:2])
+    guidance.extend(
+        t("prefrontal.guidance.degeneration.suggestion", suggestion=suggestion)
+        for suggestion in intervention["suggestions"][:2]
+    )
     retry_feedback = str(intervention.get("retry_feedback") or "").strip()
     if retry_feedback:
         guidance.append(t("prefrontal.guidance.degeneration.retry_feedback", feedback=retry_feedback))

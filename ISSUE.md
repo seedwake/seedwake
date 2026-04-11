@@ -146,7 +146,7 @@ Thematic repetition with varied surface wording can evade it.
 **Missing mechanism:** A semantic, longer-horizon detector over 10-20 cycles, ideally embedding-
 based, should complement the current rewritten-text detector rather than replace it.
 
-### 6. Sleep / Energy Logic Underweights Emotional Distress
+### 6. Sleep / Energy Logic Under-weights Emotional Distress
 
 **What happened:** Sleep can trigger, and light/deep sleep are real control mechanisms. But the
 energy depletion path does not reflect sustained emotional distress strongly enough.

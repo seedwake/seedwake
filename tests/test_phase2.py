@@ -39,16 +39,30 @@ from core.memory.short_term import LATEST_CYCLE_KEY
 from core.memory.identity import load_identity
 from core.memory.long_term import LongTermEntry, LongTermMemory
 # noinspection PyProtectedMember
-from core.sleep import SleepManager, _archive_action_result_memories, _light_sleep_trace_line, _update_impression_memories
+from core.sleep import (
+    SleepManager,
+    _archive_action_result_memories,
+    _light_sleep_trace_line,
+    _update_impression_memories,
+)
 # noinspection PyProtectedMember
 from core.memory.short_term import ShortTermMemory, _thought_to_dict, _dict_to_thought
 from core.stimulus import Stimulus, append_conversation_history
 from core.thought_parser import Thought
-from core.common_types import EmotionSnapshot, JsonObject, ManasPromptState, PrefrontalPromptState, SleepStateSnapshot
+from core.common_types import (
+    DegenerationIntervention,
+    EmotionSnapshot,
+    JsonObject,
+    ManasPromptState,
+    PrefrontalPromptState,
+    RawActionRequest,
+    SleepStateSnapshot,
+)
 from core.model_client import ModelClient
 from test_support import ListRedisStub
 
 
+# noinspection PyPep8Naming
 def setUpModule() -> None:
     _init_i18n("zh")
 
@@ -195,7 +209,7 @@ class DegenerationInterventionTests(unittest.TestCase):
         self.assertTrue(intervention["must_externalize"])
 
     def test_degeneration_reroll_reason_requires_qualifying_action_before_llm(self) -> None:
-        intervention = {
+        intervention: DegenerationIntervention = {
             "source_cycle_id": 41,
             "remaining_cycles": 2,
             "summary": "最近三轮一直在围着同一组回应打转。",
@@ -216,7 +230,7 @@ class DegenerationInterventionTests(unittest.TestCase):
         self.assertEqual(reason, "这一轮仍然没有把念头外化成合格动作。")
 
     def test_degeneration_reroll_reason_uses_llm_review_when_action_exists(self) -> None:
-        intervention = {
+        intervention: DegenerationIntervention = {
             "source_cycle_id": 41,
             "remaining_cycles": 2,
             "summary": "最近三轮一直在围着同一组回应打转。",
@@ -230,7 +244,7 @@ class DegenerationInterventionTests(unittest.TestCase):
             1,
             "intention",
             '我现在就回他一句。 {action:send_message, message:"我在。"}',
-            action_request={"type": "send_message", "params": 'message:"我在。"'},
+            action_request=RawActionRequest(type="send_message", params='message:"我在。"'),
         )
 
         reason = _degeneration_reroll_reason(
@@ -245,7 +259,7 @@ class DegenerationInterventionTests(unittest.TestCase):
         self.assertEqual(reason, "还是在绕回旧解释。")
 
     def test_advance_degeneration_intervention_clears_when_resolved(self) -> None:
-        intervention = {
+        intervention: DegenerationIntervention = {
             "source_cycle_id": 41,
             "remaining_cycles": 2,
             "summary": "最近三轮一直在围着同一组回应打转。",
@@ -257,7 +271,7 @@ class DegenerationInterventionTests(unittest.TestCase):
         self.assertIsNone(_advance_degeneration_intervention(intervention, unresolved_reason=None))
 
     def test_advance_degeneration_intervention_carries_feedback_one_more_cycle(self) -> None:
-        intervention = {
+        intervention: DegenerationIntervention = {
             "source_cycle_id": 41,
             "remaining_cycles": 2,
             "summary": "最近三轮一直在围着同一组回应打转。",
@@ -284,7 +298,7 @@ class DegenerationInterventionTests(unittest.TestCase):
                 1,
                 "intention",
                 '{action:note_rewrite, content:"still thinking"}',
-                action_request={"type": "note_rewrite", "params": 'content:"still thinking"'},
+                action_request=RawActionRequest(type="note_rewrite", params='content:"still thinking"'),
             ),
             Thought(
                 "C42-2",
@@ -292,7 +306,7 @@ class DegenerationInterventionTests(unittest.TestCase):
                 2,
                 "intention",
                 '{action:time}',
-                action_request={"type": "time", "params": ""},
+                action_request=RawActionRequest(type="time", params=""),
             ),
             Thought(
                 "C42-3",
@@ -300,7 +314,7 @@ class DegenerationInterventionTests(unittest.TestCase):
                 3,
                 "intention",
                 '{action:reading, query:"Walden solitude"}',
-                action_request={"type": "reading", "params": 'query:"Walden solitude"'},
+                action_request=RawActionRequest(type="reading", params='query:"Walden solitude"'),
             ),
         ]
 
@@ -955,7 +969,7 @@ class CycleTimingLogTests(unittest.TestCase):
             "must_externalize": True,
         }
         generated_thoughts = [_make_thought(42, 1, "这轮试着换个方向。")]
-        runtime.prefrontal.review_thoughts.side_effect = lambda thoughts, *_args: (thoughts, [])
+        runtime.prefrontal.review_thoughts.side_effect = lambda reviewed, *_args: (reviewed, [])
         mock_run_cycle.return_value = generated_thoughts
 
         thoughts, degeneration_alert = _execute_cycle(
@@ -1300,22 +1314,8 @@ class Phase4RuntimeTests(unittest.TestCase):
 
         self.assertEqual(line, "[意图] 我想直接回一句。")
 
-    @patch("core.sleep.embed_text", return_value=[0.1, 0.2])
-    @patch("core.sleep._summarize_impression", return_value="关系: 朋友。联系方式: telegram:558805571。")
-    def test_update_impression_memories_stores_person_alias_tag(
-        self,
-        _mock_summarize: MagicMock,
-        _mock_embed: MagicMock,
-    ) -> None:
-        redis_client = ListRedisStub()
-        append_conversation_history(
-            redis_client,
-            role="user",
-            source="telegram:558805571",
-            content="你好",
-            metadata={"telegram_username": "Flight5586", "telegram_full_name": "Flight5586"},
-            timestamp=datetime.now(timezone.utc),
-        )
+    def _run_impression_update(self, redis_client: ListRedisStub) -> "MagicMock":
+        """Build a mock LTM, invoke _update_impression_memories, assert one update."""
         ltm = MagicMock()
         ltm.recent_by_time.return_value = []
         ltm.upsert_impression.return_value = 1
@@ -1332,6 +1332,27 @@ class Phase4RuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(updated, 1)
+        return ltm
+
+    @patch("core.sleep.embed_text", return_value=[0.1, 0.2])
+    @patch("core.sleep._summarize_impression", return_value="关系: 朋友。联系方式: telegram:558805571。")
+    def test_update_impression_memories_stores_person_alias_tag(
+        self,
+        _mock_summarize: MagicMock,
+        _mock_embed: MagicMock,
+    ) -> None:
+        redis_client = ListRedisStub()
+        append_conversation_history(
+            redis_client,
+            role="user",
+            source="telegram:558805571",
+            content="你好",
+            metadata={"telegram_username": "Flight5586", "telegram_full_name": "Flight5586"},
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        ltm = self._run_impression_update(redis_client)
+
         ltm.upsert_impression.assert_called_once_with(
             primary_entity_tag="telegram:558805571",
             related_entity_tags=["person:flight5586"],
@@ -1358,22 +1379,9 @@ class Phase4RuntimeTests(unittest.TestCase):
             metadata={"telegram_username": "jamboberq", "telegram_full_name": "Jam Boberq"},
             timestamp=datetime.now(timezone.utc),
         )
-        ltm = MagicMock()
-        ltm.recent_by_time.return_value = []
-        ltm.upsert_impression.return_value = 1
 
-        updated = _update_impression_memories(
-            redis_client,
-            ltm,
-            MagicMock(),
-            "embed-model",
-            MagicMock(),
-            {"name": "aux"},
-            cycle_id=12,
-            emotion=_emotion_snapshot(summary="平静 0.40"),
-        )
+        ltm = self._run_impression_update(redis_client)
 
-        self.assertEqual(updated, 1)
         ltm.upsert_impression.assert_called_once_with(
             primary_entity_tag="telegram:8469901143",
             related_entity_tags=["person:jamboberq", "person:jam boberq"],

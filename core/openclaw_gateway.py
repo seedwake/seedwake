@@ -47,9 +47,13 @@ def _websocket_exception_types(exceptions_module: ModuleType) -> tuple[type[Base
 
 ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 CONNECT_TIMEOUT_SECONDS = 10
+
+
 def _openclaw_device_auth_dependency_error() -> str:
     from core.i18n import t
     return t("openclaw.missing_cryptography")
+
+
 OPENCLAW_TRANSPORT_EXCEPTIONS = (
     OllamaRequestError,
     OllamaResponseError,

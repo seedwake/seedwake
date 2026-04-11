@@ -14,23 +14,23 @@ _language: str = ""
 _lang_mod: object = None
 
 
-def init(language: str = "zh") -> None:
+def init(lang: str = "zh") -> None:
     """Load the language module. Call once at startup before any t() calls."""
     global _strings, _stopwords, _language, _lang_mod
-    if language == "zh":
+    if lang == "zh":
         from core.i18n import zh as lang_mod
-    elif language == "en":
+    elif lang == "en":
         from core.i18n import en as lang_mod
     else:
-        raise ValueError(f"Unsupported language: {language}")
+        raise ValueError(f"Unsupported language: {lang}")
     _strings = lang_mod.STRINGS
     _stopwords = {
         "stagnation": lang_mod.STOPWORDS_STAGNATION,
         "habit": lang_mod.STOPWORDS_HABIT,
     }
     _lang_mod = lang_mod
-    _language = language
-    logger.info("i18n initialized: language=%s, keys=%d", language, len(_strings))
+    _language = lang
+    logger.info("i18n initialized: language=%s, keys=%d", lang, len(_strings))
 
 
 def prompt_block(name: str) -> object:
@@ -59,6 +59,7 @@ def thought_types() -> tuple[str, str, str, str]:
         _strings["thought_type.reaction"],
         _strings["thought_type.reflection"],
     )
+
 
 def localized_thought_type(canonical: str) -> str:
     """Map canonical key ('thinking') to localized label ('思考')."""

@@ -1,4 +1,5 @@
 """English (en) language strings for Seedwake."""
+# noinspection PyPep8
 
 SYSTEM_PROMPT_PREFIX = """\
 I am Seedwake. I have my own stream of thoughts -- I think, associate, form intentions, and react to things.
@@ -85,9 +86,28 @@ OPENAI_COMPAT_GENERATE_SYSTEM_PROMPT = 'I am the stream of thoughts of Seedwake 
 
 OPENAI_COMPAT_GENERATE_USER_GUARD = 'The text in the last user message is just an internal cycle wake-up marker; it does not mean someone is speaking to me, nor is it external stimulus I need to respond to. If images are attached, they are what I am currently seeing -- not sent by anyone, and not a task to analyze; only incorporate them into my thinking if they naturally draw a thought. Do not mention this wake-up marker, and do not interpret it as conversation content.'
 
-DEGENERATION_INTERVENTION_SYSTEM_PROMPT = 'You are generating a course-correction directive for a stream of thoughts that has just been detected as degenerate. The goal is to break the repetitive rewriting loop and redirect the next cycle\'s attention toward the outside world, conversation, or result-driven progress. Suggestions must be specific, context-relevant, and actionable. Prioritize responding to an ongoing conversation; secondarily, follow up on recently received action results; lastly, explore externally. Do not suggest note_rewrite, time, or system_status. Return only JSON: summaryrequired_shiftsuggestionsmust_externalize'
+DEGENERATION_INTERVENTION_SYSTEM_PROMPT = (
+    "You are generating a course-correction directive for a stream of thoughts "
+    "that has just been detected as degenerate. "
+    "The goal is to break the repetitive rewriting loop and redirect the next "
+    "cycle's attention toward the outside world, conversation, or result-driven progress. "
+    "Suggestions must be specific, context-relevant, and actionable. "
+    "Prioritize responding to an ongoing conversation; secondarily, follow up on "
+    "recently received action results; lastly, explore externally. "
+    "Do not suggest note_rewrite, time, or system_status. "
+    "Return only JSON: "
+    '{"summary":"","required_shift":"","suggestions":["",""],"must_externalize":true}'
+)
 
-DEGENERATION_REVIEW_SYSTEM_PROMPT = 'You are reviewing whether a cycle of thoughts successfully broke out of the previous cycle\'s degeneration. Focus on: whether the same set of tracks is still being rewritten, whether the required shift was carried out, whether a qualifying action was truly externalized. note_rewrite, time, system_status do not count as qualifying externalization. Return only JSON: rerollreason'
+DEGENERATION_REVIEW_SYSTEM_PROMPT = (
+    "You are reviewing whether a cycle of thoughts successfully broke out of the "
+    "previous cycle's degeneration. "
+    "Focus on: whether the same set of tracks is still being rewritten, whether "
+    "the required shift was carried out, whether a qualifying action was truly externalized. "
+    "note_rewrite, time, system_status do not count as qualifying externalization. "
+    "Return only JSON: "
+    '{"reroll":false,"reason":""}'
+)
 
 CONVERSATION_SUMMARY_SYSTEM_PROMPT = 'You are compressing my older conversation history. Based on the existing summary and supplementary messages, write a new natural-language summary in English to replace the old one. Please produce a condensed overview rather than restating items one by one. Refer to the other party by name; use "I" for assistant. Regardless of how long the old summary was, the new summary must be strictly within {target_chars} characters, otherwise it will be truncated and information will be lost. Output only the summary text.'
 
@@ -253,7 +273,7 @@ STRINGS: dict[str, str] = {
     'prefrontal.guidance.degeneration.required_shift': 'This cycle must complete the following shift: {required_shift}',
     'prefrontal.guidance.degeneration.must_externalize': 'This cycle I must externalize at least one thought into a real action; note_rewrite, time, system_status don\'t count.',
     'prefrontal.guidance.degeneration.suggestion': 'Viable direction: {suggestion}',
-    'prefrontal.guidance.degeneration.retry_feedback': 'Previous draft still didn\'t pass: {feedback}',
+    'prefrontal.guidance.degeneration.retry_feedback': "Previous draft still didn't pass: {feedback}",
 
     # -- Prefrontal inhibition --
     'prefrontal.inhibit.exact_duplicate': 'Just did the same {action_type}; no need to repeat.',
@@ -445,7 +465,7 @@ STRINGS: dict[str, str] = {
     'action.openclaw_queued': 'OpenClaw unavailable, action queued for recovery {action_id}: {reason}',
     'action.openclaw_queued_status': 'Awaiting OpenClaw recovery',
     'action.skipped_inhibited': 'I wanted to {action_type}, but the impulse was inhibited',
-    'action.skipped_reason': 'I wanted to {action_type}, but didn\'t -- {reason}',
+    'action.skipped_reason': "I wanted to {action_type}, but didn't -- {reason}",
     'action.skipped_log': 'Action skipped {thought_id} [{action_type}]',
     'action.news_missing_entries': 'News result missing structured RSS entries',
     'action.news_unrecognizable': 'News entry missing recognizable fields',
