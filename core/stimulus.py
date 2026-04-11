@@ -12,6 +12,7 @@ from typing import Protocol, TypeGuard
 from redis import exceptions as redis_exceptions
 from uuid import uuid4
 
+from core.i18n import t
 from core.common_types import (
     ConversationEntry,
     JsonObject,
@@ -814,7 +815,7 @@ def _recent_conversation_message(
     source_name: str,
 ) -> RecentConversationMessage:
     role = str(entry.get("role") or "").strip()
-    speaker_name = "我" if role == "assistant" else source_name
+    speaker_name = t("main.conv_summary_speaker_self") if role == "assistant" else source_name
     return {
         "role": role,
         "speaker_name": speaker_name,

@@ -18,9 +18,16 @@ from core.common_types import HabitControlSignal, HabitPromptEntry, JsonObject, 
 
 logger = logging.getLogger(__name__)
 HABIT_MIN_PATTERN_LENGTH = 4
-HABIT_TEXT_STOPWORDS = {"刚才", "现在", "继续", "已经", "不是", "只是", "一个", "没有"}
+
+
+def _habit_text_stopwords() -> set[str]:
+    from core.i18n import stopwords
+    return stopwords("habit")
+
+
 HABIT_EMBEDDING_DIMENSIONS = 4096
 ACTION_IMPULSE_SIGNAL_TYPE = "action_impulse"
+ACTION_IMPULSE_PATTERN_PREFIX = "action_impulse:"
 
 
 @dataclass(frozen=True)
@@ -150,11 +157,17 @@ class HabitMemory:
                     SET signal_type = 'action_impulse',
                         signal_payload = jsonb_build_object(
                             'action_type',
-                            substring(pattern FROM '^经常会冒出 ([a-z_]+) 行动冲动$')
+                            COALESCE(
+                                substring(pattern FROM '^经常会冒出 ([a-z_]+) 行动冲动$'),
+                                substring(pattern FROM '^frequently has ([a-z_]+) action impulses$')
+                            )
                         )
                     WHERE category = 'behavioral'
                       AND signal_type = ''
-                      AND pattern ~ '^经常会冒出 [a-z_]+ 行动冲动$'
+                      AND (
+                          pattern ~ '^经常会冒出 [a-z_]+ 行动冲动$'
+                          OR pattern ~ '^frequently has [a-z_]+ action impulses$'
+                      )
                     """
                 )
                 cur.execute(
@@ -171,12 +184,35 @@ class HabitMemory:
                                created_at,
                                updated_at,
                                source_memories,
+                               CASE
+                                   WHEN category = 'behavioral'
+                                     AND signal_type = 'action_impulse'
+                                     AND COALESCE(signal_payload->>'action_type', '') <> ''
+                                       THEN 'action_impulse:' || (signal_payload->>'action_type')
+                                   ELSE pattern
+                               END AS canonical_pattern,
                                FIRST_VALUE(id) OVER (
-                                   PARTITION BY pattern, category
+                                   PARTITION BY
+                                       CASE
+                                           WHEN category = 'behavioral'
+                                             AND signal_type = 'action_impulse'
+                                             AND COALESCE(signal_payload->>'action_type', '') <> ''
+                                               THEN 'action_impulse:' || (signal_payload->>'action_type')
+                                           ELSE pattern
+                                       END,
+                                       category
                                    ORDER BY id
                                ) AS keep_id,
                                COUNT(*) OVER (
-                                   PARTITION BY pattern, category
+                                   PARTITION BY
+                                       CASE
+                                           WHEN category = 'behavioral'
+                                             AND signal_type = 'action_impulse'
+                                             AND COALESCE(signal_payload->>'action_type', '') <> ''
+                                               THEN 'action_impulse:' || (signal_payload->>'action_type')
+                                           ELSE pattern
+                                       END,
+                                       category
                                ) AS group_count
                         FROM habit_seeds
                     ),
@@ -253,12 +289,35 @@ class HabitMemory:
                         SELECT id,
                                pattern,
                                category,
+                               CASE
+                                   WHEN category = 'behavioral'
+                                     AND signal_type = 'action_impulse'
+                                     AND COALESCE(signal_payload->>'action_type', '') <> ''
+                                       THEN 'action_impulse:' || (signal_payload->>'action_type')
+                                   ELSE pattern
+                               END AS canonical_pattern,
                                FIRST_VALUE(id) OVER (
-                                   PARTITION BY pattern, category
+                                   PARTITION BY
+                                       CASE
+                                           WHEN category = 'behavioral'
+                                             AND signal_type = 'action_impulse'
+                                             AND COALESCE(signal_payload->>'action_type', '') <> ''
+                                               THEN 'action_impulse:' || (signal_payload->>'action_type')
+                                           ELSE pattern
+                                       END,
+                                       category
                                    ORDER BY id
                                ) AS keep_id,
                                COUNT(*) OVER (
-                                   PARTITION BY pattern, category
+                                   PARTITION BY
+                                       CASE
+                                           WHEN category = 'behavioral'
+                                             AND signal_type = 'action_impulse'
+                                             AND COALESCE(signal_payload->>'action_type', '') <> ''
+                                               THEN 'action_impulse:' || (signal_payload->>'action_type')
+                                           ELSE pattern
+                                       END,
+                                       category
                                ) AS group_count
                         FROM habit_seeds
                     )
@@ -267,6 +326,16 @@ class HabitMemory:
                     WHERE duplicate.id = ranked.id
                       AND ranked.group_count > 1
                       AND ranked.id <> ranked.keep_id
+                    """
+                )
+                cur.execute(
+                    """
+                    UPDATE habit_seeds
+                    SET pattern = 'action_impulse:' || (signal_payload->>'action_type')
+                    WHERE category = 'behavioral'
+                      AND signal_type = 'action_impulse'
+                      AND COALESCE(signal_payload->>'action_type', '') <> ''
+                      AND pattern <> 'action_impulse:' || (signal_payload->>'action_type')
                     """
                 )
                 cur.execute(
@@ -758,6 +827,10 @@ def _normalize_habit_text(text: str) -> str:
     return " ".join(str(text).replace("\n", " ").split())
 
 
+def _action_impulse_pattern(action_type: str) -> str:
+    return f"{ACTION_IMPULSE_PATTERN_PREFIX}{action_type}"
+
+
 def _action_habit_patterns(thought: Thought) -> list[HabitSeedCandidate]:
     seen_action_types: set[str] = set()
     patterns: list[HabitSeedCandidate] = []
@@ -768,7 +841,7 @@ def _action_habit_patterns(thought: Thought) -> list[HabitSeedCandidate]:
         seen_action_types.add(action_type)
         patterns.append(
             HabitSeedCandidate(
-                pattern=f"经常会冒出 {action_type} 行动冲动",
+                pattern=_action_impulse_pattern(action_type),
                 category="behavioral",
                 strength=0.18,
                 signal_type=ACTION_IMPULSE_SIGNAL_TYPE,
@@ -784,7 +857,7 @@ def _text_habit_pattern(normalized: str, thought: Thought) -> HabitSeedCandidate
         compact = clause.strip()
         if len(compact) < HABIT_MIN_PATTERN_LENGTH:
             continue
-        if compact in HABIT_TEXT_STOPWORDS:
+        if compact in _habit_text_stopwords():
             continue
         return HabitSeedCandidate(
             pattern=compact[:48],
@@ -795,7 +868,7 @@ def _text_habit_pattern(normalized: str, thought: Thought) -> HabitSeedCandidate
 
 
 def _habit_category(thought: Thought) -> str:
-    if thought.type == "反应":
+    if thought.type == "reaction":
         return "emotional"
     return "cognitive"
 

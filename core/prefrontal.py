@@ -17,6 +17,7 @@ import redis as redis_lib
 
 from core.stimulus import Stimulus
 from core.thought_parser import Thought, thought_action_requests
+from core.i18n import t
 from core.common_types import (
     ActionRequestPayload,
     DegenerationIntervention,
@@ -105,14 +106,14 @@ class PrefrontalManager:
         check_due = cycle_id % self._check_interval == 0
         manifested_habits = [habit for habit in active_habits if habit.get("manifested")]
         if sleep_state["mode"] != "awake":
-            guidance.append(f"我现在偏{sleep_state['mode']}，需要把行动收得更谨慎。")
+            guidance.append(t("prefrontal.guidance.drowsy", mode=sleep_state["mode"]))
         if check_due and manifested_habits:
-            guidance.append("此刻有旧的惯性正在浮现，留意是否在重复旧模式。")
+            guidance.append(t("prefrontal.guidance.habit_manifested"))
         if degeneration_intervention is not None:
             guidance.extend(_degeneration_guidance(degeneration_intervention))
         plan_mode = check_due or degeneration_intervention is not None
         if plan_mode:
-            guidance.append("这一轮我需要多留意：是否偏题、是否重复、是否该压住冲动。")
+            guidance.append(t("prefrontal.guidance.plan_mode"))
         guidance_limit = 6 if degeneration_intervention is not None else 3
         self._last_state = {
             "goal_stack": goal_stack,
@@ -252,15 +253,15 @@ def _copy_state(state: PrefrontalPromptState) -> PrefrontalPromptState:
 
 def _degeneration_guidance(intervention: DegenerationIntervention) -> list[str]:
     guidance = [
-        f"上一轮我已经在打转：{intervention['summary']}",
-        f"这轮必须完成的转向：{intervention['required_shift']}",
+        t("prefrontal.guidance.degeneration.summary", summary=intervention["summary"]),
+        t("prefrontal.guidance.degeneration.required_shift", required_shift=intervention["required_shift"]),
     ]
     if intervention["must_externalize"]:
-        guidance.append("这一轮至少要把一个念头外化成真正动作；note_rewrite、time、system_status 不算。")
-    guidance.extend(f"可行方向：{suggestion}" for suggestion in intervention["suggestions"][:2])
+        guidance.append(t("prefrontal.guidance.degeneration.must_externalize"))
+    guidance.extend(t("prefrontal.guidance.degeneration.suggestion", suggestion=suggestion) for suggestion in intervention["suggestions"][:2])
     retry_feedback = str(intervention.get("retry_feedback") or "").strip()
     if retry_feedback:
-        guidance.append(f"上一稿仍未过关：{retry_feedback}")
+        guidance.append(t("prefrontal.guidance.degeneration.retry_feedback", feedback=retry_feedback))
     return guidance
 
 
@@ -829,7 +830,7 @@ def _compose_inhibition_note(action_type: str, factors: list[ControlFactor]) -> 
     info_note = _info_gathering_inhibition_note(action_type, positive_codes, negative_codes)
     if info_note is not None:
         return info_note
-    return f"最近 {action_type} 做得有点频繁，这次先不做。"
+    return t("prefrontal.inhibit.generic", action_type=action_type)
 
 
 def _direct_inhibition_note(
@@ -838,15 +839,15 @@ def _direct_inhibition_note(
     negative_codes: set[str],
 ) -> str | None:
     if "exact_duplicate" in positive_codes:
-        return f"刚做过一样的 {action_type}，不必再来一次。"
+        return t("prefrontal.inhibit.exact_duplicate", action_type=action_type)
     if "repeated_send_message" in positive_codes:
         if "foreground_reply" in negative_codes:
-            return "这句刚对眼前这个人说过类似的话，这次别重复。"
-        return "这句刚对同一处说过类似的话，这次别重复。"
+            return t("prefrontal.inhibit.repeated_send_foreground")
+        return t("prefrontal.inhibit.repeated_send")
     if "low_energy_heavy" in positive_codes:
-        return f"现在有点累了，{action_type} 太耗精力，先不做。"
+        return t("prefrontal.inhibit.low_energy", action_type=action_type)
     if "off_context_outreach" in positive_codes:
-        return "眼前的对话还没结束，先别分心去联系别人。"
+        return t("prefrontal.inhibit.off_context")
     return None
 
 
@@ -861,12 +862,12 @@ def _info_gathering_inhibition_note(
         and "recent_same_type_repeat" in positive_codes
     ):
         if "supports_current_reply" in negative_codes:
-            return f"{action_type} 虽然是在回应对话，但最近做得太频繁了，这次先停一下。"
-        return f"有人在说话，而且最近已经连续做了好几次 {action_type}，这次先放一放。"
+            return t("prefrontal.inhibit.conv_habit_repeat_supports", action_type=action_type)
+        return t("prefrontal.inhibit.conv_habit_repeat", action_type=action_type)
     if "habit_impulse" in positive_codes and "recent_same_type_repeat" in positive_codes:
-        return f"最近已经连续做了好几次 {action_type}，这次先缓一缓。"
+        return t("prefrontal.inhibit.habit_repeat", action_type=action_type)
     if "conversation_defer" in positive_codes and "recent_same_type_repeat" in positive_codes:
-        return f"有人在说话，{action_type} 也已经连续做了好几次，先回应眼前的人。"
+        return t("prefrontal.inhibit.conv_repeat", action_type=action_type)
     if "conversation_defer" in positive_codes and "habit_impulse" in positive_codes:
-        return f"有人在说话，先放下 {action_type}，回应眼前的人。"
+        return t("prefrontal.inhibit.conv_habit", action_type=action_type)
     return None

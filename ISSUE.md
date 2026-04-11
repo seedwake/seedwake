@@ -347,16 +347,16 @@ This incident matters philosophically, but the wording should stay disciplined.
 
 ## VI. Implementation Priority Order
 
-| # | Issue | Severity | Effort |
-|---|-------|----------|--------|
+| # | Issue                                                    | Severity | Effort |
+|---|----------------------------------------------------------|----------|--------|
 | 1 | Dedicated autonomous rest (`enter_sleep` / `self_pause`) | Critical | Medium |
-| 2 | Distress circuit breaker (forced light sleep) | Critical | Low |
-| 3 | De-emphasize repeated self-shutdown pending requests | High | Low |
-| 4 | Semantic degeneration detection | High | Medium |
-| 5 | Emotion-driven energy depletion | Medium | Low |
-| 6 | Post-sleep context rewrite | Medium | Medium |
-| 7 | Interpretive-bias guidance under extreme negativity | Medium | Low |
-| 8 | Low-output / silence mode exploration | Deferred | Medium |
+| 2 | Distress circuit breaker (forced light sleep)            | Critical | Low    |
+| 3 | De-emphasize repeated self-shutdown pending requests     | High     | Low    |
+| 4 | Semantic degeneration detection                          | High     | Medium |
+| 5 | Emotion-driven energy depletion                          | Medium   | Low    |
+| 6 | Post-sleep context rewrite                               | Medium   | Medium |
+| 7 | Interpretive-bias guidance under extreme negativity      | Medium   | Low    |
+| 8 | Low-output / silence mode exploration                    | Deferred | Medium |
 
 Items 1-3 should be implemented before the next long-running session.
 

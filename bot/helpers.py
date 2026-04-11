@@ -2,6 +2,7 @@ import json
 import re
 
 from core.common_types import ActionEventPayload, StatusEventPayload, ThoughtEventPayload
+from core.i18n import t
 
 TELEGRAM_MESSAGE_MAX_CHARS = 4096
 
@@ -42,7 +43,7 @@ def format_action_event(payload: ActionEventPayload) -> str:
     summary = _event_summary_text(str(payload.get("summary") or ""))
     if not action_id:
         return ""
-    prefix = "需要确认的行动" if bool(payload.get("awaiting_confirmation")) else "行动更新"
+    prefix = t("bot.action_confirm_prefix") if bool(payload.get("awaiting_confirmation")) else t("bot.action_update_prefix")
     return (
         f"{prefix}\n"
         f"{action_id} [{action_type}/{executor}] {status}\n"
@@ -54,7 +55,7 @@ def format_status_event(payload: StatusEventPayload) -> str:
     message = str(payload.get("message") or "").strip()
     if not message:
         return ""
-    return f"系统状态：{message}"
+    return t("bot.system_status_prefix", message=message)
 
 
 def format_thought_event(payload: ThoughtEventPayload) -> str:

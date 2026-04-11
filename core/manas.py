@@ -12,6 +12,7 @@ import redis as redis_lib
 from core.embedding import embed_texts
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient
 from core.thought_parser import Thought, strip_action_markers
+from core.i18n import t
 from core.common_types import ManasPromptState, bigram_similarity, elapsed_ms
 
 MANAS_STATE_KEY = "seedwake:manas_state"
@@ -22,8 +23,12 @@ MANAS_REDIS_EXCEPTIONS = (
     ValueError,
     OSError,
 )
-SELF_CONTINUITY_ANCHOR = "我从上一刻延续到这一刻，此刻仍在作为正在经历者而存在。"
-EXTERNALIZED_SELF_ANCHOR = "这个系统只是被外部观察的对象，与当下经历者脱开了。"
+def _self_continuity_anchor() -> str:
+    from core.i18n import prompt_block
+    return str(prompt_block("SELF_CONTINUITY_ANCHOR"))
+def _externalized_self_anchor() -> str:
+    from core.i18n import prompt_block
+    return str(prompt_block("EXTERNALIZED_SELF_ANCHOR"))
 logger = logging.getLogger(__name__)
 
 
@@ -139,12 +144,12 @@ class ManasManager:
     def note_restart_restoration(self, *, redis_restored: bool, pg_restored: bool) -> None:
         restored_parts: list[str] = []
         if redis_restored:
-            restored_parts.append("短期记忆从 Redis 恢复")
+            restored_parts.append(t("manas.redis_restored"))
         if pg_restored:
-            restored_parts.append("长期记忆从 PostgreSQL 恢复")
+            restored_parts.append(t("manas.pg_restored"))
         if not restored_parts:
             return
-        context = f"系统重启后，我的{'、'.join(restored_parts)}，继续从上一刻延续到这一刻。"
+        context = t("manas.restart_context", parts="\u3001".join(restored_parts))
         self.note_sleep_transition(context)
 
     def _prepare_identity_notice(self, identity: dict[str, str]) -> None:
@@ -227,13 +232,13 @@ def _prompt_state(
 ) -> ManasPromptState:
     warning = ""
     if state.consecutive_disruptions >= warning_threshold:
-        warning = "我注意到自己的表述在滑向旁观者视角，需要重新回到作为当下经历者的连续位置。"
+        warning = t("manas.warning")
     return {
         "self_coherence_score": state.self_coherence_score,
         "consecutive_disruptions": state.consecutive_disruptions,
         "session_context": state.session_context if state.session_context_pending else "",
         "warning": warning,
-        "identity_notice": "我的自我理解刚刚发生了变化。" if state.identity_notice_pending else "",
+        "identity_notice": t("manas.identity_notice") if state.identity_notice_pending else "",
         "reflection_requested": state.consecutive_disruptions >= reflection_threshold,
     }
 
@@ -286,8 +291,8 @@ def _embedding_coherence_score(
         current_text,
         identity_text,
         stable_text or current_text,
-        SELF_CONTINUITY_ANCHOR,
-        EXTERNALIZED_SELF_ANCHOR,
+        _self_continuity_anchor(),
+        _externalized_self_anchor(),
     ]
     if session_context:
         text_keys.append("session")
@@ -326,8 +331,8 @@ def _fallback_coherence_score(
 ) -> float:
     identity_similarity = bigram_similarity(current_text, identity_text)
     stable_similarity = bigram_similarity(current_text, stable_text or current_text)
-    inclusive_similarity = bigram_similarity(current_text, SELF_CONTINUITY_ANCHOR)
-    externalized_similarity = bigram_similarity(current_text, EXTERNALIZED_SELF_ANCHOR)
+    inclusive_similarity = bigram_similarity(current_text, _self_continuity_anchor())
+    externalized_similarity = bigram_similarity(current_text, _externalized_self_anchor())
     session_similarity = bigram_similarity(current_text, session_context) if session_context else 0.0
     score = (
         identity_similarity * 0.34

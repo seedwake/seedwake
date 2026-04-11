@@ -6,6 +6,7 @@ Avoids brittle keyword rules by relying on text similarity plus structural cues.
 
 from dataclasses import dataclass
 
+from core.i18n import t
 from core.stimulus import Stimulus
 from core.thought_parser import Thought, strip_action_markers, thought_action_requests
 from core.common_types import AttentionPromptEntry, EmotionSnapshot, HabitPromptEntry, bigram_similarity
@@ -91,40 +92,40 @@ def _attention_score(
     goal_relevance = _max_bigram_similarity(thought.content, goal_stack)
     score += goal_relevance * 0.28
     if goal_relevance >= 0.16:
-        reasons.append("贴近目标")
+        reasons.append(t("attention.reason.goal_aligned"))
 
     # Novelty: how different is this thought from recent ones (bigram Jaccard)
     novelty = _novelty_score(thought.content, recent_texts)
     score += novelty * 0.35
     if novelty >= 0.4:
-        reasons.append("较新")
+        reasons.append(t("attention.reason.recent"))
 
     emotion_resonance = _emotion_resonance_score(thought, stimuli, emotion)
     score += emotion_resonance * 0.18
     if emotion_resonance >= 0.2:
-        reasons.append("契合情绪")
+        reasons.append(t("attention.reason.emotion_aligned"))
 
     habit_resonance = _habit_resonance_score(thought, active_habits)
     score += habit_resonance * 0.14
     if habit_resonance >= 0.2:
-        reasons.append("触发现行习气")
+        reasons.append(t("attention.reason.habit_triggered"))
 
     # Structural bonuses
     if thought.trigger_ref:
         score += 0.12
-        reasons.append("有触发源")
+        reasons.append(t("attention.reason.has_trigger"))
     stimulus_bonus, stimulus_reason = _external_priority_bonus(thought, stimuli)
     score += stimulus_bonus
     if stimulus_reason:
         reasons.append(stimulus_reason)
     if thought_action_requests(thought):
         score += 0.12
-        reasons.append("带行动冲动")
-    if thought.type == "反思":
+        reasons.append(t("attention.reason.has_action"))
+    if thought.type == "reflection":
         score += 0.08
-        reasons.append("元认知")
+        reasons.append(t("attention.reason.metacognition"))
 
-    return min(1.0, round(score, 4)), "、".join(reasons) or "自然浮现"
+    return min(1.0, round(score, 4)), t("attention.reason_separator").join(reasons) or t("attention.reason.natural")
 
 
 def _novelty_score(content: str, recent_texts: list[str]) -> float:
@@ -169,11 +170,11 @@ def _emotion_resonance_score(
         str(request.get("type") or "").strip()
         for request in thought_action_requests(thought)
     }
-    if thought.type == "思考" or action_types & {"reading", "search", "web_fetch", "news"}:
+    if thought.type == "thinking" or action_types & {"reading", "search", "web_fetch", "news"}:
         score += curiosity * 0.35
-    if any(stimulus.type == "conversation" for stimulus in stimuli) and thought.type in {"反应", "意图"}:
+    if any(stimulus.type == "conversation" for stimulus in stimuli) and thought.type in {"reaction", "intention"}:
         score += concern * 0.35
-    if thought.type == "反思":
+    if thought.type == "reflection":
         score += max(frustration, calm) * 0.18
     return min(1.0, score)
 
@@ -183,12 +184,12 @@ def _external_priority_bonus(thought: Thought, stimuli: list[Stimulus]) -> tuple
         return 0.0, ""
     priorities = sorted(stimuli, key=lambda stimulus: stimulus.priority)
     highest = priorities[0]
-    if highest.type == "conversation" and thought.type == "反应":
-        return 0.20, "承接对话"
-    if highest.type == "action_result" and thought.type in {"反应", "意图"}:
-        return 0.14, "承接回音"
-    if thought.type == "反应":
-        return 0.10, "承接外界刺激"
+    if highest.type == "conversation" and thought.type == "reaction":
+        return 0.20, t("attention.reason.conversation")
+    if highest.type == "action_result" and thought.type in {"reaction", "intention"}:
+        return 0.14, t("attention.reason.action_echo")
+    if thought.type == "reaction":
+        return 0.10, t("attention.reason.external_stimulus")
     return 0.0, ""
 
 

@@ -41,6 +41,7 @@ from core.common_types import (
     StatusEventPayload,
     ThoughtEventPayload,
 )
+from core.i18n import init as init_i18n, t
 
 EVENT_CHANNEL = "seedwake:events"
 REDIS_RECONNECT_DELAY_SECONDS = 2.0
@@ -83,14 +84,15 @@ def create_application(
 ) -> Application:
     load_dotenv()
     cfg = config or load_yaml_config("config.yml")
+    init_i18n(str(cfg.get("language", "zh")))
     setup_logging(cfg, component="bot")
     token = _read_env("TELEGRAM_BOT_TOKEN").strip()
     if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN 未配置")
+        raise RuntimeError(t("bot.token_not_configured"))
 
     allowed_user_ids = load_allowed_user_ids(cfg)
     if not allowed_user_ids:
-        raise RuntimeError("config.yml 缺少 telegram.allowed_user_ids")
+        raise RuntimeError(t("bot.missing_allowed_ids"))
     admin_user_ids = load_admin_user_ids(cfg)
     notification_chat_ids = load_notification_chat_ids(cfg, admin_user_ids)
 
@@ -134,11 +136,11 @@ async def _handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not user:
         return
     lines = [
-        "Seedwake Telegram 通道已连接。",
-        "直接发送文本即可对话。",
+        t("bot.welcome_line1"),
+        t("bot.welcome_line2"),
     ]
     if _is_admin_user(context.application, user["user_id"]):
-        lines.append("管理命令：/status /actions /approve <action_id> /reject <action_id>")
+        lines.append(t("bot.welcome_admin"))
     await _reply_text(update, "\n".join(lines))
 
 
@@ -147,19 +149,19 @@ async def _handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     redis_client = _ensure_redis_client(context.application)
     if redis_client is None:
-        await _reply_text(update, "Redis: unavailable\n进行中行动: 0")
+        await _reply_text(update, t("bot.redis_unavailable_status"))
         return
     try:
         actions = _load_actions(redis_client)
     except RuntimeError:
         _mark_redis_unavailable(context.application)
-        await _reply_text(update, "Redis: unavailable\n进行中行动: 0")
+        await _reply_text(update, t("bot.redis_unavailable_status"))
         return
     live_count = sum(1 for action in actions if str(action.get("status")) in {"pending", "running"})
     await _reply_text(
         update,
         "Redis: ok\n"
-        f"进行中行动: {live_count}",
+        + t("bot.live_actions", count=live_count),
     )
 
 
@@ -168,20 +170,20 @@ async def _handle_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     redis_client = _ensure_redis_client(context.application)
     if redis_client is None:
-        await _reply_text(update, "Redis 不可用，无法查询行动状态。")
+        await _reply_text(update, t("bot.redis_unavailable_actions"))
         return
     try:
         actions = _load_actions(redis_client)
     except RuntimeError:
         _mark_redis_unavailable(context.application)
-        await _reply_text(update, "Redis 不可用，无法查询行动状态。")
+        await _reply_text(update, t("bot.redis_unavailable_actions"))
         return
     live = [
         action for action in actions
         if str(action.get("status")) in {"pending", "running"}
     ]
     if not live:
-        await _reply_text(update, "当前没有进行中的行动。")
+        await _reply_text(update, t("bot.no_actions"))
         return
     lines = []
     for action in sorted(live, key=lambda item: str(item.get("submitted_at") or ""), reverse=True)[:10]:
@@ -211,7 +213,7 @@ async def _handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     redis_client = _ensure_redis_client(context.application)
     if redis_client is None:
-        await _reply_text(update, "Redis 不可用，当前无法与 Seedwake 对话。")
+        await _reply_text(update, t("bot.redis_unavailable_chat"))
         return
     message = update.effective_message
     if message is None:
@@ -230,7 +232,7 @@ async def _handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     if not queue.redis_available:
         _mark_redis_unavailable(context.application)
-        await _reply_text(update, "Redis 不可用，当前无法与 Seedwake 对话。")
+        await _reply_text(update, t("bot.redis_unavailable_chat"))
 
 
 async def _handle_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -239,7 +241,7 @@ async def _handle_action_callback(update: Update, context: ContextTypes.DEFAULT_
         return
     effective_user = update.effective_user
     if effective_user is None or not _is_admin_user(context.application, effective_user.id):
-        await query.answer("无管理权限。", show_alert=True)
+        await query.answer(t("bot.no_admin"), show_alert=True)
         return
     action, _, action_id = str(query.data or "").partition(":")
     approved = action == "approve"
@@ -251,12 +253,12 @@ async def _handle_action_callback(update: Update, context: ContextTypes.DEFAULT_
         actor=f"telegram:{effective_user.id}",
     )
     if pushed:
-        await query.answer("已提交")
+        await query.answer(t("bot.submitted"))
         with suppress(*BOT_SEND_EXCEPTIONS):
             await query.edit_message_reply_markup(reply_markup=None)
         return
     _mark_redis_unavailable(context.application)
-    await query.answer("提交失败", show_alert=True)
+    await query.answer(t("bot.submit_failed"), show_alert=True)
 
 
 async def _forward_events(application: Application) -> None:
@@ -373,8 +375,8 @@ async def _broadcast_action_event(application: Application, payload: ActionEvent
         action_id = str(payload.get("action_id") or "").strip()
         if action_id:
             reply_markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton("批准", callback_data=f"approve:{action_id}"),
-                InlineKeyboardButton("拒绝", callback_data=f"reject:{action_id}"),
+                InlineKeyboardButton(t("bot.approve_button"), callback_data=f"approve:{action_id}"),
+                InlineKeyboardButton(t("bot.reject_button"), callback_data=f"reject:{action_id}"),
             ]])
     for chat_id in application.bot_data["notification_chat_ids"]:
         await _safe_send_message(application, chat_id=chat_id, text=text, reply_markup=reply_markup)
@@ -393,11 +395,11 @@ async def _handle_control_command(
 ) -> None:
     effective_user = update.effective_user
     if effective_user is None:
-        await _reply_text(update, "无法识别发送者。")
+        await _reply_text(update, t("bot.sender_unknown"))
         return
     if not context.args:
         usage = "/approve <action_id> [note]" if approved else "/reject <action_id> [note]"
-        await _reply_text(update, f"用法：{usage}")
+        await _reply_text(update, t("bot.usage", usage=usage))
         return
     action_id = context.args[0].strip()
     note = " ".join(context.args[1:]).strip()
@@ -411,9 +413,9 @@ async def _handle_control_command(
     )
     if not pushed:
         _mark_redis_unavailable(context.application)
-        await _reply_text(update, "提交失败，Redis 不可用。")
+        await _reply_text(update, t("bot.redis_submit_failed"))
         return
-    await _reply_text(update, f"{'批准' if approved else '拒绝'}已提交：{action_id}")
+    await _reply_text(update, t("bot.decision_submitted", decision=t("bot.decision_approve") if approved else t("bot.decision_reject"), action_id=action_id))
 
 
 async def _ensure_chat_user(
@@ -425,7 +427,7 @@ async def _ensure_chat_user(
         return None
     if user["user_id"] in context.application.bot_data["allowed_user_ids"]:
         return user
-    await _reply_text(update, "无权限。")
+    await _reply_text(update, t("bot.no_permission"))
     return None
 
 
@@ -438,7 +440,7 @@ async def _ensure_admin_user(
         return None
     if user["user_id"] in context.application.bot_data["admin_user_ids"]:
         return user
-    await _reply_text(update, "无管理权限。")
+    await _reply_text(update, t("bot.no_admin_permission"))
     return None
 
 
@@ -448,7 +450,7 @@ async def _ensure_private_user(update: Update) -> AuthorizedTelegramUser | None:
     if user is None or chat is None:
         return None
     if chat.type != "private":
-        await _reply_text(update, "仅支持私聊。")
+        await _reply_text(update, t("bot.private_only"))
         return None
     authorized_user: AuthorizedTelegramUser = {
         "user_id": user.id,

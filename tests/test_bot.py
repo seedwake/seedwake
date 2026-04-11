@@ -10,6 +10,7 @@ from telegram.ext import Application, ContextTypes
 
 # noinspection PyProtectedMember
 from bot.main import (
+    create_application,
     _dispatch_event,
     _ensure_redis_client,
     _handle_action_callback,
@@ -20,6 +21,7 @@ from bot.main import (
 from bot.helpers import (
     extract_telegram_chat_id,
     format_action_event,
+    format_status_event,
     format_thought_event,
     format_thought_event_chunks,
     load_admin_user_ids,
@@ -27,9 +29,14 @@ from bot.helpers import (
     load_notification_chat_ids,
 )
 from core.action import ACTION_CONTROL_KEY
+from core.i18n import init as _init_i18n
 from core.stimulus import CONVERSATION_HISTORY_KEY, REDIS_KEY as STIMULUS_REDIS_KEY
 from core.common_types import ActionEventPayload, EventEnvelope, ThoughtEventPayload
 from test_support import slice_window
+
+
+def setUpModule() -> None:
+    _init_i18n("zh")
 
 
 class FakeRedis:
@@ -206,6 +213,21 @@ async def _assert_live_actions_output(
 
 
 class TelegramBotHelpersTests(unittest.TestCase):
+    def test_create_application_initializes_i18n_from_config(self) -> None:
+        config = {
+            "language": "en",
+            "telegram": {
+                "allowed_user_ids": [123],
+                "admin_user_ids": [123],
+            },
+        }
+        with patch("bot.main._read_env", return_value="12345:secret"):
+            create_application(config=config, redis_client=cast(redis_lib.Redis, FakeRedis()))
+        try:
+            self.assertEqual(format_status_event({"message": "ok"}), "System status: ok")
+        finally:
+            _init_i18n("zh")
+
     def test_load_allowed_user_ids(self) -> None:
         config = {"telegram": {"allowed_user_ids": [123, "456", "bad", 123]}}
         self.assertEqual(load_allowed_user_ids(config), [123, 456])

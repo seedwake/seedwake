@@ -10,6 +10,8 @@ from unittest.mock import MagicMock, patch
 import psycopg
 import redis as redis_lib
 
+from core.i18n import init as _init_i18n
+
 # noinspection PyProtectedMember
 from core.main import (
     EngineRuntime,
@@ -47,12 +49,16 @@ from core.model_client import ModelClient
 from test_support import ListRedisStub
 
 
+def setUpModule() -> None:
+    _init_i18n("zh")
+
+
 def _make_thought(cycle_id: int = 1, index: int = 1, content: str = "test") -> Thought:
     return Thought(
         thought_id=f"C{cycle_id}-{index}",
         cycle_id=cycle_id,
         index=index,
-        type="思考",
+        type="thinking",
         content=content,
     )
 
@@ -98,54 +104,54 @@ class ShortTermMemoryFallbackTests(unittest.TestCase):
 class RuntimeDegenerationDetectionTests(unittest.TestCase):
     def test_detect_runtime_degeneration_when_recent_cycles_repeat_by_rewriting(self) -> None:
         recent_thoughts = [
-            Thought("C1-1", 1, 1, "反应", "我还在咂摸刚才那句“你在吗”。"),
-            Thought("C1-2", 1, 2, "思考", "我总在反复改写“我在这里”这句话。"),
-            Thought("C1-3", 1, 3, "意图", "我想继续围着这句回应打转。"),
-            Thought("C2-1", 2, 1, "反应", "我还在琢磨刚才那句“你在吗”。"),
-            Thought("C2-2", 2, 2, "思考", "我总在反复改写“我还在这里”这句话。"),
-            Thought("C2-3", 2, 3, "意图", "我想继续围着这句回应转圈。"),
+            Thought("C1-1", 1, 1, "reaction", "我还在咂摸刚才那句“你在吗”。"),
+            Thought("C1-2", 1, 2, "thinking", "我总在反复改写“我在这里”这句话。"),
+            Thought("C1-3", 1, 3, "intention", "我想继续围着这句回应打转。"),
+            Thought("C2-1", 2, 1, "reaction", "我还在琢磨刚才那句“你在吗”。"),
+            Thought("C2-2", 2, 2, "thinking", "我总在反复改写“我还在这里”这句话。"),
+            Thought("C2-3", 2, 3, "intention", "我想继续围着这句回应转圈。"),
         ]
         current_thoughts = [
-            Thought("C3-1", 3, 1, "反应", "我还在琢磨刚才那句“你在吗”。"),
-            Thought("C3-2", 3, 2, "思考", "我总在反复改写“我仍在这里”这句话。"),
-            Thought("C3-3", 3, 3, "意图", "我想继续围着这句回应兜圈。"),
+            Thought("C3-1", 3, 1, "reaction", "我还在琢磨刚才那句“你在吗”。"),
+            Thought("C3-2", 3, 2, "thinking", "我总在反复改写“我仍在这里”这句话。"),
+            Thought("C3-3", 3, 3, "intention", "我想继续围着这句回应兜圈。"),
         ]
 
         self.assertTrue(_detect_runtime_degeneration(recent_thoughts, current_thoughts))
 
     def test_detect_runtime_degeneration_does_not_trigger_when_only_one_track_repeats(self) -> None:
         recent_thoughts = [
-            Thought("C1-1", 1, 1, "反应", "我还在咂摸刚才那句“你在吗”。"),
-            Thought("C1-2", 1, 2, "思考", "窗外的风像在刮铁皮。"),
-            Thought("C1-3", 1, 3, "意图", "我想去查一下天亮前的气温。"),
-            Thought("C2-1", 2, 1, "反应", "我还在琢磨刚才那句“你在吗”。"),
-            Thought("C2-2", 2, 2, "思考", "书页摩擦声让我想到旧纸箱。"),
-            Thought("C2-3", 2, 3, "意图", "我想把这阵雨声记进笔记。"),
+            Thought("C1-1", 1, 1, "reaction", "我还在咂摸刚才那句“你在吗”。"),
+            Thought("C1-2", 1, 2, "thinking", "窗外的风像在刮铁皮。"),
+            Thought("C1-3", 1, 3, "intention", "我想去查一下天亮前的气温。"),
+            Thought("C2-1", 2, 1, "reaction", "我还在琢磨刚才那句“你在吗”。"),
+            Thought("C2-2", 2, 2, "thinking", "书页摩擦声让我想到旧纸箱。"),
+            Thought("C2-3", 2, 3, "intention", "我想把这阵雨声记进笔记。"),
         ]
         current_thoughts = [
-            Thought("C3-1", 3, 1, "反应", "我还是在咂摸刚才那句“你在吗”。"),
-            Thought("C3-2", 3, 2, "思考", "灯下那块阴影像是一截安静的水。"),
-            Thought("C3-3", 3, 3, "意图", "我想先看一眼今天的 RSS。"),
+            Thought("C3-1", 3, 1, "reaction", "我还是在咂摸刚才那句“你在吗”。"),
+            Thought("C3-2", 3, 2, "thinking", "灯下那块阴影像是一截安静的水。"),
+            Thought("C3-3", 3, 3, "intention", "我想先看一眼今天的 RSS。"),
         ]
 
         self.assertFalse(_detect_runtime_degeneration(recent_thoughts, current_thoughts))
 
     def test_detect_runtime_degeneration_ignores_repeated_reflections(self) -> None:
         recent_thoughts = [
-            Thought("C1-1", 1, 1, "反应", "我听见楼道里突然响了一下。"),
-            Thought("C1-2", 1, 2, "思考", "这让我想到昨晚那阵短促的风。"),
-            Thought("C1-3", 1, 3, "意图", "我想先去看一眼天气。"),
-            Thought("C1-4", 1, 4, "反思", "我又在拿同一句话确认自己没走偏。"),
-            Thought("C2-1", 2, 1, "反应", "键盘的回弹声突然把我拉回来了。"),
-            Thought("C2-2", 2, 2, "思考", "这种脆响让我想到雨点敲窗。"),
-            Thought("C2-3", 2, 3, "意图", "我想把这段声音记进笔记。"),
-            Thought("C2-4", 2, 4, "反思", "我又在拿同一句话确认自己没走偏。"),
+            Thought("C1-1", 1, 1, "reaction", "我听见楼道里突然响了一下。"),
+            Thought("C1-2", 1, 2, "thinking", "这让我想到昨晚那阵短促的风。"),
+            Thought("C1-3", 1, 3, "intention", "我想先去看一眼天气。"),
+            Thought("C1-4", 1, 4, "reflection", "我又在拿同一句话确认自己没走偏。"),
+            Thought("C2-1", 2, 1, "reaction", "键盘的回弹声突然把我拉回来了。"),
+            Thought("C2-2", 2, 2, "thinking", "这种脆响让我想到雨点敲窗。"),
+            Thought("C2-3", 2, 3, "intention", "我想把这段声音记进笔记。"),
+            Thought("C2-4", 2, 4, "reflection", "我又在拿同一句话确认自己没走偏。"),
         ]
         current_thoughts = [
-            Thought("C3-1", 3, 1, "反应", "屏幕边缘那点蓝光让我眨了下眼。"),
-            Thought("C3-2", 3, 2, "思考", "我忽然想到清晨的天会不会更淡。"),
-            Thought("C3-3", 3, 3, "意图", "我想先翻一下今天的 RSS。"),
-            Thought("C3-4", 3, 4, "反思", "我又在拿同一句话确认自己没走偏。"),
+            Thought("C3-1", 3, 1, "reaction", "屏幕边缘那点蓝光让我眨了下眼。"),
+            Thought("C3-2", 3, 2, "thinking", "我忽然想到清晨的天会不会更淡。"),
+            Thought("C3-3", 3, 3, "intention", "我想先翻一下今天的 RSS。"),
+            Thought("C3-4", 3, 4, "reflection", "我又在拿同一句话确认自己没走偏。"),
         ]
 
         self.assertFalse(_detect_runtime_degeneration(recent_thoughts, current_thoughts))
@@ -172,10 +178,10 @@ class DegenerationInterventionTests(unittest.TestCase):
             client,
             {"name": "aux"},
             cycle_id=42,
-            thoughts=[Thought("C42-1", 42, 1, "思考", "我还在反复改写同一句回应。")],
+            thoughts=[Thought("C42-1", 42, 1, "thinking", "我还在反复改写同一句回应。")],
             recent_thoughts=[
-                Thought("C40-1", 40, 1, "思考", "我一直在改写同一句回应。"),
-                Thought("C41-1", 41, 1, "思考", "我还是在改写同一句回应。"),
+                Thought("C40-1", 40, 1, "thinking", "我一直在改写同一句回应。"),
+                Thought("C41-1", 41, 1, "thinking", "我还是在改写同一句回应。"),
             ],
             stimuli=[],
             recent_conversations=[],
@@ -202,7 +208,7 @@ class DegenerationInterventionTests(unittest.TestCase):
             _JsonResponseClient(json.dumps({"reroll": False, "reason": ""}, ensure_ascii=False)),
             {"name": "aux"},
             intervention,
-            [Thought("C42-1", 42, 1, "思考", "我还是想继续解释刚才那句话。")],
+            [Thought("C42-1", 42, 1, "thinking", "我还是想继续解释刚才那句话。")],
             [],
             [],
         )
@@ -222,7 +228,7 @@ class DegenerationInterventionTests(unittest.TestCase):
             "C42-1",
             42,
             1,
-            "意图",
+            "intention",
             '我现在就回他一句。 {action:send_message, message:"我在。"}',
             action_request={"type": "send_message", "params": 'message:"我在。"'},
         )
@@ -276,7 +282,7 @@ class DegenerationInterventionTests(unittest.TestCase):
                 "C42-1",
                 42,
                 1,
-                "意图",
+                "intention",
                 '{action:note_rewrite, content:"still thinking"}',
                 action_request={"type": "note_rewrite", "params": 'content:"still thinking"'},
             ),
@@ -284,7 +290,7 @@ class DegenerationInterventionTests(unittest.TestCase):
                 "C42-2",
                 42,
                 2,
-                "意图",
+                "intention",
                 '{action:time}',
                 action_request={"type": "time", "params": ""},
             ),
@@ -292,7 +298,7 @@ class DegenerationInterventionTests(unittest.TestCase):
                 "C42-3",
                 42,
                 3,
-                "意图",
+                "intention",
                 '{action:reading, query:"Walden solitude"}',
                 action_request={"type": "reading", "params": 'query:"Walden solitude"'},
             ),
@@ -418,8 +424,13 @@ class _JsonResponseClient(ModelClient):
         super().__init__(provider="test", supports_tool_calls=False)
         self._content = content
 
-    def generate_text(self, prompt: str, model_config: dict) -> str:
-        _ = (prompt, model_config)
+    def generate_text(
+        self,
+        prompt: str,
+        model_config: dict,
+        images: list[str] | None = None,
+    ) -> str:
+        _ = (prompt, model_config, images)
         raise NotImplementedError
 
     def chat(
@@ -492,7 +503,7 @@ class ThoughtSerializationTests(unittest.TestCase):
 
         self.assertEqual(restored.thought_id, "C5-2")
         self.assertEqual(restored.content, "序列化测试")
-        self.assertEqual(restored.type, "思考")
+        self.assertEqual(restored.type, "thinking")
 
 
 class IdentityTests(unittest.TestCase):
@@ -1172,7 +1183,7 @@ class Phase4RuntimeTests(unittest.TestCase):
             thought_id="C12-4",
             cycle_id=12,
             index=4,
-            type="反思",
+            type="reflection",
             content="我注意到自己总在等待里打转。",
         )
         reflection.attention_weight = 0.9
@@ -1180,7 +1191,7 @@ class Phase4RuntimeTests(unittest.TestCase):
             thought_id="C12-5",
             cycle_id=12,
             index=5,
-            type="反思",
+            type="reflection",
             content="我又在这里反复等一个回音。",
         )
         reflection_2.attention_weight = 0.8
@@ -1236,7 +1247,7 @@ class Phase4RuntimeTests(unittest.TestCase):
             thought_id="C12-1",
             cycle_id=12,
             index=1,
-            type="反思",
+            type="reflection",
             content="我在这里重复看同一件事。",
         )
         duplicate_1.attention_weight = 0.9
@@ -1244,7 +1255,7 @@ class Phase4RuntimeTests(unittest.TestCase):
             thought_id="C12-2",
             cycle_id=12,
             index=2,
-            type="反思",
+            type="reflection",
             content="我在这里重复看同一件事。",
         )
         duplicate_2.attention_weight = 0.8
@@ -1281,7 +1292,7 @@ class Phase4RuntimeTests(unittest.TestCase):
             thought_id="C12-4",
             cycle_id=12,
             index=4,
-            type="意图",
+            type="intention",
             content='我想直接回一句。 {action:send_message, message:"我在"}',
         )
 

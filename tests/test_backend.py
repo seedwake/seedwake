@@ -134,6 +134,15 @@ class BackendTests(unittest.TestCase):
         self.client.close()
         self.env_patch.stop()
 
+    def test_create_app_localizes_missing_backend_token_error(self) -> None:
+        with patch("backend.main.load_dotenv", return_value=None):
+            with patch.dict("os.environ", {}, clear=True):
+                with self.assertRaisesRegex(RuntimeError, "BACKEND_API_TOKEN not configured"):
+                    create_app(
+                        config={"language": "en", "admins": []},
+                        redis_client=cast(redis_lib.Redis, FakeRedis()),
+                    )
+
     def test_conversation_history_is_read_only(self) -> None:
         response = self.client.post(
             "/api/conversation",

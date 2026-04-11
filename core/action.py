@@ -15,6 +15,7 @@ from urllib import error, request
 from typing import Protocol
 from redis import exceptions as redis_exceptions
 
+from core.i18n import prompt_block, t
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient
 from core.openclaw_gateway import OpenClawGatewayExecutor, OpenClawUnavailableError
 from core.perception import collect_system_status_snapshot
@@ -77,38 +78,17 @@ REPLY_FOCUS_WINDOW = timedelta(minutes=10)
 TELEGRAM_SEND_RETRY_DELAY_SECONDS = 30.0
 TELEGRAM_SEND_RETRY_ATTEMPTS = 10
 TELEGRAM_SEND_REQUEST_TIMEOUT_SECONDS = 10
-PLANNER_TIMEOUT_FIELD_DESCRIPTION = "本次动作的超时时间；不写则使用默认值。"
+ACTION_COMPLETED_DEFAULT_KEY = "action.completed_default"
+ACTION_PLANNER_TIMEOUT_DESC_KEY = "action.planner_timeout_desc"
 SEARCH_RESULT_DATA_SHAPE = '{"results":[{"title":"","url":"","snippet":""}]}'
-SEARCH_RESULT_REQUIREMENTS = [
-    "results 最多返回 5 条最相关结果。",
-    "title、url、snippet 使用这些精确字段名。",
-]
 WEB_FETCH_RESULT_DATA_SHAPE = '{"source":{"title":"","url":""},"excerpt_original":"","brief_note":""}'
 READING_SOURCE_RESULT_DATA_SHAPE = '{"source":{"title":"","url":""},"excerpt_original":""}'
-WEB_FETCH_RESULT_REQUIREMENTS = [
-    "source.title 和 source.url 使用这些精确字段名。",
-    "excerpt_original 必须是网页原文片段，不要改写成综述。",
-    "brief_note 用 1-2 句说明这段内容的重点。",
-]
-READING_RESULT_REQUIREMENTS = [
-    "source.title 和 source.url 使用这些精确字段名。",
-    "excerpt_original 必须是原文片段，不要改写成综述。",
-    "excerpt_original 尽量提供约 600 字、足以让我自行判断的内容。",
-]
 WEATHER_RESULT_DATA_SHAPE = (
     '{"location":"","condition":"","temperature_c":"","feels_like_c":"",'
     '"humidity_pct":"","wind_kph":""}'
 )
-WEATHER_RESULT_FIELD_REQUIREMENT = (
-    "location、condition、temperature_c、feels_like_c、humidity_pct、wind_kph 使用这些精确字段名。"
-)
 FILE_MODIFY_RESULT_DATA_SHAPE = '{"path":"","applied":false,"changed":false,"change_summary":""}'
-FILE_MODIFY_RESULT_REQUIREMENTS = [
-    "path、applied、changed、change_summary 使用这些精确字段名。",
-]
 SYSTEM_CHANGE_RESULT_DATA_SHAPE = '{"applied":false,"status":"","change_summary":"","impact_scope":""}'
-SYSTEM_CHANGE_FIELD_REQUIREMENT = "applied、status、change_summary、impact_scope 使用这些精确字段名。"
-SYSTEM_CHANGE_STATUS_REQUIREMENT = 'status 只使用 "applied"、"partial"、"blocked" 之一。'
 ACTION_REDIS_EXCEPTIONS = (
     redis_exceptions.RedisError,
     ConnectionError,
@@ -309,7 +289,7 @@ class ActionManager:
         try:
             plan_result = self._planner.plan(thought, conversation_source=conversation_source)
         except PLANNER_EXCEPTIONS as exc:
-            self._emit(f"行动规划失败 {thought.thought_id}: {exc}")
+            self._emit(t("action.plan_failed", thought_id=thought.thought_id, error=exc))
             return None
         plan, skip_reason = _coerce_planner_result(plan_result)
         if not plan:
@@ -384,16 +364,16 @@ class ActionManager:
             actor = str(control.get("actor") or "admin")
             note = str(control.get("note") or "").strip()
             if approved:
-                self._emit(f"行动已确认 {action_id} by {actor}")
+                self._emit(t("action.confirmed", action_id=action_id, actor=actor))
                 action = self._update_action(action_id, awaiting_confirmation=False)
-                self._publish_action_event(action, "pending", f"已确认，准备执行（{actor}）")
+                self._publish_action_event(action, "pending", t("action.confirmed_status", actor=actor))
                 self._start_action(action_id)
                 continue
 
-            summary = f"管理员拒绝执行（{actor}）"
+            summary = t("action.rejected_summary", actor=actor)
             if note:
                 summary = f"{summary}: {note}"
-            self._emit(f"行动被拒绝 {action_id} by {actor}")
+            self._emit(t("action.rejected", action_id=action_id, actor=actor))
             self._update_action(action_id, awaiting_confirmation=False)
             self._finalize_action(
                 action_id,
@@ -527,8 +507,8 @@ class ActionManager:
 
     def _start_action(self, action_id: str) -> None:
         action = self._get_action(action_id)
-        self._emit(f"行动提交 {action.action_id} [{action.type}/{action.executor}]")
-        self._publish_action_event(action, "pending", "已提交")
+        self._emit(t("action.submitted", action_id=action.action_id, type=action.type, executor=action.executor))
+        self._publish_action_event(action, "pending", t("action.submitted_status"))
         self._update_action(action_id, status="running", retry_after=None)
         future = self._pool.submit(self._run_action, action_id)
         with self._lock:
@@ -540,7 +520,7 @@ class ActionManager:
         started_at = time.perf_counter()
         terminal_status = "unknown"
         try:
-            self._publish_action_event(action, "running", "执行中")
+            self._publish_action_event(action, "running", t("action.running_status"))
 
             if action.executor == "native":
                 result = self._run_native_action(action_id)
@@ -560,7 +540,7 @@ class ActionManager:
             self._safe_finalize_action(
                 action_id,
                 status="timeout",
-                result=_failure_result("行动超时", "timeout", transport=action.executor),
+                result=_failure_result(t("action.timeout"), "timeout", transport=action.executor),
             )
             return
         except ACTION_EXECUTION_EXCEPTIONS as exc:
@@ -568,14 +548,14 @@ class ActionManager:
             self._safe_finalize_action(
                 action_id,
                 status="failed",
-                result=_failure_result(f"行动失败：{exc}", str(exc), transport=action.executor),
+                result=_failure_result(t("action.failed", error=exc), str(exc), transport=action.executor),
             )
             return
         # noinspection PyBroadException
         except Exception as exc:
             terminal_status = "failed"
             logger.exception("unexpected action worker failure: %s", action_id)
-            self._force_fail_action(action_id, f"行动内部错误：{exc}")
+            self._force_fail_action(action_id, t("action.internal_error", error=exc))
             return
         finally:
             logger.info(
@@ -605,7 +585,7 @@ class ActionManager:
                 target_source=target_source,
                 target_entity=target_entity,
                 message_text=message_text,
-                summary=str(failure.get("summary") or "发送消息失败"),
+                summary=str(failure.get("summary") or t("action.send_failed")),
                 error_detail=failure.get("error"),
             )
         reply_to = str(action.request.get("reply_to_message_id") or "").strip()
@@ -614,7 +594,7 @@ class ActionManager:
                 target_source=target_source,
                 target_entity=target_entity,
                 message_text=message_text,
-                summary="和刚才发的一样，跳过重复发送",
+                summary=t("action.send_duplicate"),
                 error_detail="duplicate_message",
             )
         if not self._mark_dispatch_started(action_id):
@@ -622,7 +602,7 @@ class ActionManager:
                 target_source=target_source,
                 target_entity=target_entity,
                 message_text=message_text,
-                summary="消息发送前无法持久化状态",
+                summary=t("action.send_persist_failed"),
                 error_detail="delivery_state_unavailable",
             )
         send_error, delivered_reply_to = _send_telegram_message(
@@ -637,7 +617,7 @@ class ActionManager:
                 target_source=target_source,
                 target_entity=target_entity,
                 message_text=message_text,
-                summary=f"Telegram 发送失败：{send_error}",
+                summary=t("action.telegram_send_failed", error=send_error),
                 error_detail=send_error,
             )
         self._record_sent_message(target_source, message_text, delivered_reply_to)
@@ -672,9 +652,9 @@ class ActionManager:
             action.session_key = str(result["session_key"])
         self._upsert_action(action)
 
-        summary = str(result.get("summary") or "行动完成")
+        summary = str(result.get("summary") or t(ACTION_COMPLETED_DEFAULT_KEY))
         self._maybe_update_note_shadow(action, status, result)
-        self._emit(f"行动结束 {action.action_id} [{status}] {summary}")
+        self._emit(t("action.completed_log", action_id=action.action_id, status=status, summary=summary))
         self._publish_action_event(action, status, summary)
         self._publish_native_message(action, status, result)
         self._record_perception_observation(action, status, result)
@@ -704,22 +684,22 @@ class ActionManager:
             return
         if policy == "confirmation":
             action = self._update_action(action.action_id, awaiting_confirmation=True)
-            self._emit(f"行动等待确认 {action.action_id}")
-            self._publish_action_event(action, "pending", "等待确认")
+            self._emit(t("action.awaiting_confirmation", action_id=action.action_id))
+            self._publish_action_event(action, "pending", t("action.awaiting_status"))
             return
         if policy == "forbidden":
-            self._emit(f"行动被禁止 {action.action_id}")
+            self._emit(t("action.forbidden", action_id=action.action_id))
             self._finalize_action(
                 action.action_id,
                 status="failed",
-                result=_failure_result("行动被禁止", "forbidden", transport=action.executor),
+                result=_failure_result(t("action.forbidden_summary"), "forbidden", transport=action.executor),
             )
             return
-        self._emit(f"行动未获自动执行许可 {action.action_id}")
+        self._emit(t("action.not_auto", action_id=action.action_id))
         self._finalize_action(
             action.action_id,
             status="failed",
-            result=_failure_result("行动需要人工批准", "not_auto_execute", transport=action.executor),
+            result=_failure_result(t("action.not_auto_summary"), "not_auto_execute", transport=action.executor),
         )
 
     def _classify_policy(self, action: ActionRecord) -> str:
@@ -747,7 +727,7 @@ class ActionManager:
         # noinspection PyBroadException
         except Exception as exc:
             logger.exception("unexpected action finalization failure: %s", action_id)
-            self._force_fail_action(action_id, f"行动收尾失败：{exc}")
+            self._force_fail_action(action_id, t("action.finalize_error", error=exc))
 
     def _force_fail_action(self, action_id: str, summary: str) -> None:
         action = self._get_action(action_id)
@@ -782,8 +762,8 @@ class ActionManager:
             session_key=None,
             retry_after=retry_after,
         )
-        self._emit(f"OpenClaw 不可用，行动排队等待恢复 {action.action_id}: {reason}")
-        self._publish_action_event(action, "pending", "等待 OpenClaw 恢复")
+        self._emit(t("action.openclaw_queued", action_id=action.action_id, reason=reason))
+        self._publish_action_event(action, "pending", t("action.openclaw_queued_status"))
 
     def _emit(self, text: str) -> None:
         if self._log_callback:
@@ -805,11 +785,11 @@ class ActionManager:
     def _emit_planner_feedback(self, thought: Thought, raw_action_type: str, reason: str | None) -> None:
         reason_text = (reason or "").strip()
         if reason_text:
-            summary = f"我刚才想 {raw_action_type}，但没有做——{reason_text}"
+            summary = t("action.skipped_reason", action_type=raw_action_type, reason=reason_text)
         else:
-            summary = f"我刚才想 {raw_action_type}，但那股冲动被抑制了"
+            summary = t("action.skipped_inhibited", action_type=raw_action_type)
         result = _failure_result(summary, "ignored_by_planner", transport="planner")
-        self._emit(f"行动已跳过 {thought.thought_id} [{raw_action_type}]")
+        self._emit(t("action.skipped_log", thought_id=thought.thought_id, action_type=raw_action_type))
         metadata: JsonObject = {
             "origin": "action",
             "action_type": raw_action_type,
@@ -977,7 +957,7 @@ class ActionManager:
             malformed = _copy_action_result(
                 result,
                 ok=False,
-                summary="新闻结果缺少结构化 RSS 条目",
+                summary=t("action.news_missing_entries"),
                 error_detail="malformed_news_result",
             )
             return "failed", malformed, True
@@ -1024,12 +1004,12 @@ class ActionManager:
         deduped_result = _copy_action_result(result, data=deduped_data)
         if invalid_items and not new_items:
             deduped_result["ok"] = False
-            deduped_result["summary"] = "新闻条目缺少可识别字段"
+            deduped_result["summary"] = t("action.news_unrecognizable")
             deduped_result["error"] = "malformed_news_items"
             return deduped_result, True
         deduped_result["summary"] = summarize_news_items(new_items)
         if not new_items:
-            deduped_result["summary"] = "已查看 RSS，没有新的新闻条目"
+            deduped_result["summary"] = t("action.news_no_new")
             return deduped_result, True
         return deduped_result, True
 
@@ -1456,36 +1436,19 @@ def _planner_json_messages(thought: Thought, *, conversation_source: str | None 
 
 
 def _planner_system_prompt() -> str:
-    return (
-        "我是 Seedwake 的前额叶行动规划器。"
-        "不要执行动作，只能返回结构化决定。"
-        "纯本地、无副作用、一次函数调用即可完成的时间读取、系统状态读取、固定 RSS 新闻读取、笔记覆写，以及 Telegram 消息发送可选 native。"
-        "天气、阅读、网页搜索、网页抓取、浏览器和多步探索委托普通 OpenClaw worker。"
-        "系统变更和文件修改委托 OpenClaw ops worker。"
-        "news 只读取配置里的固定 RSS feed 列表，不需要 topic，也不委托 OpenClaw。"
-        "reading 的阅读方向由 Seedwake 自己决定；如果原始 action 带了 query/topic/keywords，就保留它。"
-        "如果 reading 没带参数，也应围绕原始念头内容组织任务，不要把阅读主题交给 OpenClaw 自己决定。"
-        "weather 不写 location 时使用配置中的默认位置；只有想查特定地点时才带 location。"
-        "send_message 只有在真的想发消息时才使用。"
-        "send_message 优先发送到当前 conversation_source；只有明确给了 target/chat_id/source 时才覆盖。"
-        "如果想联系某个已知实体，可以使用 target_entity，例如 person:alice。"
-    )
+    return str(prompt_block("PLANNER_SYSTEM_PROMPT"))
 
 
 def _planner_json_system_prompt() -> str:
     return (
         _planner_system_prompt()
-        + "返回 JSON only。"
-        + '顶层格式只能是 {"tool":"<tool_name>","arguments":{...}}。'
-        + "不要输出解释、前后缀、markdown、额外字段或多个对象。"
-        + "arguments 必须是 object，不要返回字符串化 JSON。"
-        + "不用的可选字段直接省略，不要编造未列出的字段。"
+        + str(prompt_block("PLANNER_OUTPUT_FORMAT"))
         + _planner_json_tool_contract()
     )
 
 
 def _planner_json_tool_contract() -> str:
-    parts = ["可用 tool 与 arguments 约束如下："]
+    parts = [t("action.tool_list_header")]
     for tool in _planner_tools():
         entry = _planner_json_tool_contract_entry(tool)
         if entry:
@@ -1503,9 +1466,9 @@ def _planner_json_tool_contract_entry(tool: dict) -> str:
     description = str(function.get("description") or "").strip()
     field_contracts = _planner_json_tool_field_contracts(function.get("parameters"))
     if not field_contracts:
-        return f"{name}：{description} arguments 返回 {{}}。"
+        return t("action.tool_no_args", name=name, description=description)
     joined_fields = "；".join(field_contracts)
-    return f"{name}：{description} arguments 字段：{joined_fields}。"
+    return t("action.tool_with_args", name=name, description=description, fields=joined_fields)
 
 
 def _planner_json_tool_field_contracts(parameters: JsonValue) -> list[str]:
@@ -1532,7 +1495,7 @@ def _planner_json_tool_field_contracts(parameters: JsonValue) -> list[str]:
 
 
 def _planner_json_field_contract(*, field_name: str, schema: JsonObject, required: bool) -> str:
-    required_label = "必填" if required else "可选"
+    required_label = t("action.field_required") if required else t("action.field_optional")
     type_label = str(schema.get("type") or "any").strip()
     description = str(schema.get("description") or "").strip()
     enum_values = schema.get("enum")
@@ -1540,10 +1503,16 @@ def _planner_json_field_contract(*, field_name: str, schema: JsonObject, require
     if isinstance(enum_values, list) and enum_values:
         enum_items = [str(item).strip() for item in enum_values if str(item).strip()]
         if enum_items:
-            enum_label = f"，可选值仅限 {', '.join(enum_items)}"
-    detail = f"{field_name}（{required_label}，{type_label}{enum_label}）"
+            enum_label = t("action.field_enum_label", values=", ".join(enum_items))
+    detail = t(
+        "action.field_detail",
+        field_name=field_name,
+        required_label=required_label,
+        type_label=type_label,
+        enum_label=enum_label,
+    )
     if description:
-        return f"{detail}：{description}"
+        return t("action.field_detail_with_description", detail=detail, description=description)
     return detail
 
 
@@ -1633,19 +1602,19 @@ def _planner_tools() -> list[JsonObject]:
                         "action_type": {
                             "type": "string",
                             "enum": sorted(OPENCLAW_ACTION_TYPES),
-                            "description": "委托给 OpenClaw 的动作类型。",
+                            "description": t("action.tool.openclaw_action_type"),
                         },
                         "task": {
                             "type": "string",
-                            "description": "发给 OpenClaw 的具体任务文本，必须写清要做什么和返回要求。",
+                            "description": t("action.tool.openclaw_task"),
                         },
                         "timeout_seconds": {
                             "type": "integer",
-                            "description": PLANNER_TIMEOUT_FIELD_DESCRIPTION,
+                            "description": t(ACTION_PLANNER_TIMEOUT_DESC_KEY),
                         },
                         "reason": {
                             "type": "string",
-                            "description": "为什么选择委托这个动作；不写则默认使用当前念头内容。",
+                            "description": t("action.tool.openclaw_reason"),
                         },
                     },
                 },
@@ -1659,10 +1628,10 @@ def _planner_tools() -> list[JsonObject]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "reason": {"type": "string", "description": "为什么读取时间。"},
+                        "reason": {"type": "string", "description": t("action.tool.time_reason")},
                         "timeout_seconds": {
                             "type": "integer",
-                            "description": PLANNER_TIMEOUT_FIELD_DESCRIPTION,
+                            "description": t(ACTION_PLANNER_TIMEOUT_DESC_KEY),
                         },
                     },
                 },
@@ -1676,10 +1645,10 @@ def _planner_tools() -> list[JsonObject]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "reason": {"type": "string", "description": "为什么读取系统状态。"},
+                        "reason": {"type": "string", "description": t("action.tool.system_status_reason")},
                         "timeout_seconds": {
                             "type": "integer",
-                            "description": PLANNER_TIMEOUT_FIELD_DESCRIPTION,
+                            "description": t(ACTION_PLANNER_TIMEOUT_DESC_KEY),
                         },
                     },
                 },
@@ -1693,10 +1662,10 @@ def _planner_tools() -> list[JsonObject]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "reason": {"type": "string", "description": "为什么读取新闻。"},
+                        "reason": {"type": "string", "description": t("action.tool.news_reason")},
                         "timeout_seconds": {
                             "type": "integer",
-                            "description": PLANNER_TIMEOUT_FIELD_DESCRIPTION,
+                            "description": t(ACTION_PLANNER_TIMEOUT_DESC_KEY),
                         },
                     },
                 },
@@ -1715,27 +1684,27 @@ def _planner_tools() -> list[JsonObject]:
                     "properties": {
                         "message": {
                             "type": "string",
-                            "description": "要发送的消息正文。",
+                            "description": t("action.tool.message_body"),
                         },
                         "target": {
                             "type": "string",
-                            "description": "显式 Telegram 目标，可写 telegram:<chat_id> 或纯数字 chat_id。",
+                            "description": t("action.tool.message_target"),
                         },
                         "target_entity": {
                             "type": "string",
-                            "description": "联系人实体标识，例如 person:alice；用于解析联系人默认渠道。",
+                            "description": t("action.tool.message_target_entity"),
                         },
                         "reply_to": {
                             "type": "string",
-                            "description": "要回复的 Telegram message_id；不写则按默认规则处理。",
+                            "description": t("action.tool.message_reply_to"),
                         },
                         "timeout_seconds": {
                             "type": "integer",
-                            "description": PLANNER_TIMEOUT_FIELD_DESCRIPTION,
+                            "description": t(ACTION_PLANNER_TIMEOUT_DESC_KEY),
                         },
                         "reason": {
                             "type": "string",
-                            "description": "为什么发送这条消息；不写则默认使用当前念头内容。",
+                            "description": t("action.tool.message_reason"),
                         },
                     },
                 },
@@ -1751,15 +1720,15 @@ def _planner_tools() -> list[JsonObject]:
                     "properties": {
                         "content": {
                             "type": "string",
-                            "description": "要完整覆写到笔记里的内容，1000 字以内。",
+                            "description": t("action.tool.note_content"),
                         },
                         "timeout_seconds": {
                             "type": "integer",
-                            "description": PLANNER_TIMEOUT_FIELD_DESCRIPTION,
+                            "description": t(ACTION_PLANNER_TIMEOUT_DESC_KEY),
                         },
                         "reason": {
                             "type": "string",
-                            "description": "为什么要改写笔记；不写则默认使用当前念头内容。",
+                            "description": t("action.tool.note_reason"),
                         },
                     },
                 },
@@ -1775,7 +1744,7 @@ def _planner_tools() -> list[JsonObject]:
                     "properties": {
                         "reason": {
                             "type": "string",
-                            "description": "为什么本轮不执行该动作；这条原因会回流给主意识。",
+                            "description": t("action.tool.skip_reason"),
                         },
                     },
                 },
@@ -1852,12 +1821,12 @@ def _fallback_plan(
 ) -> ActionPlan | tuple[None, str | None] | None:
     action_type = str(raw_action_type or "").strip()
     if action_type not in THOUGHT_ACTION_TYPES:
-        return None, f"未知 action：{action_type or '空'}；当前不可用。"
+        return None, t("action.unknown_action", action_type=action_type or t("action.empty_fallback"))
     if action_type == "time":
         return ActionPlan(
             action_type="get_time",
             executor="native",
-            task="读取当前时间",
+            task=t("action.task_get_time"),
             timeout_seconds=default_timeout_seconds,
             reason="fallback",
         )
@@ -1871,7 +1840,7 @@ def _fallback_plan(
         return ActionPlan(
             action_type="get_system_status",
             executor="native",
-            task="读取当前系统状态",
+            task=t("action.task_get_system_status"),
             timeout_seconds=default_timeout_seconds,
             reason="fallback",
         )
@@ -1939,7 +1908,7 @@ def _run_native_action(
             return failure
         return _build_action_result(
             ok=True,
-            summary=f"准备发送消息到 {target_source}",
+            summary=t("action.send_summary", target=target_source),
             data={
                 "source": target_source,
                 "target_entity": target_entity,
@@ -1954,7 +1923,7 @@ def _run_native_action(
         note_text = _normalize_note_content(action.request.get("message_text"))
         return _build_action_result(
             ok=True,
-            summary="我的笔记已覆写",
+            summary=t("action.note_rewrite_summary"),
             data={
                 "content": note_text,
                 "length": len(note_text),
@@ -1968,14 +1937,14 @@ def _run_native_action(
         snapshot = collect_system_status_snapshot()
         return _build_action_result(
             ok=True,
-            summary=str(snapshot.get("summary") or "系统状态已更新"),
+            summary=str(snapshot.get("summary") or t("perception.system_status_default")),
             data=dict(snapshot),
             error_detail=None,
             run_id=None,
             session_key=None,
             transport="native",
         )
-    raise RuntimeError(f"不支持的 native action: {action.type}")
+    raise RuntimeError(t("action.unsupported_native", action_type=action.type))
 
 
 def _clamp_timeout(raw_value: JsonValue, default_timeout_seconds: int) -> int:
@@ -2014,7 +1983,7 @@ def _build_openclaw_task(
 def _build_search_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
     search_query = _extract_action_first_param(raw_params, "query", "keywords", "topic")
     if search_query:
-        return _search_result_contract(f"围绕“{search_query}”进行搜索，返回按相关性整理的简洁结果。")
+        return _search_result_contract(t("action.task_search", query=search_query))
     if explicit_task:
         return _search_result_contract(explicit_task)
     return _search_result_contract(thought.content)
@@ -2023,7 +1992,7 @@ def _build_search_task(raw_params: str, explicit_task: str, thought: Thought) ->
 def _build_web_fetch_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
     url = _extract_action_first_param(raw_params, "url", "link")
     if url:
-        return _web_fetch_result_contract(f"抓取并提取这个网页的主要内容：{url}。返回简洁摘要和关键信息。")
+        return _web_fetch_result_contract(t("action.task_web_fetch", url=url))
     if explicit_task:
         return _web_fetch_result_contract(explicit_task)
     return _web_fetch_result_contract(thought.content)
@@ -2032,11 +2001,11 @@ def _build_web_fetch_task(raw_params: str, explicit_task: str, thought: Thought)
 def _build_reading_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
     reading_query = _extract_action_first_param(raw_params, "query", "topic", "keywords")
     if reading_query:
-        return _reading_result_contract(f"围绕“{reading_query}”寻找一小段值得阅读的外部材料，返回来源和原文片段。")
+        return _reading_result_contract(t("action.task_reading_query", query=reading_query))
     if explicit_task:
         return _reading_result_contract(explicit_task)
     return _reading_result_contract(
-        f"围绕这条念头当前真正想读的方向寻找一小段外部材料：{thought.content}"
+        t("action.task_reading_thought", content=thought.content)
     )
 
 
@@ -2044,14 +2013,14 @@ def _build_weather_task(raw_params: str, default_weather_location: str) -> str:
     location = _extract_action_param(raw_params, "location") or default_weather_location
     if location:
         return _with_openclaw_result_contract(
-            f"查询 {location} 的当前天气，返回简洁概况。",
+            t("action.task_weather_location", location=location),
             data_shape=WEATHER_RESULT_DATA_SHAPE,
-            requirements=[WEATHER_RESULT_FIELD_REQUIREMENT],
+            requirements=[t("action.weather_field_req")],
         )
     return _with_openclaw_result_contract(
-        "查询默认位置的当前天气；如果缺少默认位置，请明确说明无法确定位置。",
+        t("action.task_weather_default"),
         data_shape=WEATHER_RESULT_DATA_SHAPE,
-        requirements=[WEATHER_RESULT_FIELD_REQUIREMENT],
+        requirements=[t("action.weather_field_req")],
     )
 
 
@@ -2059,9 +2028,9 @@ def _build_file_modify_task(raw_params: str, explicit_task: str, thought: Though
     path = _extract_action_first_param(raw_params, "path", "file")
     instruction = _extract_action_first_param(raw_params, "instruction", "edit", "change")
     if path and instruction:
-        return _file_modify_result_contract(f"修改文件 {path}。修改要求：{instruction}。只做必要改动，并返回修改摘要。")
+        return _file_modify_result_contract(t("action.task_file_modify", path=path, instruction=instruction))
     if path:
-        return _file_modify_result_contract(f"修改文件 {path}。修改要求围绕这条念头展开：{thought.content}")
+        return _file_modify_result_contract(t("action.task_file_modify_thought", path=path, content=thought.content))
     if explicit_task:
         return _file_modify_result_contract(explicit_task)
     return _file_modify_result_contract(thought.content)
@@ -2070,7 +2039,7 @@ def _build_file_modify_task(raw_params: str, explicit_task: str, thought: Though
 def _build_system_change_task(raw_params: str, explicit_task: str, thought: Thought) -> str:
     instruction = _extract_action_first_param(raw_params, "instruction", "task", "change")
     if instruction:
-        return _system_change_result_contract(f"执行系统变更：{instruction}。返回变更摘要、影响范围和结果。")
+        return _system_change_result_contract(t("action.task_system_change", instruction=instruction))
     if explicit_task:
         return _system_change_result_contract(explicit_task)
     return _system_change_result_contract(thought.content)
@@ -2080,7 +2049,7 @@ def _search_result_contract(task: str) -> str:
     return _with_openclaw_result_contract(
         task,
         data_shape=SEARCH_RESULT_DATA_SHAPE,
-        requirements=SEARCH_RESULT_REQUIREMENTS,
+        requirements=[t("action.search_field_req")],
     )
 
 
@@ -2088,7 +2057,7 @@ def _web_fetch_result_contract(task: str) -> str:
     return _with_openclaw_result_contract(
         task,
         data_shape=WEB_FETCH_RESULT_DATA_SHAPE,
-        requirements=WEB_FETCH_RESULT_REQUIREMENTS,
+        requirements=[t("action.web_fetch_field_req")],
     )
 
 
@@ -2096,7 +2065,7 @@ def _reading_result_contract(task: str) -> str:
     return _with_openclaw_result_contract(
         task,
         data_shape=READING_SOURCE_RESULT_DATA_SHAPE,
-        requirements=READING_RESULT_REQUIREMENTS,
+        requirements=[t("action.reading_field_req")],
     )
 
 
@@ -2104,7 +2073,7 @@ def _file_modify_result_contract(task: str) -> str:
     return _with_openclaw_result_contract(
         task,
         data_shape=FILE_MODIFY_RESULT_DATA_SHAPE,
-        requirements=FILE_MODIFY_RESULT_REQUIREMENTS,
+        requirements=[t("action.file_modify_field_req")],
     )
 
 
@@ -2113,8 +2082,8 @@ def _system_change_result_contract(task: str) -> str:
         task,
         data_shape=SYSTEM_CHANGE_RESULT_DATA_SHAPE,
         requirements=[
-            SYSTEM_CHANGE_FIELD_REQUIREMENT,
-            SYSTEM_CHANGE_STATUS_REQUIREMENT,
+            t("action.system_change_field_req"),
+            t("action.system_change_status_req"),
         ],
     )
 
@@ -2124,11 +2093,7 @@ def _build_custom_task(explicit_task: str, thought: Thought) -> str:
     return _with_openclaw_result_contract(
         task,
         data_shape='{"details":{}}',
-        requirements=[
-            "把任务相关的结构化结果统一放进 details 对象。",
-            "不要在 data 下新增 details 之外的同级字段。",
-            "details 里的 key 保持简洁稳定，并只放和当前任务直接相关的信息。",
-        ],
+        requirements=[str(prompt_block("PLANNER_RESULT_CONTRACT_PREFIX"))],
     )
 
 
@@ -2136,10 +2101,9 @@ def _with_openclaw_result_contract(task: str, *, data_shape: str, requirements: 
     lines = [
         task,
         "",
-        "严格按以下 JSON 返回，不要输出 JSON 之外的任何文本：",
+        str(prompt_block("PLANNER_RESULT_JSON_INSTRUCTION")),
         f'{{"ok": true, "summary": "...", "data": {data_shape}, "error": null}}',
-        "data 对象必须使用上面列出的精确字段名；不要改名，不要新增同级字段。",
-        '如果某字段暂时拿不到：字符串用 ""，列表用 []，对象用 {}，布尔值用 false。',
+        str(prompt_block("PLANNER_RESULT_FIELD_INSTRUCTION")),
     ]
     for requirement in requirements:
         lines.append(f"- {requirement}")
@@ -2263,7 +2227,7 @@ def _action_to_dict(action: ActionRecord) -> dict:
 
 
 def _normalize_action_result(result: ActionResultEnvelope, action: ActionRecord) -> ActionResultEnvelope:
-    summary = str(result.get("summary") or "行动完成")
+    summary = str(result.get("summary") or t(ACTION_COMPLETED_DEFAULT_KEY))
     data = result.get("data")
     raw_text = result.get("raw_text")
     return _build_action_result(
@@ -2384,7 +2348,7 @@ def _native_news_plan(
     return ActionPlan(
         action_type="news",
         executor="native",
-        task="读取固定 RSS 信息流",
+        task=t("action.task_rss"),
         timeout_seconds=timeout_seconds,
         reason=reason,
         news_feed_urls=list(news_feed_urls),
@@ -2427,8 +2391,8 @@ def _native_send_message_plan(
     reply_to = explicit_reply_to or _extract_action_first_param(raw_params, "reply_to") or ""
     if not target_source and not target_entity:
         target_source = str(conversation_source or "").strip()
-    target_label = target_source or target_entity or "当前 Telegram 对话"
-    task = f"向 {target_label} 发送消息：{message_text or thought.content}"
+    target_label = target_source or target_entity or t("action.default_target_label")
+    task = t("action.task_send_message", target=target_label, message=message_text or thought.content)
     return ActionPlan(
         action_type="send_message",
         executor="native",
@@ -2500,7 +2464,7 @@ def _plan_delegate_tool_call(
     explicit_task = str(arguments.get("task") or "").strip()
     action_type = _delegated_action_type(arguments, thought)
     if action_type not in OPENCLAW_ACTION_TYPES and action_type not in DELEGATED_TOOL_COMPAT_ACTION_TYPES:
-        return None, f"不支持的 delegated action：{action_type or '空'}"
+        return None, t("action.unsupported_delegated", action_type=action_type or t("action.empty_fallback"))
     if action_type == "news":
         return _native_news_plan(
             timeout_seconds=timeout_seconds,
@@ -2536,7 +2500,7 @@ def _native_time_plan(*, timeout_seconds: int, reason: str) -> ActionPlan:
     return ActionPlan(
         action_type="get_time",
         executor="native",
-        task="读取当前时间",
+        task=t("action.task_get_time_delegated"),
         timeout_seconds=timeout_seconds,
         reason=reason,
     )
@@ -2546,7 +2510,7 @@ def _native_system_status_plan(*, timeout_seconds: int, reason: str) -> ActionPl
     return ActionPlan(
         action_type="get_system_status",
         executor="native",
-        task="读取当前系统状态",
+        task=t("action.task_get_system_status_delegated"),
         timeout_seconds=timeout_seconds,
         reason=reason,
     )
@@ -2561,7 +2525,7 @@ def _native_note_rewrite_plan(
     explicit_content: str = "",
 ) -> ActionPlan:
     content = explicit_content or _build_note_rewrite_content(raw_params, thought)
-    task = f"覆写我的笔记：{_note_excerpt(content)}"
+    task = t("action.task_note_rewrite", content=_note_excerpt(content))
     return ActionPlan(
         action_type="note_rewrite",
         executor="native",
@@ -2865,24 +2829,24 @@ def _prepare_send_message(
     if not target_source:
         if target_entity:
             return "", target_entity, message_text, _failure_result(
-                f"无法解析实体 {target_entity} 的 Telegram 联系方式",
+                t("action.unresolved_entity", entity=target_entity),
                 "unresolved_target_entity",
                 transport="native",
             )
         return "", target_entity, message_text, _failure_result(
-            "缺少消息目标",
+            t("action.missing_target"),
             "missing_target",
             transport="native",
         )
     if not target_source.startswith(TELEGRAM_SOURCE_PREFIX):
         return target_source, target_entity, message_text, _failure_result(
-            "仅支持 Telegram 原生发送",
+            t("action.unsupported_target"),
             "unsupported_target",
             transport="native",
         )
     if not message_text:
         return target_source, target_entity, message_text, _failure_result(
-            "缺少消息内容",
+            t("action.missing_content"),
             "missing_message",
             transport="native",
         )
@@ -2979,7 +2943,7 @@ def _stimulus_content(
     status: str,
     result: ActionResultEnvelope,
 ) -> str:
-    summary = str(result.get("summary") or "行动完成")
+    summary = str(result.get("summary") or t(ACTION_COMPLETED_DEFAULT_KEY))
     if action.type == "send_message":
         return _send_message_stimulus_content(summary, result.get("data"), _action_result_succeeded(status, result))
     if _action_result_succeeded(status, result) and action.type == "search":
@@ -3050,8 +3014,8 @@ def _search_stimulus_entry(index: int, item: JsonValue) -> str:
 def _send_message_success_summary(target_source: str, message_text: str) -> str:
     excerpt, _ = _clip_prompt_text(message_text.strip(), SEND_MESSAGE_SUMMARY_MAX_CHARS)
     if excerpt:
-        return f'已成功发送给 {target_source}：“{excerpt}”'
-    return f"已成功发送给 {target_source}"
+        return t("action.send_success_with_excerpt", target=target_source, excerpt=excerpt)
+    return t("action.send_success", target=target_source)
 
 
 def _send_message_result_data(
@@ -3102,11 +3066,11 @@ def _send_message_stimulus_content(summary: str, data: JsonValue, succeeded: boo
     if succeeded:
         return summary
     if target and excerpt:
-        return f'发送给 {target} 失败：“{excerpt}” （{summary}）'
+        return t("action.send_fail_target_excerpt", target=target, excerpt=excerpt, summary=summary)
     if excerpt:
-        return f'发送失败：“{excerpt}” （{summary}）'
+        return t("action.send_fail_excerpt", excerpt=excerpt, summary=summary)
     if target:
-        return f"发送给 {target} 失败（{summary}）"
+        return t("action.send_fail_target", target=target, summary=summary)
     return summary
 
 
@@ -3128,9 +3092,9 @@ def _reading_stimulus_content(action: ActionRecord, summary: str, data: JsonValu
     if source_line:
         parts.append(source_line)
     if excerpt:
-        parts.append(f"原文：{excerpt}")
+        parts.append(t("action.result_original", excerpt=excerpt))
     elif summary.strip():
-        parts.append(f"摘要：{summary.strip()}")
+        parts.append(t("action.result_summary", summary=summary.strip()))
     if not parts:
         return summary
     return "\n".join(parts)
@@ -3141,14 +3105,14 @@ def _reading_stimulus_intent_line(action: ActionRecord) -> str:
         focus = _reading_request_focus(action.request)
         if focus:
             clipped, _ = _clip_prompt_text(focus, READING_STIMULUS_INTENT_MAX_CHARS)
-            return f"这次我是围绕“{clipped}”去读的。"
-        return "这是我刚主动去读到的。"
+            return t("action.reading_intent_focus", focus=clipped)
+        return t("action.reading_intent_default")
     if action.type == "web_fetch":
         url = _web_fetch_request_url(action.request)
         if url:
             clipped, _ = _clip_prompt_text(url, READING_STIMULUS_INTENT_MAX_CHARS)
-            return f"这是我刚抓取这个网页时看到的：{clipped}"
-        return "这是我刚抓取网页时看到的。"
+            return t("action.web_fetch_intent_url", url=clipped)
+        return t("action.web_fetch_intent_default")
     return ""
 
 
@@ -3158,9 +3122,11 @@ def _reading_request_focus(request_payload: ActionRequestPayload) -> str:
     if focus:
         return _compact_prompt_text(focus)
     task = str(request_payload.get("task") or "").strip()
-    if task.startswith("围绕“"):
-        start = len("围绕“")
-        end = task.find("”", start)
+    prefix = t("action.reading_focus_prefix")
+    suffix = t("action.reading_focus_suffix")
+    if task.startswith(prefix):
+        start = len(prefix)
+        end = task.find(suffix, start)
         if end > start:
             return _compact_prompt_text(task[start:end])
     return ""
@@ -3216,7 +3182,7 @@ def _news_stimulus_content(summary: str, data: JsonValue) -> str:
         shown_count += 1
     remaining = displayable_count - shown_count
     if remaining > 0:
-        parts.append(f"（另有 {remaining} 条未展示）")
+        parts.append(t("action.result_remaining", count=remaining))
     return "\n".join(parts)
 
 
@@ -3236,11 +3202,11 @@ def _reading_source_title_and_url(data: dict) -> tuple[str, str]:
 def _reading_source_line(data: dict) -> str:
     title, url = _reading_source_title_and_url(data)
     if title and url:
-        return f"来源：{title} ({url})"
+        return t("action.result_source_title_url", title=title, url=url)
     if title:
-        return f"来源：{title}"
+        return t("action.result_source_title", title=title)
     if url:
-        return f"来源：{url}"
+        return t("action.result_source_url", url=url)
     return ""
 
 
@@ -3296,7 +3262,7 @@ def _normalize_note_content(value: JsonValue | bytes | None) -> str:
 
 def _note_excerpt(content: str) -> str:
     excerpt, _ = _clip_prompt_text(_compact_prompt_text(content), 80)
-    return excerpt or "（空）"
+    return excerpt or t("action.result_empty")
 
 
 def push_action_control(
@@ -3474,7 +3440,7 @@ def _restore_action_state(
         return (
             "failed",
             _failure_result(
-                "消息发送状态未知，为避免重复发送，未自动重试",
+                t("action.send_status_unknown"),
                 "delivery_status_unknown",
                 transport=executor,
             ),

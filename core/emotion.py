@@ -16,23 +16,22 @@ from core.action import ActionRecord
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient
 from core.stimulus import Stimulus
 from core.thought_parser import Thought
+from core.i18n import t
 from core.common_types import EmotionSnapshot, elapsed_ms
 
 EMOTION_STATE_KEY = "seedwake:emotion_state"
 DEFAULT_EMOTION_DIMENSIONS = ["curiosity", "calm", "frustration", "satisfaction", "concern"]
-EMOTION_LABELS = {
-    "curiosity": "好奇",
-    "calm": "平静",
-    "frustration": "挫败",
-    "satisfaction": "满足",
-    "concern": "牵挂",
-}
-EMOTION_INFERENCE_SYSTEM_PROMPT = (
-    "你是我的情绪感知模块。"
-    "根据以下念头和刺激，判断此刻的情绪状态。"
-    "返回一行 JSON，格式：{\"curiosity\":0.5,\"calm\":0.3,\"frustration\":0.1,\"satisfaction\":0.0,\"concern\":0.1}"
-    "\n每个维度 0.0-1.0，所有维度之和不必为 1。只输出 JSON，不要解释。"
-)
+def _emotion_labels() -> dict[str, str]:
+    return {
+        "curiosity": t("emotion.dim.curiosity"),
+        "calm": t("emotion.dim.calm"),
+        "frustration": t("emotion.dim.frustration"),
+        "satisfaction": t("emotion.dim.satisfaction"),
+        "concern": t("emotion.dim.concern"),
+    }
+def _emotion_inference_system_prompt() -> str:
+    from core.i18n import prompt_block
+    return str(prompt_block("EMOTION_INFERENCE_SYSTEM_PROMPT"))
 EMOTION_REDIS_EXCEPTIONS = (
     redis_lib.RedisError,
     json.JSONDecodeError,
@@ -221,7 +220,7 @@ def _infer_emotion_via_llm(
         response = client.chat(
             model=str(model_config.get("name") or model_config["name"]),
             messages=[
-                {"role": "system", "content": EMOTION_INFERENCE_SYSTEM_PROMPT},
+                {"role": "system", "content": _emotion_inference_system_prompt()},
                 {"role": "user", "content": user_text},
             ],
             options={"temperature": 0.1, "max_tokens": 80},
@@ -257,15 +256,15 @@ def _strip_noise(text: str) -> str:
 def _stimulus_emotion_summary(stimulus: Stimulus) -> str:
     if stimulus.type == "conversation":
         content = " ".join(stimulus.content.split())[:80]
-        return f"[有人对我说话] {content}"
+        return t("emotion.stimulus.conversation", content=content)
     if stimulus.type in {"time", "system_status"}:
         return ""
     status = str(stimulus.metadata.get("status") or "").strip()
     action_type = str(stimulus.metadata.get("action_type") or stimulus.type).strip()
     if status == "failed":
-        return f"[行动失败] {action_type}"
+        return t("emotion.stimulus.action_failed", action_type=action_type)
     if status == "succeeded":
-        return f"[行动完成] {action_type}"
+        return t("emotion.stimulus.action_completed", action_type=action_type)
     content = " ".join(stimulus.content.split())[:60]
     return f"[{stimulus.type}] {content}"
 
@@ -343,12 +342,12 @@ def _copy_snapshot(snapshot: EmotionSnapshot) -> EmotionSnapshot:
 def _emotion_summary(dimensions: dict[str, float]) -> str:
     ranked = sorted(dimensions.items(), key=lambda item: item[1], reverse=True)
     visible = [
-        f"{EMOTION_LABELS.get(name, name)} {value:.2f}"
+        f"{_emotion_labels().get(name, name)} {value:.2f}"
         for name, value in ranked
         if value >= 0.08
     ][:3]
     if not visible:
-        return "情绪平稳，波动很轻。"
+        return t("emotion.default_summary")
     return "，".join(visible)
 
 

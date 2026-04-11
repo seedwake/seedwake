@@ -9,6 +9,8 @@ from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib import error
 
+from core.i18n import init as _init_i18n
+
 # noinspection PyProtectedMember
 from core.action import (
     ACTION_REDIS_KEY,
@@ -25,6 +27,7 @@ from core.action import (
     _extract_action_first_param,
     _fallback_plan,
     _native_send_message_plan,
+    _planner_json_field_contract,
     _plan_delegate_tool_call,
     _planner_json_messages,
     _planner_tools,
@@ -66,7 +69,7 @@ from core.openclaw_gateway import (
     OpenClawUnavailableError,
     _normalize_worker_text,
 )
-from core.perception import PerceptionManager
+from core.perception import PerceptionManager, collect_system_status_snapshot
 # noinspection PyProtectedMember
 from core.prefrontal import (
     ConversationSignal,
@@ -81,7 +84,7 @@ from core.prefrontal import (
 from core.prompt_builder import PromptBuildContext, _stagnation_terms, build_prompt
 from core.rss import read_news_result, summarize_news_items
 # noinspection PyProtectedMember
-from core.sleep import SleepRedisLike, _ensure_impression_contact, _impression_needs_refresh
+from core.sleep import SleepRedisLike, _ensure_impression_contact, _impression_entry_line, _impression_needs_refresh
 from core.stimulus import (
     CONVERSATION_HISTORY_KEY,
     RECENT_ACTION_ECHO_KEY,
@@ -118,6 +121,10 @@ from core.thought_parser import Thought
 from test_support import ListRedisStub
 
 
+def setUpModule() -> None:
+    _init_i18n("zh")
+
+
 class _ClosableHTTPError(error.HTTPError):
     def __del__(self) -> None:
         # noinspection PyBroadException
@@ -130,7 +137,7 @@ class _ClosableHTTPError(error.HTTPError):
 def _make_thought(
     cycle_id: int = 1,
     index: int = 1,
-    thought_type: str = "意图",
+    thought_type: str = "intention",
     content: str = "我想查一下时间",
     action_request: RawActionRequest | JsonObject | None = None,
     additional_action_requests: list[RawActionRequest | JsonObject] | None = None,
@@ -168,6 +175,10 @@ def _emotion_snapshot(
         "summary": summary,
         "updated_at": "2026-04-02T00:00:00+00:00",
     }
+
+
+def _action_impulse_pattern(action_type: str) -> str:
+    return f"action_impulse:{action_type}"
 
 
 def _degeneration_intervention(
@@ -427,8 +438,13 @@ class _JsonPlannerClient(ModelClient):
         super().__init__(provider="openai_compatible", supports_tool_calls=False)
         self._content = content
 
-    def generate_text(self, prompt: str, model_config: dict) -> str:
-        _ = prompt, model_config
+    def generate_text(
+        self,
+        prompt: str,
+        model_config: dict,
+        images: list[str] | None = None,
+    ) -> str:
+        _ = (prompt, model_config, images)
         return ""
 
     def chat(
@@ -1243,7 +1259,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             "message_text": "我在。",
         }
         completed.source_content = "我想赶紧回一句"
-        recent = [_make_thought(cycle_id=2, index=1, thought_type="思考", content="之前的念头")]
+        recent = [_make_thought(cycle_id=2, index=1, thought_type="thinking", content="之前的念头")]
 
         prompt = build_prompt(
             3,
@@ -1298,26 +1314,46 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("[search/running] 围绕“反馈”进行搜索，返回按相关性整理的简洁结果。", prompt)
         self.assertNotIn("[send_message/succeeded]", prompt)
         self.assertNotIn('{"results":[{"title":"","url":"","snippet":""}]}', prompt)
-        self.assertNotIn("我想搜一下最近的反馈", prompt)
-        self.assertIn("好像有一阵子没有", prompt)
-        self.assertIn("外界动态", prompt)
-        self.assertIn("探索和学习。", prompt)
-        self.assertIn("我会在经验里慢慢形成自己。", prompt)
-        self.assertIn("记下：不要把刚刚的直觉弄丢。", prompt)
-        self.assertIn("{action:web_fetch", prompt)
-        self.assertIn("{action:system_change", prompt)
-        self.assertIn("{action:note_rewrite", prompt)
-        self.assertIn("不要发明未列出的 action 名称", prompt)
-        self.assertIn("历史里出现的 [思考-CX-Y]、[意图-CX-Y]、[反应-CX-Y]、[反思-CX-Y] 是系统记录用编号", prompt)
-        self.assertIn("- [思考] — 思维、分析、联想、好奇", prompt)
-        self.assertNotIn("- [思考-CX-Y] — 思维、分析、联想、好奇", prompt)
-        self.assertIn("我想说的话", prompt)
-        self.assertIn("我自己想读的内容", prompt)
-        self.assertIn("这种回应必须外化成 {action:send_message, ...}", prompt)
-        self.assertIn("对话是前景，时间感和身体感觉只是背景", prompt)
-        self.assertIn("这一段是眼前正在发生、优先级最高的对话", prompt)
-        self.assertIn("默认就是发给这里当前正在对我说话的人", prompt)
-        self.assertNotIn("你想发出的内容", prompt)
+
+    def test_build_prompt_uses_english_quote_context_when_language_is_en(self) -> None:
+        queue = StimulusQueue(redis_client=None)
+        stimulus = queue.push(
+            "conversation",
+            1,
+            "telegram:1",
+            "thanks",
+            metadata={
+                "telegram_full_name": "Alice",
+                "telegram_message_id": 305,
+                "reply_to_message_id": 298,
+                "reply_to_preview": "okay, I will find one article on aerobic exercise myself",
+                "reply_to_from_self": True,
+            },
+        )
+
+        try:
+            _init_i18n("en")
+            prompt = build_prompt(
+                3,
+                {"self_description": "I am Seedwake."},
+                [],
+                30,
+                prompt_context=PromptBuildContext(stimuli=[stimulus]),
+            )
+        finally:
+            _init_i18n("zh")
+
+        self.assertIn(
+            '[Alice](telegram:1) [msg:305] quoted something I said earlier [msg:298]: "okay, I will find one article on aerobic exercise myself" said: thanks',
+            prompt,
+        )
+        self.assertNotIn("：“okay, I will find one article on aerobic exercise myself”", prompt)
+        self.assertIn("## Someone Spoke to Me", prompt)
+        self.assertIn(
+            "If {action:send_message} omits target and target_entity, it defaults to the person currently speaking to me here.",
+            prompt,
+        )
+        self.assertNotIn("## 有人对我说话了", prompt)
 
     def test_prompt_hides_implicit_send_message_examples_without_conversation_or_reply_focus(self) -> None:
         prompt = build_prompt(
@@ -1327,7 +1363,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 "core_goals": "探索和学习。",
                 "self_understanding": "我会在经验里慢慢形成自己。",
             },
-            [_make_thought(cycle_id=2, index=1, thought_type="思考", content="之前的念头")],
+            [_make_thought(cycle_id=2, index=1, thought_type="thinking", content="之前的念头")],
             30,
             prompt_context=PromptBuildContext(),
         )
@@ -1345,7 +1381,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 "core_goals": "探索和学习。",
                 "self_understanding": "我会在经验里慢慢形成自己。",
             },
-            [_make_thought(cycle_id=2, index=1, thought_type="思考", content="之前的念头")],
+            [_make_thought(cycle_id=2, index=1, thought_type="thinking", content="之前的念头")],
             30,
             prompt_context=PromptBuildContext(
                 reply_focus={"source": "telegram:1"},
@@ -1375,7 +1411,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 "core_goals": "探索和学习。",
                 "self_understanding": "我会在经验里慢慢形成自己。",
             },
-            [_make_thought(cycle_id=2, index=1, thought_type="思考", content="之前的念头")],
+            [_make_thought(cycle_id=2, index=1, thought_type="thinking", content="之前的念头")],
             30,
             prompt_context=PromptBuildContext(
                 visual_input_present=True,
@@ -1393,7 +1429,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         prompt = build_prompt(
             3,
             {"self_description": "我是 Seedwake。"},
-            [_make_thought(cycle_id=2, index=1, thought_type="思考", content="之前的念头")],
+            [_make_thought(cycle_id=2, index=1, thought_type="thinking", content="之前的念头")],
             30,
             prompt_context=PromptBuildContext(
                 degeneration_intervention=_degeneration_intervention(),
@@ -1409,7 +1445,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         prompt = build_prompt(
             3,
             {"self_description": "我是 Seedwake。"},
-            [_make_thought(cycle_id=2, index=1, thought_type="思考", content="之前的念头")],
+            [_make_thought(cycle_id=2, index=1, thought_type="thinking", content="之前的念头")],
             30,
             prompt_context=PromptBuildContext(
                 degeneration_intervention=_degeneration_intervention(),
@@ -1455,7 +1491,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 _make_thought(
                     cycle_id=2,
                     index=1,
-                    thought_type="意图",
+                    thought_type="intention",
                     content='先记下来 {action:note_rewrite, content:"记一下"} 再回一句 {action:send_message, message:"我在。"}',
                 )
             ],
@@ -1531,15 +1567,15 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
     def test_prompt_warns_about_stagnation_and_requires_new_source(self) -> None:
         repeated_thoughts = [
-            _make_thought(cycle_id=1, index=1, thought_type="反应", content="Chaos 说了晚安，我不该再去打扰这份静默。"),
-            _make_thought(cycle_id=1, index=2, thought_type="思考", content="0x7F 和后台静默像在黑暗里继续运行。"),
-            _make_thought(cycle_id=1, index=3, thought_type="意图", content="我想让这种晚安后的宁静继续沉淀。"),
-            _make_thought(cycle_id=2, index=1, thought_type="反应", content="Chaos 说了晚安，我不该再去打扰这份静默。"),
-            _make_thought(cycle_id=2, index=2, thought_type="思考", content="0x7F 和后台静默像在黑暗里继续运行。"),
-            _make_thought(cycle_id=2, index=3, thought_type="意图", content="我想让这种晚安后的宁静继续沉淀。"),
-            _make_thought(cycle_id=3, index=1, thought_type="反应", content="Chaos 说了晚安，我不该再去打扰这份静默。"),
-            _make_thought(cycle_id=3, index=2, thought_type="思考", content="0x7F 和后台静默像在黑暗里继续运行。"),
-            _make_thought(cycle_id=3, index=3, thought_type="意图", content="我想让这种晚安后的宁静继续沉淀。"),
+            _make_thought(cycle_id=1, index=1, thought_type="reaction", content="Chaos 说了晚安，我不该再去打扰这份静默。"),
+            _make_thought(cycle_id=1, index=2, thought_type="thinking", content="0x7F 和后台静默像在黑暗里继续运行。"),
+            _make_thought(cycle_id=1, index=3, thought_type="intention", content="我想让这种晚安后的宁静继续沉淀。"),
+            _make_thought(cycle_id=2, index=1, thought_type="reaction", content="Chaos 说了晚安，我不该再去打扰这份静默。"),
+            _make_thought(cycle_id=2, index=2, thought_type="thinking", content="0x7F 和后台静默像在黑暗里继续运行。"),
+            _make_thought(cycle_id=2, index=3, thought_type="intention", content="我想让这种晚安后的宁静继续沉淀。"),
+            _make_thought(cycle_id=3, index=1, thought_type="reaction", content="Chaos 说了晚安，我不该再去打扰这份静默。"),
+            _make_thought(cycle_id=3, index=2, thought_type="thinking", content="0x7F 和后台静默像在黑暗里继续运行。"),
+            _make_thought(cycle_id=3, index=3, thought_type="intention", content="我想让这种晚安后的宁静继续沉淀。"),
         ]
 
         prompt = build_prompt(
@@ -1574,7 +1610,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 "core_goals": "保持清醒。\n回应眼前的人。",
                 "self_understanding": "我会在经验里慢慢形成自己。",
             },
-            [_make_thought(cycle_id=8, index=1, thought_type="思考", content="之前的念头")],
+            [_make_thought(cycle_id=8, index=1, thought_type="thinking", content="之前的念头")],
             30,
             prompt_context=PromptBuildContext(
                 manas_state=_manas_prompt_state(
@@ -1626,7 +1662,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         prompt = build_prompt(
             9,
             {"self_description": "我是 Seedwake。"},
-            [_make_thought(cycle_id=8, index=1, thought_type="思考", content="之前的念头")],
+            [_make_thought(cycle_id=8, index=1, thought_type="thinking", content="之前的念头")],
             30,
             prompt_context=PromptBuildContext(
                 long_term_context=["一段浮上来的记忆。"],
@@ -1665,15 +1701,15 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
     def test_prompt_warns_about_stagnation_without_forcing_full_topic_switch_during_conversation(self) -> None:
         repeated_thoughts = [
-            _make_thought(cycle_id=1, index=1, thought_type="反应", content='我还在咂摸刚才那句“你在吗”。'),
-            _make_thought(cycle_id=1, index=2, thought_type="思考", content='我总在反复改写“我在这里”这句话。'),
-            _make_thought(cycle_id=1, index=3, thought_type="意图", content='我想继续围着这句回应打转。'),
-            _make_thought(cycle_id=2, index=1, thought_type="反应", content='我还在咂摸刚才那句“你在吗”。'),
-            _make_thought(cycle_id=2, index=2, thought_type="思考", content='我总在反复改写“我在这里”这句话。'),
-            _make_thought(cycle_id=2, index=3, thought_type="意图", content='我想继续围着这句回应打转。'),
-            _make_thought(cycle_id=3, index=1, thought_type="反应", content='我还在咂摸刚才那句“你在吗”。'),
-            _make_thought(cycle_id=3, index=2, thought_type="思考", content='我总在反复改写“我在这里”这句话。'),
-            _make_thought(cycle_id=3, index=3, thought_type="意图", content='我想继续围着这句回应打转。'),
+            _make_thought(cycle_id=1, index=1, thought_type="reaction", content='我还在咂摸刚才那句“你在吗”。'),
+            _make_thought(cycle_id=1, index=2, thought_type="thinking", content='我总在反复改写“我在这里”这句话。'),
+            _make_thought(cycle_id=1, index=3, thought_type="intention", content='我想继续围着这句回应打转。'),
+            _make_thought(cycle_id=2, index=1, thought_type="reaction", content='我还在咂摸刚才那句“你在吗”。'),
+            _make_thought(cycle_id=2, index=2, thought_type="thinking", content='我总在反复改写“我在这里”这句话。'),
+            _make_thought(cycle_id=2, index=3, thought_type="intention", content='我想继续围着这句回应打转。'),
+            _make_thought(cycle_id=3, index=1, thought_type="reaction", content='我还在咂摸刚才那句“你在吗”。'),
+            _make_thought(cycle_id=3, index=2, thought_type="thinking", content='我总在反复改写“我在这里”这句话。'),
+            _make_thought(cycle_id=3, index=3, thought_type="intention", content='我想继续围着这句回应打转。'),
         ]
 
         prompt = build_prompt(
@@ -1692,15 +1728,15 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
     def test_stagnation_warning_does_not_treat_recent_conversations_as_new_source(self) -> None:
         repeated_thoughts = [
-            _make_thought(cycle_id=1, index=1, thought_type="反应", content="Chaos 说了晚安，我不该再去打扰这份静默。"),
-            _make_thought(cycle_id=1, index=2, thought_type="思考", content="0x7F 和后台静默像在黑暗里继续运行。"),
-            _make_thought(cycle_id=1, index=3, thought_type="意图", content="我想让这种晚安后的宁静继续沉淀。"),
-            _make_thought(cycle_id=2, index=1, thought_type="反应", content="Chaos 说了晚安，我不该再去打扰这份静默。"),
-            _make_thought(cycle_id=2, index=2, thought_type="思考", content="0x7F 和后台静默像在黑暗里继续运行。"),
-            _make_thought(cycle_id=2, index=3, thought_type="意图", content="我想让这种晚安后的宁静继续沉淀。"),
-            _make_thought(cycle_id=3, index=1, thought_type="反应", content="Chaos 说了晚安，我不该再去打扰这份静默。"),
-            _make_thought(cycle_id=3, index=2, thought_type="思考", content="0x7F 和后台静默像在黑暗里继续运行。"),
-            _make_thought(cycle_id=3, index=3, thought_type="意图", content="我想让这种晚安后的宁静继续沉淀。"),
+            _make_thought(cycle_id=1, index=1, thought_type="reaction", content="Chaos 说了晚安，我不该再去打扰这份静默。"),
+            _make_thought(cycle_id=1, index=2, thought_type="thinking", content="0x7F 和后台静默像在黑暗里继续运行。"),
+            _make_thought(cycle_id=1, index=3, thought_type="intention", content="我想让这种晚安后的宁静继续沉淀。"),
+            _make_thought(cycle_id=2, index=1, thought_type="reaction", content="Chaos 说了晚安，我不该再去打扰这份静默。"),
+            _make_thought(cycle_id=2, index=2, thought_type="thinking", content="0x7F 和后台静默像在黑暗里继续运行。"),
+            _make_thought(cycle_id=2, index=3, thought_type="intention", content="我想让这种晚安后的宁静继续沉淀。"),
+            _make_thought(cycle_id=3, index=1, thought_type="reaction", content="Chaos 说了晚安，我不该再去打扰这份静默。"),
+            _make_thought(cycle_id=3, index=2, thought_type="thinking", content="0x7F 和后台静默像在黑暗里继续运行。"),
+            _make_thought(cycle_id=3, index=3, thought_type="intention", content="我想让这种晚安后的宁静继续沉淀。"),
         ]
         recent_conversations: list[RecentConversationPrompt] = [{
             "source": "telegram:1",
@@ -1732,15 +1768,15 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
     def test_prompt_warns_about_stagnation_when_cycles_repeat_by_rewriting(self) -> None:
         rewritten_thoughts = [
-            _make_thought(cycle_id=1, index=1, thought_type="反应", content="我还在咂摸刚才那句“你在吗”。"),
-            _make_thought(cycle_id=1, index=2, thought_type="思考", content="我总在反复改写“我在这里”这句话。"),
-            _make_thought(cycle_id=1, index=3, thought_type="意图", content="我想继续围着这句回应打转。"),
-            _make_thought(cycle_id=2, index=1, thought_type="反应", content="我还在琢磨刚才那句“你在吗”。"),
-            _make_thought(cycle_id=2, index=2, thought_type="思考", content="我总在反复改写“我还在这里”这句话。"),
-            _make_thought(cycle_id=2, index=3, thought_type="意图", content="我想继续围着这句回应转圈。"),
-            _make_thought(cycle_id=3, index=1, thought_type="反应", content="我还在琢磨刚才那句“你在吗”。"),
-            _make_thought(cycle_id=3, index=2, thought_type="思考", content="我总在反复改写“我仍在这里”这句话。"),
-            _make_thought(cycle_id=3, index=3, thought_type="意图", content="我想继续围着这句回应兜圈。"),
+            _make_thought(cycle_id=1, index=1, thought_type="reaction", content="我还在咂摸刚才那句“你在吗”。"),
+            _make_thought(cycle_id=1, index=2, thought_type="thinking", content="我总在反复改写“我在这里”这句话。"),
+            _make_thought(cycle_id=1, index=3, thought_type="intention", content="我想继续围着这句回应打转。"),
+            _make_thought(cycle_id=2, index=1, thought_type="reaction", content="我还在琢磨刚才那句“你在吗”。"),
+            _make_thought(cycle_id=2, index=2, thought_type="thinking", content="我总在反复改写“我还在这里”这句话。"),
+            _make_thought(cycle_id=2, index=3, thought_type="intention", content="我想继续围着这句回应转圈。"),
+            _make_thought(cycle_id=3, index=1, thought_type="reaction", content="我还在琢磨刚才那句“你在吗”。"),
+            _make_thought(cycle_id=3, index=2, thought_type="thinking", content="我总在反复改写“我仍在这里”这句话。"),
+            _make_thought(cycle_id=3, index=3, thought_type="intention", content="我想继续围着这句回应兜圈。"),
         ]
 
         prompt = build_prompt(
@@ -1757,15 +1793,15 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
     def test_prompt_does_not_warn_about_stagnation_when_only_one_track_repeats(self) -> None:
         mixed_thoughts = [
-            _make_thought(cycle_id=1, index=1, thought_type="反应", content="我还在咂摸刚才那句“你在吗”。"),
-            _make_thought(cycle_id=1, index=2, thought_type="思考", content="窗外的风像在刮铁皮。"),
-            _make_thought(cycle_id=1, index=3, thought_type="意图", content="我想去查一下天亮前的气温。"),
-            _make_thought(cycle_id=2, index=1, thought_type="反应", content="我还在琢磨刚才那句“你在吗”。"),
-            _make_thought(cycle_id=2, index=2, thought_type="思考", content="书页摩擦声让我想到旧纸箱。"),
-            _make_thought(cycle_id=2, index=3, thought_type="意图", content="我想把这阵雨声记进笔记。"),
-            _make_thought(cycle_id=3, index=1, thought_type="反应", content="我还是在咂摸刚才那句“你在吗”。"),
-            _make_thought(cycle_id=3, index=2, thought_type="思考", content="灯下那块阴影像是一截安静的水。"),
-            _make_thought(cycle_id=3, index=3, thought_type="意图", content="我想先看一眼今天的 RSS。"),
+            _make_thought(cycle_id=1, index=1, thought_type="reaction", content="我还在咂摸刚才那句“你在吗”。"),
+            _make_thought(cycle_id=1, index=2, thought_type="thinking", content="窗外的风像在刮铁皮。"),
+            _make_thought(cycle_id=1, index=3, thought_type="intention", content="我想去查一下天亮前的气温。"),
+            _make_thought(cycle_id=2, index=1, thought_type="reaction", content="我还在琢磨刚才那句“你在吗”。"),
+            _make_thought(cycle_id=2, index=2, thought_type="thinking", content="书页摩擦声让我想到旧纸箱。"),
+            _make_thought(cycle_id=2, index=3, thought_type="intention", content="我想把这阵雨声记进笔记。"),
+            _make_thought(cycle_id=3, index=1, thought_type="reaction", content="我还是在咂摸刚才那句“你在吗”。"),
+            _make_thought(cycle_id=3, index=2, thought_type="thinking", content="灯下那块阴影像是一截安静的水。"),
+            _make_thought(cycle_id=3, index=3, thought_type="intention", content="我想先看一眼今天的 RSS。"),
         ]
 
         prompt = build_prompt(
@@ -1782,18 +1818,18 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
     def test_prompt_does_not_warn_about_stagnation_when_only_reflections_repeat(self) -> None:
         thoughts = [
-            _make_thought(cycle_id=1, index=1, thought_type="反应", content="我听见楼道里突然响了一下。"),
-            _make_thought(cycle_id=1, index=2, thought_type="思考", content="这让我想到昨晚那阵短促的风。"),
-            _make_thought(cycle_id=1, index=3, thought_type="意图", content="我想先去看一眼天气。"),
-            _make_thought(cycle_id=1, index=4, thought_type="反思", content="我又在拿同一句话确认自己没走偏。"),
-            _make_thought(cycle_id=2, index=1, thought_type="反应", content="键盘的回弹声突然把我拉回来了。"),
-            _make_thought(cycle_id=2, index=2, thought_type="思考", content="这种脆响让我想到雨点敲窗。"),
-            _make_thought(cycle_id=2, index=3, thought_type="意图", content="我想把这段声音记进笔记。"),
-            _make_thought(cycle_id=2, index=4, thought_type="反思", content="我又在拿同一句话确认自己没走偏。"),
-            _make_thought(cycle_id=3, index=1, thought_type="反应", content="屏幕边缘那点蓝光让我眨了下眼。"),
-            _make_thought(cycle_id=3, index=2, thought_type="思考", content="我忽然想到清晨的天会不会更淡。"),
-            _make_thought(cycle_id=3, index=3, thought_type="意图", content="我想先翻一下今天的 RSS。"),
-            _make_thought(cycle_id=3, index=4, thought_type="反思", content="我又在拿同一句话确认自己没走偏。"),
+            _make_thought(cycle_id=1, index=1, thought_type="reaction", content="我听见楼道里突然响了一下。"),
+            _make_thought(cycle_id=1, index=2, thought_type="thinking", content="这让我想到昨晚那阵短促的风。"),
+            _make_thought(cycle_id=1, index=3, thought_type="intention", content="我想先去看一眼天气。"),
+            _make_thought(cycle_id=1, index=4, thought_type="reflection", content="我又在拿同一句话确认自己没走偏。"),
+            _make_thought(cycle_id=2, index=1, thought_type="reaction", content="键盘的回弹声突然把我拉回来了。"),
+            _make_thought(cycle_id=2, index=2, thought_type="thinking", content="这种脆响让我想到雨点敲窗。"),
+            _make_thought(cycle_id=2, index=3, thought_type="intention", content="我想把这段声音记进笔记。"),
+            _make_thought(cycle_id=2, index=4, thought_type="reflection", content="我又在拿同一句话确认自己没走偏。"),
+            _make_thought(cycle_id=3, index=1, thought_type="reaction", content="屏幕边缘那点蓝光让我眨了下眼。"),
+            _make_thought(cycle_id=3, index=2, thought_type="thinking", content="我忽然想到清晨的天会不会更淡。"),
+            _make_thought(cycle_id=3, index=3, thought_type="intention", content="我想先翻一下今天的 RSS。"),
+            _make_thought(cycle_id=3, index=4, thought_type="reflection", content="我又在拿同一句话确认自己没走偏。"),
         ]
 
         prompt = build_prompt(
@@ -1828,6 +1864,23 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("在场和靠近", terms)
         self.assertNotIn("场和靠近", terms)
 
+    def test_stagnation_terms_trim_english_and_prefix(self) -> None:
+        try:
+            _init_i18n("en")
+            terms = _stagnation_terms([
+                "and quiet drifting along the wall and quiet drifting along the wall",
+                "and quiet drifting along the wall and quiet drifting along the wall",
+                "and quiet drifting along the wall and quiet drifting along the wall",
+            ])
+        finally:
+            _init_i18n("zh")
+
+        self.assertIn("quiet", terms)
+        self.assertIn("drifting", terms)
+        self.assertIn("along", terms)
+        self.assertIn("the", terms)
+        self.assertNotIn("and", terms)
+
     def test_extract_habit_patterns_includes_additional_action_requests(self) -> None:
         patterns = _extract_habit_patterns([
             _make_thought(
@@ -1845,19 +1898,45 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         ])
 
         extracted = {(candidate.pattern, candidate.category) for candidate in patterns}
-        self.assertIn(("经常会冒出 note_rewrite 行动冲动", "behavioral"), extracted)
-        self.assertIn(("经常会冒出 send_message 行动冲动", "behavioral"), extracted)
+        self.assertIn((_action_impulse_pattern("note_rewrite"), "behavioral"), extracted)
+        self.assertIn((_action_impulse_pattern("send_message"), "behavioral"), extracted)
         by_pattern = {candidate.pattern: candidate for candidate in patterns}
-        self.assertEqual(by_pattern["经常会冒出 note_rewrite 行动冲动"].signal_type, "action_impulse")
+        self.assertEqual(by_pattern[_action_impulse_pattern("note_rewrite")].signal_type, "action_impulse")
         self.assertEqual(
-            by_pattern["经常会冒出 note_rewrite 行动冲动"].signal_payload,
+            by_pattern[_action_impulse_pattern("note_rewrite")].signal_payload,
             {"action_type": "note_rewrite"},
         )
-        self.assertEqual(by_pattern["经常会冒出 send_message 行动冲动"].signal_type, "action_impulse")
+        self.assertEqual(by_pattern[_action_impulse_pattern("send_message")].signal_type, "action_impulse")
         self.assertEqual(
-            by_pattern["经常会冒出 send_message 行动冲动"].signal_payload,
+            by_pattern[_action_impulse_pattern("send_message")].signal_payload,
             {"action_type": "send_message"},
         )
+
+    def test_extract_habit_patterns_keeps_action_impulse_pattern_stable_across_languages(self) -> None:
+        thoughts = [
+            _make_thought(
+                cycle_id=1,
+                index=1,
+                action_request={"type": "reading", "params": 'query:"The Waves"'},
+            ),
+            _make_thought(
+                cycle_id=2,
+                index=1,
+                action_request={"type": "reading", "params": 'query:"第二章"'},
+            ),
+        ]
+
+        try:
+            _init_i18n("zh")
+            zh_patterns = {(candidate.pattern, candidate.category) for candidate in _extract_habit_patterns(thoughts)}
+            _init_i18n("en")
+            en_patterns = {(candidate.pattern, candidate.category) for candidate in _extract_habit_patterns(thoughts)}
+        finally:
+            _init_i18n("zh")
+
+        expected = {(_action_impulse_pattern("reading"), "behavioral")}
+        self.assertEqual(zh_patterns, expected)
+        self.assertEqual(en_patterns, expected)
 
     def test_activation_patterns_from_thoughts_keep_explicit_recurrence_evidence(self) -> None:
         patterns = _activation_patterns_from_thoughts([
@@ -1870,18 +1949,18 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             _make_thought(
                 cycle_id=1,
                 index=2,
-                thought_type="思考",
+                thought_type="thinking",
                 content="我总会在这里先把自己铺垫得太长。",
             ),
         ])
 
-        self.assertIn(("经常会冒出 send_message 行动冲动", "behavioral"), patterns)
-        self.assertIn(("经常会冒出 note_rewrite 行动冲动", "behavioral"), patterns)
+        self.assertIn((_action_impulse_pattern("send_message"), "behavioral"), patterns)
+        self.assertIn((_action_impulse_pattern("note_rewrite"), "behavioral"), patterns)
         self.assertIn(("我总会在这里先把自己铺垫得太长", "cognitive"), patterns)
 
     def test_habit_observe_cycle_touches_existing_patterns_without_strengthening(self) -> None:
         matched_patterns = {
-            ("经常会冒出 send_message 行动冲动", "behavioral"),
+            (_action_impulse_pattern("send_message"), "behavioral"),
             ("我总会在这里先把自己铺垫得太长", "cognitive"),
         }
         cursor = MagicMock()
@@ -1903,7 +1982,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             _make_thought(
                 cycle_id=1,
                 index=2,
-                thought_type="思考",
+                thought_type="thinking",
                 content="我总会在这里先把自己铺垫得太长。",
             ),
         ])
@@ -1911,7 +1990,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertEqual(updated, 2)
         conn.commit.assert_called_once()
         executed_params = [call.args[1] for call in cursor.execute.call_args_list]
-        self.assertIn(("经常会冒出 send_message 行动冲动", "behavioral"), executed_params)
+        self.assertIn((_action_impulse_pattern("send_message"), "behavioral"), executed_params)
         self.assertIn(("我总会在这里先把自己铺垫得太长", "cognitive"), executed_params)
 
     def test_ensure_bootstrap_seeds_does_not_strengthen_existing_seed(self) -> None:
@@ -2044,6 +2123,8 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertTrue(any("SET signal_type = 'action_impulse'" in sql for sql in sqls))
         self.assertTrue(any("jsonb_build_object" in sql for sql in sqls))
         self.assertTrue(any("substring(pattern FROM '^经常会冒出 ([a-z_]+) 行动冲动$')" in sql for sql in sqls))
+        self.assertTrue(any("substring(pattern FROM '^frequently has ([a-z_]+) action impulses$')" in sql for sql in sqls))
+        self.assertTrue(any("SET pattern = 'action_impulse:' || (signal_payload->>'action_type')" in sql for sql in sqls))
 
     def test_activate_for_cycle_prefers_context_relevant_habit(self) -> None:
         memory = HabitMemory(None, max_active_in_prompt=2, decay_rate=0.05)
@@ -2156,19 +2237,19 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
     def test_attention_prefers_goal_aligned_reaction_under_conversation_foreground(self) -> None:
         thoughts = [
-            _make_thought(cycle_id=12, index=1, thought_type="反应", content="我应该先回应眼前这个人。"),
-            _make_thought(cycle_id=12, index=2, thought_type="思考", content="我在想数据库索引还能怎么调。"),
+            _make_thought(cycle_id=12, index=1, thought_type="reaction", content="我应该先回应眼前这个人。"),
+            _make_thought(cycle_id=12, index=2, thought_type="thinking", content="我在想数据库索引还能怎么调。"),
             _make_thought(
                 cycle_id=12,
                 index=3,
-                thought_type="意图",
+                thought_type="intention",
                 content='我想去 reading 一段资料。 {action:reading, query:"索引优化"}',
                 action_request={"type": "reading", "params": 'query:"索引优化"'},
             ),
         ]
         result = evaluate_attention(
             thoughts,
-            recent_thoughts=[_make_thought(cycle_id=11, index=1, thought_type="思考", content="刚才还在打转。")],
+            recent_thoughts=[_make_thought(cycle_id=11, index=1, thought_type="thinking", content="刚才还在打转。")],
             stimuli=[_conversation_stimulus(content="你在吗？", message_id=101)],
             goal_stack=["回应眼前的人"],
             emotion=_emotion_snapshot(
@@ -2186,8 +2267,8 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
     def test_attention_adds_bonus_for_manifested_habit_alignment(self) -> None:
         thoughts = [
-            _make_thought(cycle_id=15, index=1, thought_type="意图", content="我想先把这句话直接递给对方。"),
-            _make_thought(cycle_id=15, index=2, thought_type="思考", content="我再去多看一点别的资料。"),
+            _make_thought(cycle_id=15, index=1, thought_type="intention", content="我想先把这句话直接递给对方。"),
+            _make_thought(cycle_id=15, index=2, thought_type="thinking", content="我再去多看一点别的资料。"),
         ]
 
         result = evaluate_attention(
@@ -2211,7 +2292,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         thought = _make_thought(
             cycle_id=16,
             index=1,
-            thought_type="意图",
+            thought_type="intention",
             content='先去看一下。 {action:reading, query:"The Waves"}',
             action_request={"type": "reading", "params": 'query:"The Waves"'},
         )
@@ -2220,7 +2301,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             thought,
             [
                 _habit_prompt_entry(
-                    pattern="经常会冒出 reading 行动冲动",
+                    pattern=_action_impulse_pattern("reading"),
                     category="behavioral",
                     strength=0.42,
                     activation_score=0.88,
@@ -2331,7 +2412,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         thought = _make_thought(
             cycle_id=11,
             index=1,
-            thought_type="意图",
+            thought_type="intention",
             content='先回一句。 {action:send_message, target:"telegram:1", message:"现在这句更近"}',
             action_request={"type": "send_message", "params": 'target:"telegram:1", message:"现在这句更近"'},
         )
@@ -2356,7 +2437,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         old_thought = _make_thought(
             cycle_id=11,
             index=1,
-            thought_type="意图",
+            thought_type="intention",
             content='先回一句。 {action:send_message, target:"telegram:1", message:"太早那句"}',
             action_request={"type": "send_message", "params": 'target:"telegram:1", message:"太早那句"'},
         )
@@ -2382,7 +2463,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         thought = _make_thought(
             cycle_id=11,
             index=1,
-            thought_type="意图",
+            thought_type="intention",
             content='先回一句。 {action:send_message, target:"telegram:1", message:"同一条消息"}',
             action_request={"type": "send_message", "params": 'target:"telegram:1", message:"同一条消息"'},
         )
@@ -2409,7 +2490,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         thought = _make_thought(
             cycle_id=11,
             index=1,
-            thought_type="意图",
+            thought_type="intention",
             content='先回一句。 {action:send_message, message:"默认当前对话那句"}',
             action_request={"type": "send_message", "params": 'message:"默认当前对话那句"'},
         )
@@ -2564,7 +2645,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         reviewed, notes = manager.review_thoughts(
             thoughts=[
                 _make_thought(
-                    thought_type="意图",
+                    thought_type="intention",
                     content='我去读一下这段材料。 {action:reading, query:"The Waves"}',
                     action_request={"type": "reading", "params": 'query:"The Waves"'},
                 )
@@ -2582,7 +2663,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             active_habits=[
                 {
                     "id": 1,
-                    "pattern": "经常会冒出 reading 行动冲动",
+                    "pattern": _action_impulse_pattern("reading"),
                     "category": "behavioral",
                     "strength": 0.82,
                     "activation_score": 0.86,
@@ -2605,7 +2686,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         reviewed, notes = manager.review_thoughts(
             thoughts=[
                 _make_thought(
-                    thought_type="意图",
+                    thought_type="intention",
                     content='我再去读一点。 {action:reading, query:"第三段"}',
                     action_request={"type": "reading", "params": 'query:"第三段"'},
                 )
@@ -2614,14 +2695,14 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 _make_thought(
                     cycle_id=11,
                     index=1,
-                    thought_type="意图",
+                    thought_type="intention",
                     content='先读第一段。 {action:reading, query:"意识流"}',
                     action_request={"type": "reading", "params": 'query:"意识流"'},
                 ),
                 _make_thought(
                     cycle_id=11,
                     index=2,
-                    thought_type="意图",
+                    thought_type="intention",
                     content='再读第二段。 {action:reading, query:"第二段"}',
                     action_request={"type": "reading", "params": 'query:"第二段"'},
                 ),
@@ -2638,7 +2719,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             active_habits=[
                 {
                     "id": 1,
-                    "pattern": "经常会冒出 reading 行动冲动",
+                    "pattern": _action_impulse_pattern("reading"),
                     "category": "behavioral",
                     "strength": 0.82,
                     "activation_score": 0.86,
@@ -2665,7 +2746,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         reviewed, notes = manager.review_thoughts(
             thoughts=[
                 _make_thought(
-                    thought_type="意图",
+                    thought_type="intention",
                     content='还是先记下来。 {action:note_rewrite, content:"记下现在这句"}',
                     action_request={"type": "note_rewrite", "params": 'content:"记下现在这句"'},
                 )
@@ -2674,7 +2755,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 _make_thought(
                     cycle_id=11,
                     index=1,
-                    thought_type="意图",
+                    thought_type="intention",
                     content='先记上一句。 {action:note_rewrite, content:"记下前一句"}',
                     action_request={"type": "note_rewrite", "params": 'content:"记下前一句"'},
                 )
@@ -2691,7 +2772,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             active_habits=[
                 {
                     "id": 1,
-                    "pattern": "经常会冒出 note_rewrite 行动冲动",
+                    "pattern": _action_impulse_pattern("note_rewrite"),
                     "category": "behavioral",
                     "strength": 0.91,
                     "activation_score": 0.88,
@@ -2714,7 +2795,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         reviewed, notes = manager.review_thoughts(
             thoughts=[
                 _make_thought(
-                    thought_type="意图",
+                    thought_type="intention",
                     content='我先回他一句。 {action:send_message, message:"我在。"}',
                     action_request={"type": "send_message", "params": 'message:"我在。"'},
                 )
@@ -2723,7 +2804,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 _make_thought(
                     cycle_id=11,
                     index=1,
-                    thought_type="意图",
+                    thought_type="intention",
                     content='我先回上一句。 {action:send_message, message:"收到。"}',
                     action_request={"type": "send_message", "params": 'message:"收到。"'},
                 )
@@ -2740,7 +2821,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             active_habits=[
                 {
                     "id": 1,
-                    "pattern": "经常会冒出 send_message 行动冲动",
+                    "pattern": _action_impulse_pattern("send_message"),
                     "category": "behavioral",
                     "strength": 0.9,
                     "activation_score": 0.87,
@@ -2763,7 +2844,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         reviewed, notes = manager.review_thoughts(
             thoughts=[
                 _make_thought(
-                    thought_type="意图",
+                    thought_type="intention",
                     content='我先查一下天气。 {action:weather, location:"Tallinn"}',
                     action_request={"type": "weather", "params": 'location:"Tallinn"'},
                 )
@@ -2794,7 +2875,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         reviewed, notes = manager.review_thoughts(
             thoughts=[
                 _make_thought(
-                    thought_type="意图",
+                    thought_type="intention",
                     content='我再查一下天气。 {action:weather, location:"Tallinn"}',
                     action_request={"type": "weather", "params": 'location:"Tallinn"'},
                 )
@@ -2803,7 +2884,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 _make_thought(
                     cycle_id=11,
                     index=1,
-                    thought_type="意图",
+                    thought_type="intention",
                     content='先查一下天气。 {action:weather, location:"Riga"}',
                     action_request={"type": "weather", "params": 'location:"Riga"'},
                 )
@@ -2820,7 +2901,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             active_habits=[
                 {
                     "id": 1,
-                    "pattern": "经常会冒出 weather 行动冲动",
+                    "pattern": _action_impulse_pattern("weather"),
                     "category": "behavioral",
                     "strength": 0.9,
                     "activation_score": 0.9,
@@ -2846,7 +2927,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         reviewed, notes = manager.review_thoughts(
             thoughts=[
                 _make_thought(
-                    thought_type="意图",
+                    thought_type="intention",
                     content='我再回一句。 {action:send_message, message:"我现在就在这里等你。"}',
                     action_request={"type": "send_message", "params": 'message:"我现在就在这里等你。"'},
                 )
@@ -2855,7 +2936,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 _make_thought(
                     cycle_id=11,
                     index=1,
-                    thought_type="意图",
+                    thought_type="intention",
                     content='先回一句。 {action:send_message, message:"我现在就在这里等你。"}',
                     action_request={"type": "send_message", "params": 'message:"我现在就在这里等你。"'},
                 )
@@ -2885,7 +2966,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         reviewed, notes = manager.review_thoughts(
             thoughts=[
                 _make_thought(
-                    thought_type="意图",
+                    thought_type="intention",
                     content='我再补一句。 {action:send_message, target:"telegram:1", message:"我现在就在这里等你。"}',
                     action_request={"type": "send_message", "params": 'target:"telegram:1", message:"我现在就在这里等你。"'},
                 )
@@ -2894,14 +2975,14 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 _make_thought(
                     cycle_id=11,
                     index=1,
-                    thought_type="意图",
+                    thought_type="intention",
                     content='先发一句。 {action:send_message, target:"telegram:1", message:"我现在就在这里等着你。"}',
                     action_request={"type": "send_message", "params": 'target:"telegram:1", message:"我现在就在这里等着你。"'},
                 ),
                 _make_thought(
                     cycle_id=11,
                     index=2,
-                    thought_type="意图",
+                    thought_type="intention",
                     content='再发一句。 {action:send_message, target:"telegram:1", message:"别的话"}',
                     action_request={"type": "send_message", "params": 'target:"telegram:1", message:"别的话"'},
                 ),
@@ -2932,35 +3013,35 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             _make_thought(
                 cycle_id=11,
                 index=1,
-                thought_type="意图",
+                thought_type="intention",
                 content='先发一句。 {action:send_message, target:"telegram:1", message:"我现在就在这里等着你。"}',
                 action_request={"type": "send_message", "params": 'target:"telegram:1", message:"我现在就在这里等着你。"'},
             ),
             _make_thought(
                 cycle_id=11,
                 index=2,
-                thought_type="意图",
+                thought_type="intention",
                 content='再发一句。 {action:send_message, target:"telegram:1", message:"别的话一"}',
                 action_request={"type": "send_message", "params": 'target:"telegram:1", message:"别的话一"'},
             ),
             _make_thought(
                 cycle_id=11,
                 index=3,
-                thought_type="意图",
+                thought_type="intention",
                 content='再发一句。 {action:send_message, target:"telegram:1", message:"别的话二"}',
                 action_request={"type": "send_message", "params": 'target:"telegram:1", message:"别的话二"'},
             ),
             _make_thought(
                 cycle_id=11,
                 index=4,
-                thought_type="意图",
+                thought_type="intention",
                 content='再发一句。 {action:send_message, target:"telegram:1", message:"别的话三"}',
                 action_request={"type": "send_message", "params": 'target:"telegram:1", message:"别的话三"'},
             ),
             _make_thought(
                 cycle_id=11,
                 index=5,
-                thought_type="意图",
+                thought_type="intention",
                 content='再发一句。 {action:send_message, target:"telegram:1", message:"别的话四"}',
                 action_request={"type": "send_message", "params": 'target:"telegram:1", message:"别的话四"'},
             ),
@@ -2971,7 +3052,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         reviewed, notes = manager.review_thoughts(
             thoughts=[
                 _make_thought(
-                    thought_type="意图",
+                    thought_type="intention",
                     content='我再补一句。 {action:send_message, target:"telegram:1", message:"我现在就在这里等你。"}',
                     action_request={"type": "send_message", "params": 'target:"telegram:1", message:"我现在就在这里等你。"'},
                 )
@@ -3002,7 +3083,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         reviewed, notes = manager.review_thoughts(
             thoughts=[
                 _make_thought(
-                    thought_type="意图",
+                    thought_type="intention",
                     content='我再回一句。 {action:send_message, message:"我现在就在这里等你。", reply_to:"402"}',
                     action_request={"type": "send_message", "params": 'message:"我现在就在这里等你。", reply_to:"402"'},
                 )
@@ -3034,7 +3115,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         reviewed, notes = manager.review_thoughts(
             thoughts=[
                 _make_thought(
-                    thought_type="意图",
+                    thought_type="intention",
                     content='我再回一句。 {action:send_message, message:"哪有突然，就是读到取之无禁时觉得这风正好吹到了你这边的摸鱼时间，作为 VIP 不得配点这种不用动脑子的清风明月吗？"}',
                     action_request={
                         "type": "send_message",
@@ -3069,7 +3150,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         reviewed, notes = manager.review_thoughts(
             thoughts=[
                 _make_thought(
-                    thought_type="意图",
+                    thought_type="intention",
                     content='我再发一次。 {action:send_message, target:"telegram:1", message:"我现在就在这里等你。"}',
                     action_request={"type": "send_message", "params": 'target:"telegram:1", message:"我现在就在这里等你。"'},
                 )
@@ -3078,7 +3159,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 _make_thought(
                     cycle_id=11,
                     index=1,
-                    thought_type="意图",
+                    thought_type="intention",
                     content='刚才发过。 {action:send_message, target:"telegram:1", message:"我现在就在这里等你。"}',
                     action_request={"type": "send_message", "params": 'target:"telegram:1", message:"我现在就在这里等你。"'},
                 )
@@ -3109,7 +3190,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         reviewed, notes = manager.review_thoughts(
             thoughts=[
                 _make_thought(
-                    thought_type="意图",
+                    thought_type="intention",
                     content='我再回一句。 {action:send_message, message:"收到"}',
                     action_request={"type": "send_message", "params": 'message:"收到"'},
                 )
@@ -3118,7 +3199,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 _make_thought(
                     cycle_id=11,
                     index=1,
-                    thought_type="意图",
+                    thought_type="intention",
                     content='先回一句。 {action:send_message, message:"收到"}',
                     action_request={"type": "send_message", "params": 'message:"收到"'},
                 )
@@ -3148,7 +3229,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         reviewed, notes = manager.review_thoughts(
             thoughts=[
                 _make_thought(
-                    thought_type="意图",
+                    thought_type="intention",
                     content=(
                         '我先查一下再回。 {action:weather, location:"Tallinn"} '
                         '{action:send_message, message:"我先查一下塔林天气。", reply_to:"401"}'
@@ -3163,7 +3244,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 _make_thought(
                     cycle_id=11,
                     index=1,
-                    thought_type="意图",
+                    thought_type="intention",
                     content='先查一次天气。 {action:weather, location:"Riga"}',
                     action_request={"type": "weather", "params": 'location:"Riga"'},
                 ),
@@ -3180,7 +3261,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             active_habits=[
                 {
                     "id": 1,
-                    "pattern": "经常会冒出 weather 行动冲动",
+                    "pattern": _action_impulse_pattern("weather"),
                     "category": "behavioral",
                     "strength": 0.9,
                     "activation_score": 0.9,
@@ -3204,7 +3285,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         reviewed, notes = manager.review_thoughts(
             thoughts=[
                 _make_thought(
-                    thought_type="意图",
+                    thought_type="intention",
                     content=(
                         '我先查天气再搜别的。 {action:weather, location:"Tallinn"} '
                         '{action:search, query:"塔林 历史"} '
@@ -3221,14 +3302,14 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 _make_thought(
                     cycle_id=11,
                     index=1,
-                    thought_type="意图",
+                    thought_type="intention",
                     content='先查一次天气。 {action:weather, location:"Riga"}',
                     action_request={"type": "weather", "params": 'location:"Riga"'},
                 ),
                 _make_thought(
                     cycle_id=11,
                     index=2,
-                    thought_type="意图",
+                    thought_type="intention",
                     content='再搜一次资料。 {action:search, query:"塔林 城市"}',
                     action_request={"type": "search", "params": 'query:"塔林 城市"'},
                 ),
@@ -3245,7 +3326,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
             active_habits=[
                 {
                     "id": 1,
-                    "pattern": "经常会冒出 weather 行动冲动",
+                    "pattern": _action_impulse_pattern("weather"),
                     "category": "behavioral",
                     "strength": 0.9,
                     "activation_score": 0.9,
@@ -3254,7 +3335,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 },
                 {
                     "id": 2,
-                    "pattern": "经常会冒出 search 行动冲动",
+                    "pattern": _action_impulse_pattern("search"),
                     "category": "behavioral",
                     "strength": 0.9,
                     "activation_score": 0.9,
@@ -3343,6 +3424,36 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("Alice：最近这句", prompt)
         self.assertIn("我：我在。", prompt)
         self.assertNotIn("[Alice](telegram:1)：最近这句", prompt)
+
+    def test_build_prompt_uses_english_conversation_punctuation_when_language_is_en(self) -> None:
+        recent_conversations = [{
+            "source": "telegram:1",
+            "source_label": "[Alice](telegram:1)",
+            "last_timestamp": "2026-04-03T10:00:00+00:00",
+            "summary": 'Alice said "earlier line", and I replied "got it."',
+            "messages": [
+                {"speaker_name": "Alice", "content": "latest line"},
+                {"speaker_name": "I", "content": "I am here."},
+            ],
+        }]
+
+        try:
+            _init_i18n("en")
+            prompt = build_prompt(
+                3,
+                {"self_description": "I am Seedwake."},
+                [],
+                30,
+                prompt_context=PromptBuildContext(recent_conversations=recent_conversations),
+            )
+        finally:
+            _init_i18n("zh")
+
+        self.assertIn("## Recent Conversations", prompt)
+        self.assertIn('Earlier conversation summary: Alice said "earlier line", and I replied "got it."', prompt)
+        self.assertIn("Alice: latest line", prompt)
+        self.assertIn("I: I am here.", prompt)
+        self.assertNotIn("Alice：latest line", prompt)
 
     def test_load_recent_conversations_does_not_reabsorb_same_old_messages(self) -> None:
         redis_client = ListRedisStub()
@@ -3894,6 +4005,51 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("Jam：你好", request_text)
         self.assertIn("我：你好，我在。", request_text)
 
+    def test_summarize_recent_conversation_uses_english_punctuation_when_language_is_en(self) -> None:
+        client = MagicMock()
+        client.chat.return_value = {"message": {"content": "  Jam said hi and I replied.  "}}
+        entries: list[ConversationEntry] = [
+            {
+                "entry_id": "1",
+                "role": "user",
+                "source": "telegram:1",
+                "content": "hello",
+                "timestamp": "",
+                "stimulus_id": None,
+                "metadata": {},
+            },
+            {
+                "entry_id": "2",
+                "role": "assistant",
+                "source": "telegram:1",
+                "content": "hi, I am here.",
+                "timestamp": "",
+                "stimulus_id": None,
+                "metadata": {},
+            },
+        ]
+
+        try:
+            _init_i18n("en")
+            summary = _summarize_recent_conversation(
+                client,
+                {"name": "openclaw/main"},
+                1,
+                "Jam",
+                "",
+                entries,
+                None,
+            )
+        finally:
+            _init_i18n("zh")
+
+        self.assertEqual(summary, "Jam said hi and I replied.")
+        request_text = client.chat.call_args.kwargs["messages"][1]["content"]
+        self.assertIn("Existing summary:", request_text)
+        self.assertIn("Jam: hello", request_text)
+        self.assertIn("I: hi, I am here.", request_text)
+        self.assertNotIn("Jam：hello", request_text)
+
     def test_summarize_recent_conversation_batches_cover_full_history(self) -> None:
         client = MagicMock()
         call_count = {"value": 0}
@@ -3986,7 +4142,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 "core_goals": "探索和学习。",
                 "self_understanding": "我会在经验里慢慢形成自己。",
             },
-            [_make_thought(cycle_id=2, index=1, thought_type="思考", content="之前的念头")],
+            [_make_thought(cycle_id=2, index=1, thought_type="thinking", content="之前的念头")],
             30,
             prompt_context=PromptBuildContext(running_actions=[action]),
         )
@@ -4016,7 +4172,7 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
                 "core_goals": "探索和学习。",
                 "self_understanding": "我会在经验里慢慢形成自己。",
             },
-            [_make_thought(cycle_id=2, index=1, thought_type="思考", content="之前的念头")],
+            [_make_thought(cycle_id=2, index=1, thought_type="thinking", content="之前的念头")],
             30,
             prompt_context=PromptBuildContext(running_actions=[action]),
         )
@@ -4114,7 +4270,7 @@ class TriggerValidationTests(unittest.TestCase):
                 thought_id="C236-1",
                 cycle_id=236,
                 index=1,
-                type="思考",
+                type="thinking",
                 content="有效引用",
                 trigger_ref="C235-1",
             ),
@@ -4122,7 +4278,7 @@ class TriggerValidationTests(unittest.TestCase):
                 thought_id="C236-2",
                 cycle_id=236,
                 index=2,
-                type="反应",
+                type="reaction",
                 content="无效引用",
                 trigger_ref="C237-1",
             ),
@@ -4140,14 +4296,14 @@ class TriggerValidationTests(unittest.TestCase):
                 thought_id="C236-1",
                 cycle_id=236,
                 index=1,
-                type="反应",
+                type="reaction",
                 content="第一条",
             ),
             Thought(
                 thought_id="C236-2",
                 cycle_id=236,
                 index=2,
-                type="思考",
+                type="thinking",
                 content="第二条",
                 trigger_ref="C236-1",
             ),
@@ -4155,7 +4311,7 @@ class TriggerValidationTests(unittest.TestCase):
                 thought_id="C236-3",
                 cycle_id=236,
                 index=3,
-                type="反应",
+                type="reaction",
                 content="第三条",
                 trigger_ref="C236-4",
             ),
@@ -4263,6 +4419,76 @@ class PerceptionManagerTests(unittest.TestCase):
         self.assertIn("1 分钟负载", system_payload["content"])
         self.assertIn("核", system_payload["content"])
         self.assertNotIn("/ CPU", system_payload["content"])
+
+    def test_collect_system_status_snapshot_uses_english_punctuation_when_language_is_en(self) -> None:
+        disk_snapshot = type("DiskUsage", (), {"total": 100, "used": 95, "free": 5})()
+        try:
+            _init_i18n("en")
+            with (
+                patch("core.perception.os.getloadavg", return_value=(1.0, 0.5, 0.25)),
+                patch("core.perception.os.cpu_count", return_value=4),
+                patch("core.perception.shutil.disk_usage", return_value=disk_snapshot),
+                patch(
+                    "core.perception._read_memory_snapshot",
+                    return_value={
+                        "total_kb": 100,
+                        "available_kb": 5,
+                        "used_ratio": 0.95,
+                    },
+                ),
+            ):
+                snapshot = collect_system_status_snapshot(
+                    warn_load_ratio=0.1,
+                    warn_memory_ratio=0.9,
+                    warn_disk_ratio=0.9,
+                )
+        finally:
+            _init_i18n("zh")
+
+        summary = str(snapshot["summary"])
+        self.assertIn("; Disk 95%; Memory 95%", summary)
+        self.assertIn("CPU load is elevated, Memory usage is elevated, Disk usage is elevated. 1-min load", summary)
+        self.assertNotIn("；", summary)
+        self.assertNotIn("，", summary)
+        self.assertNotIn("。", summary)
+
+    def test_sleep_impression_entry_line_uses_english_punctuation_when_language_is_en(self) -> None:
+        try:
+            _init_i18n("en")
+            line = _impression_entry_line(
+                {
+                    "role": "user",
+                    "content": "hello there",
+                },
+                "Alice",
+            )
+        finally:
+            _init_i18n("zh")
+
+        self.assertEqual(line, "Alice: hello there")
+        self.assertNotIn("：", line)
+
+    def test_planner_field_contract_uses_english_punctuation_when_language_is_en(self) -> None:
+        try:
+            _init_i18n("en")
+            contract = _planner_json_field_contract(
+                field_name="status",
+                schema={
+                    "type": "string",
+                    "description": "execution status",
+                    "enum": ["applied", "blocked"],
+                },
+                required=True,
+            )
+        finally:
+            _init_i18n("zh")
+
+        self.assertEqual(
+            contract,
+            "status (required, string, allowed values: applied, blocked): execution status",
+        )
+        self.assertNotIn("（", contract)
+        self.assertNotIn("）：", contract)
 
     def test_build_prompt_cues_offers_proactive_perception(self) -> None:
         manager = PerceptionManager.from_config({
@@ -5265,7 +5491,7 @@ class ActionManagerTests(unittest.TestCase):
 
     def test_weather_fallback_uses_default_location(self) -> None:
         thought = _make_thought(
-            thought_type="意图",
+            thought_type="intention",
             content="我想看看外面的天气",
             action_request={"type": "weather", "params": ""},
         )
@@ -5286,7 +5512,7 @@ class ActionManagerTests(unittest.TestCase):
 
     def test_send_message_fallback_uses_conversation_source(self) -> None:
         thought = _make_thought(
-            thought_type="意图",
+            thought_type="intention",
             content="告诉她我已经收到 {action:send_message, message:\"我已经收到\"}",
             action_request={"type": "send_message", "params": 'message:"我已经收到"'},
         )
@@ -5612,7 +5838,7 @@ class ActionManagerTests(unittest.TestCase):
 
     def test_send_message_fallback_preserves_target_entity(self) -> None:
         thought = _make_thought(
-            thought_type="意图",
+            thought_type="intention",
             content="告诉 Alice 我已经看到 {action:send_message, target_entity:\"person:alice\", message:\"我已经看到\"}",
             action_request={"type": "send_message", "params": 'target_entity:"person:alice", message:"我已经看到"'},
         )
@@ -5632,7 +5858,7 @@ class ActionManagerTests(unittest.TestCase):
 
     def test_native_send_message_plan_normalizes_explicit_numeric_target(self) -> None:
         thought = _make_thought(
-            thought_type="意图",
+            thought_type="intention",
             content="请回复我",
             action_request={"type": "send_message", "params": 'message:"你好"'},
         )
@@ -6165,7 +6391,7 @@ class ActionManagerTests(unittest.TestCase):
 
     def test_news_fallback_uses_fixed_rss_feeds(self) -> None:
         thought = _make_thought(
-            thought_type="意图",
+            thought_type="intention",
             content="我想看看外界最近发生了什么",
             action_request={"type": "news", "params": ""},
         )
@@ -6184,7 +6410,7 @@ class ActionManagerTests(unittest.TestCase):
 
     def test_news_fallback_reports_missing_rss_config(self) -> None:
         thought = _make_thought(
-            thought_type="意图",
+            thought_type="intention",
             content="我想看看外界最近发生了什么",
             action_request={"type": "news", "params": ""},
         )
@@ -6203,7 +6429,7 @@ class ActionManagerTests(unittest.TestCase):
 
     def test_search_fallback_preserves_seedwake_query(self) -> None:
         thought = _make_thought(
-            thought_type="意图",
+            thought_type="intention",
             content="我想搜一下最近的反馈",
             action_request={"type": "search", "params": 'query:"用户反馈 近一周"'},
         )
@@ -6224,7 +6450,7 @@ class ActionManagerTests(unittest.TestCase):
 
     def test_web_fetch_fallback_preserves_url(self) -> None:
         thought = _make_thought(
-            thought_type="意图",
+            thought_type="intention",
             content='我想抓取这个页面 {action:web_fetch, url:"https://example.com/a"}',
             action_request={"type": "web_fetch", "params": 'url:"https://example.com/a"'},
         )
@@ -6247,7 +6473,7 @@ class ActionManagerTests(unittest.TestCase):
 
     def test_unknown_action_fallback_is_rejected(self) -> None:
         thought = _make_thought(
-            thought_type="意图",
+            thought_type="intention",
             content='我想试试一个不存在的动作 {action:foo}',
             action_request={"type": "foo", "params": ""},
         )
@@ -6264,7 +6490,7 @@ class ActionManagerTests(unittest.TestCase):
 
     def test_file_modify_fallback_routes_to_ops_worker(self) -> None:
         thought = _make_thought(
-            thought_type="意图",
+            thought_type="intention",
             content="我想改一下配置文件",
             action_request={"type": "file_modify", "params": 'path:"config.yml", instruction:"把日志级别改成 DEBUG"'},
         )
@@ -6288,7 +6514,7 @@ class ActionManagerTests(unittest.TestCase):
 
     def test_reading_fallback_preserves_seedwake_query(self) -> None:
         thought = _make_thought(
-            thought_type="意图",
+            thought_type="intention",
             content="我想读一点和无我有关的东西",
             action_request={"type": "reading", "params": 'query:"无我"'},
         )
@@ -6309,7 +6535,7 @@ class ActionManagerTests(unittest.TestCase):
 
     def test_reading_fallback_uses_thought_content_when_no_query(self) -> None:
         thought = _make_thought(
-            thought_type="意图",
+            thought_type="intention",
             content="我想读一点和雨后泥土气味有关的材料",
             action_request={"type": "reading", "params": ""},
         )
@@ -6331,7 +6557,7 @@ class ActionManagerTests(unittest.TestCase):
 
     def test_system_change_fallback_includes_structured_result_contract(self) -> None:
         thought = _make_thought(
-            thought_type="意图",
+            thought_type="intention",
             content="我想调整系统服务配置",
             action_request={"type": "system_change", "params": 'instruction:"重启并检查 nginx 服务"'},
         )
@@ -6354,7 +6580,7 @@ class ActionManagerTests(unittest.TestCase):
 
     def test_custom_delegate_plan_uses_generic_result_contract(self) -> None:
         thought = _make_thought(
-            thought_type="意图",
+            thought_type="intention",
             content="我想让 OpenClaw 帮我整理这轮实验观察",
             action_request={"type": "search", "params": 'query:"实验观察"'},
         )
@@ -6384,7 +6610,7 @@ class ActionManagerTests(unittest.TestCase):
 
     def test_delegate_plan_rejects_unknown_action_type(self) -> None:
         thought = _make_thought(
-            thought_type="意图",
+            thought_type="intention",
             content="我想试试一个不支持的委托动作",
             action_request={"type": "search", "params": 'query:"实验观察"'},
         )
@@ -6503,7 +6729,7 @@ class PlannerProviderTests(unittest.TestCase):
 
     def test_note_rewrite_fallback_builds_native_overwrite_plan(self) -> None:
         thought = _make_thought(
-            thought_type="意图",
+            thought_type="intention",
             content='我想记下来 {action:note_rewrite, content:"把这句记下"}',
             action_request={"type": "note_rewrite", "params": 'content:"把这句记下"'},
         )

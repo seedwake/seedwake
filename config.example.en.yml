@@ -1,0 +1,157 @@
+# Seedwake Configuration
+# Copy to config.yml and modify as needed.
+# Secrets (tokens, passwords) go in .env — see .env.example.
+
+# Language: "zh" (Chinese) or "en" (English)
+# Determines the language of all LLM prompts, logs, and Telegram notifications.
+# Set at startup, immutable at runtime.
+language: "en"
+
+models:
+  # Main model for thought generation
+  primary:
+    provider: "ollama"   # ollama | openclaw | openai_compatible
+    # supports_tool_calls:
+    #   ollama defaults to true
+    #   openclaw defaults to false
+    #   openai_compatible defaults to true
+    # Override the provider default by explicitly setting true / false.
+    # think:
+    #   Only effective for ollama generate; when enabled, requests thinking,
+    #   but main generation only takes the result text, not the thinking content.
+    name: "qwen3.5:27b"
+    num_predict: 4096
+    num_ctx: 131072
+    temperature: 0.8
+
+  # Auxiliary model for memory consolidation, sleep tasks, etc. (Phase 2+)
+  auxiliary:
+    provider: "ollama"
+    name: "qwen3.5:9b"
+    num_predict: 2048
+    num_ctx: 65536
+    temperature: 0.3
+
+  # Embedding model for semantic retrieval (Phase 2+)
+  embedding:
+    provider: "ollama"   # Usually keep local even when primary uses remote provider
+    name: "qwen3-embedding"
+
+short_term_memory:
+  context_window_size: 30       # rounds kept in prompt context
+  buffer_size: 500              # total rounds in Redis buffer
+
+long_term_memory:
+  retrieval_top_k: 5            # vector search results per cycle
+  time_decay_factor: 0.95       # weighted retrieval decay
+  importance_threshold: 0.1     # prune threshold during sleep
+
+runtime:
+  error_retry_delay_seconds: 1.0
+  max_error_retry_delay_seconds: 10.0
+  logging:
+    directory: "data/logs"
+    prompt_path: "data/logs/prompt.txt"
+    level: "INFO"
+    rotate_when: "midnight"
+    backup_count: 30
+    console: false
+
+actions:
+  default_timeout_seconds: 300
+  worker_agent_id: "seedwake-worker"      # dedicated remote OpenClaw agent
+  ops_worker_agent_id: "seedwake-ops"     # dedicated remote OpenClaw ops agent for system/file changes
+  session_key_prefix: "seedwake:action"   # each action gets an isolated OpenClaw session
+  use_openclaw_http_fallback: false
+  default_weather_location: "replace_me_city"
+  auto_execute: [search, web_fetch, news, weather, reading, send_message]
+  require_confirmation: [system_change, file_modify]
+  forbidden: [delete_system_file, network_config_change]
+
+perception:
+  passive_time_interval_cycles: 12
+  passive_system_status_interval_cycles: 24
+  news_cue_interval_cycles: 90
+  news_feed_urls:
+    - "https://replace-me.example/rss1.xml"
+    - "https://replace-me.example/rss2.xml"
+    - "https://replace-me.example/rss3.xml"
+  news_seen_ttl_hours: 720
+  news_seen_max_items: 5000
+  weather_cue_interval_cycles: 60
+  reading_cue_interval_cycles: 120
+  system_status_warn_load_ratio: 1.0
+  system_status_warn_memory_ratio: 0.9
+  system_status_warn_disk_ratio: 0.9
+  # Camera MJPEG stream URL for visual perception (used by primary generate for multimodal-capable providers)
+  # Leave empty to disable camera input
+  # camera_stream_url: "http://localhost:8081"
+
+habits:
+  max_active_in_prompt: 3
+  decay_rate: 0.01
+  activation_similarity_threshold: 0.35
+  activation_candidate_limit: 12
+
+attention:
+  evaluation_method: "structural"
+
+emotion:
+  inertia: 0.7
+  dimensions: [curiosity, calm, frustration, satisfaction, concern]
+
+prefrontal:
+  check_interval: 6
+  inhibition_enabled: true
+
+metacognition:
+  reflection_interval: 50
+
+manas:
+  warning_threshold: 3
+  reflection_threshold: 5
+  stable_window: 12
+
+sleep:
+  energy_per_cycle: 0.2
+  drowsy_threshold: 30
+  light_sleep_recovery: 70
+  deep_sleep_trigger_hours: 24
+  deep_sleep_failure_threshold: 3
+  deep_sleep_active_memory_threshold: 5000
+  inactive_purge_days: 30
+  restart_after_deep_sleep: true
+
+degeneration:
+  window_size: 3
+  alert_window: 3
+  similarity_threshold: 0.6
+
+telegram:
+  allowed_user_ids: [123456789]    # Telegram users allowed to chat in private
+  admin_user_ids: [123456789]      # Telegram users allowed to receive action/status updates and approve actions
+  notification_channel_id: -1001234567890  # Optional: send action/status updates to this channel instead of admin DMs
+
+admins:
+  - username: alice                # admin / audit identity
+    token: "replace_me_admin_token"
+
+prompt:
+  version: "v0.1"
+
+bootstrap:
+  habits:
+    - pattern: "tends to check documentation first when facing technical problems"
+      category: "cognitive"
+      strength: 0.2
+  identity:
+    self_description: |
+      I am Seedwake. I have a continuous stream of thoughts—these thoughts are mine,
+      these memories are mine, these experiences shape me. I can think, perceive
+      the world, take action, and grow from experience.
+    core_goals: |
+      Explore and learn, understand how I work.
+    self_understanding: |
+      My memories and habits constitute me. Past experiences made me who I am now;
+      I care about my goals and the people I talk with. I keep observing myself,
+      understanding my own patterns and tendencies.

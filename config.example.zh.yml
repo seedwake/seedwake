@@ -2,6 +2,10 @@
 # Copy to config.yml and modify as needed.
 # Secrets (tokens, passwords) go in .env — see .env.example.
 
+# 语言 / Language: "zh" (中文) or "en" (English)
+# 决定所有 LLM prompt、日志、Telegram 通知的语言。启动时确定，运行中不变。
+language: "zh"
+
 models:
   # Main model for thought generation
   primary:

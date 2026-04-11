@@ -3,7 +3,7 @@
 import base64
 import logging
 import time
-from urllib import error, request
+from urllib import request
 
 from core.common_types import elapsed_ms
 
@@ -25,7 +25,7 @@ def capture_camera_frame(
     started_at = time.perf_counter()
     try:
         jpeg_bytes = _grab_jpeg_frame(stream_url, timeout=timeout)
-    except (error.URLError, OSError, TimeoutError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
         logger.warning(
             "camera frame capture failed in %.1f ms: %s",
             elapsed_ms(started_at),

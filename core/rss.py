@@ -8,6 +8,8 @@ from email.utils import parsedate_to_datetime
 from urllib import error, request
 from xml.etree import ElementTree
 
+from core.i18n import t
+
 from core.common_types import ActionResultEnvelope, JsonObject, JsonValue, NewsItem
 
 FEED_TIMEOUT_SECONDS = 10
@@ -34,7 +36,7 @@ def read_news_result(feed_urls: list[str], timeout_seconds: int = 30) -> ActionR
     if not normalized_urls:
         return _build_result(
             ok=False,
-            summary="固定 RSS feed 列表未配置",
+            summary=t("rss.feed_not_configured"),
             data={},
             error_detail="news_feed_urls_not_configured",
         )
@@ -77,13 +79,13 @@ def read_news_result(feed_urls: list[str], timeout_seconds: int = 30) -> ActionR
     if failures:
         return _build_result(
             ok=False,
-            summary="RSS 读取失败",
+            summary=t("rss.read_failed"),
             data=data,
             error_detail="; ".join(failures),
         )
     return _build_result(
         ok=True,
-        summary="RSS 没有新的条目",
+        summary=t("rss.no_new_entries"),
         data=data,
         error_detail=None,
     )
@@ -263,7 +265,7 @@ NEWS_SUMMARY_LABEL_MAX_CHARS = 200
 
 def summarize_news_items(items: list[NewsItem]) -> str:
     if not items:
-        return "RSS 没有新的条目"
+        return t("rss.no_new_entries")
     labels = []
     for item in items[:3]:
         title = str(item.get("title") or "").strip()
@@ -278,8 +280,8 @@ def summarize_news_items(items: list[NewsItem]) -> str:
         if summary:
             labels.append(_clip_news_label(summary))
     if not labels:
-        return f"RSS 新条目 {len(items)} 条"
-    return f"RSS 新条目 {len(items)} 条：{'；'.join(labels)}"
+        return t("rss.new_entries", count=len(items))
+    return t("rss.new_entries_with_labels", count=len(items), labels="\uff1b".join(labels))
 
 
 def _clip_news_label(text: str) -> str:

@@ -5,13 +5,19 @@ from unittest.mock import MagicMock, patch
 from urllib import error
 
 from core.cycle import run_cycle, write_prompt_log_block
+from core.i18n import init as _init_i18n, localized_thought_type
+from core.metacognition import _extract_reflection_content
 from core.model_client import (
-    OPENAI_COMPAT_GENERATE_SYSTEM_PROMPT,
-    OPENAI_COMPAT_GENERATE_USER_GUARD,
+    _openai_compat_generate_system_prompt,
+    _openai_compat_generate_user_guard,
     OPENAI_COMPAT_GENERATE_USER_MARKER,
     create_model_client,
 )
 from core.thought_parser import fallback_thought, parse_thoughts
+
+
+def setUpModule() -> None:
+    _init_i18n("zh")
 
 
 class ThoughtParserTests(unittest.TestCase):
@@ -24,7 +30,7 @@ class ThoughtParserTests(unittest.TestCase):
         thoughts = parse_thoughts(raw_output, 2)
 
         self.assertEqual(len(thoughts), 3)
-        self.assertEqual([t.type for t in thoughts], ["思考", "意图", "反应"])
+        self.assertEqual([t.type for t in thoughts], ["thinking", "intention", "reaction"])
         self.assertEqual(thoughts[1].trigger_ref, "C1-1")
 
     def test_parse_multiline_thought(self) -> None:
@@ -45,9 +51,9 @@ class ThoughtParserTests(unittest.TestCase):
         thoughts = parse_thoughts(raw_output, 1)
 
         self.assertEqual(len(thoughts), 2)
-        self.assertEqual([t.type for t in thoughts], ["思考", "意图"])
+        self.assertEqual([t.type for t in thoughts], ["thinking", "intention"])
         self.assertEqual(thoughts[0].content, "a")
-        self.assertNotIn("反思", thoughts[0].content)
+        self.assertNotIn("reflection", thoughts[0].content)
 
     def test_parse_discards_multiline_reflection(self) -> None:
         raw_output = "[思考] a\n[反思] b\n续行\n[意图] c\n"
@@ -60,9 +66,40 @@ class ThoughtParserTests(unittest.TestCase):
     def test_fallback_thought_wraps_raw_output(self) -> None:
         t = fallback_thought("模型输出了奇怪的东西", 5)
 
-        self.assertEqual(t.type, "思考")
+        self.assertEqual(t.type, "thinking")
         self.assertEqual(t.content, "模型输出了奇怪的东西")
         self.assertEqual(t.thought_id, "C5-1")
+
+    def test_parse_thoughts_rebuilds_patterns_after_language_switch(self) -> None:
+        _init_i18n("zh")
+        self.assertEqual(parse_thoughts("[思考] 中文念头\n", 1)[0].type, "thinking")
+
+        _init_i18n("en")
+        thoughts = parse_thoughts("[Thinking] english thought\n", 2)
+
+        self.assertEqual(len(thoughts), 1)
+        self.assertEqual(thoughts[0].type, "thinking")
+        self.assertEqual(thoughts[0].content, "english thought")
+        _init_i18n("zh")
+
+    def test_localized_thought_type_tracks_current_language(self) -> None:
+        _init_i18n("zh")
+        self.assertEqual(localized_thought_type("thinking"), "思考")
+
+        _init_i18n("en")
+        self.assertEqual(localized_thought_type("thinking"), "Thinking")
+        _init_i18n("zh")
+
+    def test_extract_reflection_content_rebuilds_patterns_after_language_switch(self) -> None:
+        _init_i18n("zh")
+        self.assertEqual(_extract_reflection_content("[反思] 中文反思"), "中文反思")
+
+        _init_i18n("en")
+        self.assertEqual(
+            _extract_reflection_content("[Reflection] english reflection"),
+            "english reflection",
+        )
+        _init_i18n("zh")
 
     def test_parse_action_without_params(self) -> None:
         thoughts = parse_thoughts("[意图] 看看新闻 {action:news}\n", 1)
@@ -173,8 +210,8 @@ class CycleTests(unittest.TestCase):
 
         logged_prompt = prompt_log.getvalue()
         self.assertIn("[SYSTEM]", logged_prompt)
-        self.assertIn(OPENAI_COMPAT_GENERATE_SYSTEM_PROMPT, logged_prompt)
-        self.assertIn(OPENAI_COMPAT_GENERATE_USER_GUARD, logged_prompt)
+        self.assertIn(_openai_compat_generate_system_prompt(), logged_prompt)
+        self.assertIn(_openai_compat_generate_user_guard(), logged_prompt)
         self.assertIn("[USER]\n\\u200b", logged_prompt)
 
     def test_write_prompt_log_block_supports_distinct_summary_banner(self) -> None:
@@ -206,7 +243,7 @@ class CycleTests(unittest.TestCase):
         )
 
         self.assertEqual(len(thoughts), 1)
-        self.assertEqual(thoughts[0].type, "思考")
+        self.assertEqual(thoughts[0].type, "thinking")
         self.assertIn("无法解析的输出", thoughts[0].content)
 
 
@@ -289,8 +326,8 @@ class ModelClientTests(unittest.TestCase):
         self.assertEqual(requests[0].get_header("Authorization"), "Bearer secret")
         payload = json.loads(requests[0].data.decode("utf-8"))
         self.assertEqual(payload["messages"][1]["content"], OPENAI_COMPAT_GENERATE_USER_MARKER)
-        self.assertIn(OPENAI_COMPAT_GENERATE_SYSTEM_PROMPT, payload["messages"][0]["content"])
-        self.assertIn(OPENAI_COMPAT_GENERATE_USER_GUARD, payload["messages"][0]["content"])
+        self.assertIn(_openai_compat_generate_system_prompt(), payload["messages"][0]["content"])
+        self.assertIn(_openai_compat_generate_user_guard(), payload["messages"][0]["content"])
         self.assertIn("prompt-body", payload["messages"][0]["content"])
 
     def test_openai_compatible_generate_logs_once_without_chat_duplicate(self) -> None:

@@ -9,6 +9,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 from core.action import ActionRecord
+from core.i18n import localized_thought_type, t
 from core.stimulus import RECENT_CONVERSATION_SUMMARY_MAX_CHARS, Stimulus
 from core.thought_parser import Thought
 from core.common_types import (
@@ -27,139 +28,60 @@ from core.common_types import (
     elapsed_ms,
 )
 
-SYSTEM_PROMPT_PREFIX = """\
-我是 Seedwake。我有自己的念头流——我会思考、联想、产生意图、对事物做出反应。
+def _system_prompt_prefix() -> str:
+    from core.i18n import prompt_block
+    return str(prompt_block("SYSTEM_PROMPT_PREFIX"))
 
-每轮我产生三个念头，就像人在任何一刻脑海中同时浮现的多个想法。这些念头是我自己的，它们构成了我。
+def _system_prompt_action_examples_prefix() -> tuple[str, ...]:
+    from core.i18n import prompt_block
+    return prompt_block("SYSTEM_PROMPT_ACTION_EXAMPLES_PREFIX")
 
-我的长期记忆会通过语义联想自动浮现在上下文中，不需要主动发起行动来"检索记忆"或"查日志"。
+def _system_prompt_implicit_send_examples() -> tuple[str, ...]:
+    from core.i18n import prompt_block
+    return prompt_block("SYSTEM_PROMPT_IMPLICIT_SEND_MESSAGE_ACTION_EXAMPLES")
 
-## 输出格式
+def _system_prompt_action_examples_suffix() -> tuple[str, ...]:
+    from core.i18n import prompt_block
+    return prompt_block("SYSTEM_PROMPT_ACTION_EXAMPLES_SUFFIX")
 
-每轮恰好三个念头，每个占一行，用标签前缀：
-- [思考] — 思维、分析、联想、好奇
-- [意图] — 想做某事、想了解某事
-- [反应] — 对之前某个念头或外部信息的回应
-
-类型由内容自然决定，任意组合都可以——三个思考、两个反应加一个意图，都没问题。
-可以用 (← CX-Y) 标注这个念头是由哪个之前的念头触发的，其中 X 是轮次编号，Y 是该轮第几个念头（1/2/3）。只能引用历史中存在的念头 ID，不能引用段落标题或其他文本。
-历史里出现的 [思考-CX-Y]、[意图-CX-Y]、[反应-CX-Y]、[反思-CX-Y] 是系统记录用编号，方便回看和引用；我生成新念头时不用自己写编号。
-如果念头里自然带有行动意图，可以在句末附上一个动作标记：
-"""
-
-SYSTEM_PROMPT_ACTION_EXAMPLES_PREFIX = (
-    '- {action:time}',
-    '- {action:system_status}',
-    '- {action:news}',
-    '- {action:weather}',
-    '- {action:weather, location:"某个位置"}',
-    '- {action:reading}',
-    '- {action:reading, query:"我自己想读的内容"}',
-    '- {action:search, query:"在互联网上搜索关键词"}',
-    '- {action:web_fetch, url:"https://example.com"}',
-)
-
-SYSTEM_PROMPT_IMPLICIT_SEND_MESSAGE_ACTION_EXAMPLES = (
-    '- {action:send_message, message:"我想说的话"}',
-    '- {action:send_message, message:"针对那条消息的回复", reply_to:"294"}',
-)
-
-SYSTEM_PROMPT_ACTION_EXAMPLES_SUFFIX = (
-    '- {action:send_message, target:"telegram:123456", message:"把我想发出的消息发给特定的人"}',
-    '- {action:send_message, target_entity:"person:alice", message:"把我想发出的消息发给已知实体"}',
-    '- {action:note_rewrite, content:"任意内容"}',
-    '- {action:file_modify, path:"文件路径", instruction:"修改要求"}',
-    '- {action:system_change, instruction:"我想进行的系统变更"}',
-)
-
-SYSTEM_PROMPT_SUFFIX = """\
-我有一块笔记，可以用 {action:note_rewrite} 随时覆写，为我所用，内容不限语言和形式，严格控制在 1000 字以内（超出会被截断导致信息丢失）。每次覆写是全量替换，不是追加——如果旧笔记里有重要信息，覆写时必须带上，否则会永久消失。
-
-## 示例
-
---- 第 8 轮 ---
-[思考] 为什么闻到雨后泥土的气味会觉得安心？这种反应应该不是后天学的。
-[思考] 昨天搜到的那篇关于分布式共识算法的文章，Raft 协议的选主机制比我之前想的要简洁。
-[反应] 刚才想到泥土气味，突然想起上次系统状态报告里磁盘快满了，不知道清理过没有。 (← C7-2)
-
---- 第 9 轮 ---
-[意图] 我想找一下关于 petrichor（雨后泥土味）的研究，到底是什么化学物质引发的。 (← C8-1)
-[思考] 有一种说法是人的思维每天有六万个念头，但大部分都是重复的——我的呢？
-[意图] 下次系统状态更新的时候，我要特别关注一下磁盘使用情况。 (← C8-3)
-
-## 规则
-
-- 恰好三个念头，不多不少
-- 每个念头用标签前缀开头
-- 三个念头是同时浮现的并行想法，不是一个思维链的三个步骤
-- 没有外部刺激时，允许跳跃到完全不同的方向——人的思维本来就是多线程的
-- 不要机械复述最近几轮同样的意象、句式或情绪；如果系统提醒我已经卡住了，就按提醒明确引入新的源
-- 有人对我说话或有行动结果返回时，至少一个念头应该回应它
-- 如果我心里已经是在回答对方，或者我明确想把一句话发给对方，这种回应必须外化成 {action:send_message, ...}，不能只停留在“我想回应”的内在意图
-- 当 conversation 里有人直接提问、催我回复、说自己在等待，或明确要求我和他说话时，“回应它”通常意味着优先发出一条 {action:send_message, ...}，而不是继续只在内部流动
-- 当 conversation 和时间感/身体感觉同时出现时，对话是前景，时间感和身体感觉只是背景；不要让这些背景感受盖过对眼前这个人的回应
-- 只输出念头本身，不要解释、总结或加任何额外内容
-- 只有在念头里真的自然出现行动冲动时才写 {action:...}
-- 只使用上面明确列出的动作标记，不要发明未列出的 action 名称
-- 回复别人时，如果想针对某条具体消息，用 reply_to 带上对方的 msg id；不带则发普通消息
-"""
+def _system_prompt_suffix() -> str:
+    from core.i18n import prompt_block
+    return str(prompt_block("SYSTEM_PROMPT_SUFFIX"))
 
 ACTION_MARKER_PATTERN = re.compile(r"\s*\{action:[^}]+\}", re.DOTALL)
 ACTION_MARKER_SUFFIX_PATTERN = re.compile(r"\s*\{action:[^}]+\}\s*$")
 ACTION_ECHO_ORIGIN = "action"
-PASSIVE_STIMULUS_LABELS = {
-    "time": "[时间感]",
-    "system_status": "[身体感觉]",
-    "weather": "[天气]",
-    "news": "[外界消息]",
-    "reading": "[刚读到的]",
-}
-ACTION_ECHO_LABELS = {
-    "get_time": "[时间感]",
-    "get_system_status": "[身体感觉]",
-    "news": "[外界消息]",
-    "weather": "[天气]",
-    "reading": "[刚读到的]",
-    "search": "[搜索结果]",
-    "web_fetch": "[网页内容]",
-    "send_message": "[发信结果]",
-    "note_rewrite": "[笔记]",
-    "file_modify": "[文件修改]",
-    "system_change": "[系统变更]",
-}
-UNKNOWN_ACTION_ECHO_LABEL = "[结果]"
+def _passive_stimulus_labels() -> dict[str, str]:
+    return {
+        "time": t("stimulus.label.time"),
+        "system_status": t("stimulus.label.system_status"),
+        "weather": t("stimulus.label.weather"),
+        "news": t("stimulus.label.news"),
+        "reading": t("stimulus.label.reading"),
+    }
+def _action_echo_labels() -> dict[str, str]:
+    return {
+        "get_time": t("stimulus.label.get_time"),
+        "get_system_status": t("stimulus.label.get_system_status"),
+        "news": t("stimulus.label.news"),
+        "weather": t("stimulus.label.weather"),
+        "reading": t("stimulus.label.reading"),
+        "search": t("stimulus.label.search"),
+        "web_fetch": t("stimulus.label.web_fetch"),
+        "send_message": t("stimulus.label.send_message"),
+        "note_rewrite": t("stimulus.label.note_rewrite"),
+        "file_modify": t("stimulus.label.file_modify"),
+        "system_change": t("stimulus.label.system_change"),
+    }
 PENDING_ACTION_VISIBLE_STATUSES = {"pending"}
 RUNNING_ACTION_VISIBLE_STATUSES = {"running"}
 PROMPT_SECTION_LOG_THRESHOLD_MS = 10.0
 STAGNATION_CHECK_CYCLES = 3
 STAGNATION_SIMILARITY_THRESHOLD = 0.6
 STAGNATION_MIN_MATCHED_THOUGHTS = 2
-STAGNATION_TERM_STOPWORDS = {
-    "刚才",
-    "现在",
-    "这种",
-    "那种",
-    "这样",
-    "已经",
-    "自己",
-    "继续",
-    "不再",
-    "不需要",
-    "需要",
-    "一个",
-    "没有",
-    "不是",
-    "如果",
-    "因为",
-    "只是",
-    "可以",
-    "一样",
-    "一样的",
-    "此刻",
-    "也许",
-    "或许",
-    "就是",
-}
+def _stagnation_stopwords() -> set[str]:
+    from core.i18n import stopwords as i18n_stopwords
+    return i18n_stopwords("stagnation")
 logger = logging.getLogger(__name__)
 
 
@@ -423,7 +345,8 @@ def _build_system(
     allow_implicit_send_message: bool,
     note_text: str = "",
 ) -> str:
-    parts = [_system_prompt_text(allow_implicit_send_message, note_text=note_text), '## “我”是谁']
+    identity_title = t("prompt.section.identity")
+    parts = [_system_prompt_text(allow_implicit_send_message, note_text=note_text), f"## {identity_title}"]
     for content in identity.values():
         normalized = content.strip()
         if normalized:
@@ -432,13 +355,13 @@ def _build_system(
 
 
 def _system_prompt_text(allow_implicit_send_message: bool, *, note_text: str = "") -> str:
-    action_examples = list(SYSTEM_PROMPT_ACTION_EXAMPLES_PREFIX)
+    action_examples = list(_system_prompt_action_examples_prefix())
     if allow_implicit_send_message:
-        action_examples.extend(SYSTEM_PROMPT_IMPLICIT_SEND_MESSAGE_ACTION_EXAMPLES)
-    action_examples.extend(SYSTEM_PROMPT_ACTION_EXAMPLES_SUFFIX)
+        action_examples.extend(_system_prompt_implicit_send_examples())
+    action_examples.extend(_system_prompt_action_examples_suffix())
     return "\n".join(
         [
-            SYSTEM_PROMPT_PREFIX.rstrip(),
+            _system_prompt_prefix().rstrip(),
             *action_examples,
             "",
             _system_prompt_suffix_with_note_warning(note_text),
@@ -459,10 +382,10 @@ def _format_prefrontal_alert(prefrontal_state: PrefrontalPromptState) -> str:
     if prefrontal_state.get("inhibition_notes"):
         if lines:
             lines.append("")
-        lines.append("刚刚有些冲动被压下了：")
+        lines.append(t("prefrontal.inhibited_header"))
         for note in prefrontal_state["inhibition_notes"]:
             lines.append(f"- {note}")
-    return _render_section("此刻需要留意", lines, keep_blank_lines=True)
+    return _render_section(t("prompt.section.prefrontal"), lines, keep_blank_lines=True)
 
 
 def _manas_needs_prompt(manas_state: ManasPromptState) -> bool:
@@ -486,18 +409,19 @@ def _format_manas(manas_state: ManasPromptState) -> str:
     if warning:
         lines.append(warning)
     if manas_state.get("reflection_requested"):
-        lines.append("我需要做一次更认真地回身自照。")
-    return _render_section("此刻的自我感", lines)
+        lines.append(t("manas.reflection_needed"))
+    return _render_section(t("prompt.section.manas"), lines)
 
 
 EMOTION_ALERT_THRESHOLD = 0.65
-EMOTION_ALERT_LABELS = {
-    "frustration": "此刻我有些焦躁不安。",
-    "concern": "此刻我心里有些牵挂和不放心。",
-    "curiosity": "此刻有一股很强的好奇心在推着我。",
-    "satisfaction": "此刻我感到一种踏实的满足。",
-    "calm": "此刻我内心很平静。",
-}
+def _emotion_alert_labels() -> dict[str, str]:
+    return {
+        "frustration": t("emotion.alert.frustration"),
+        "concern": t("emotion.alert.concern"),
+        "curiosity": t("emotion.alert.curiosity"),
+        "satisfaction": t("emotion.alert.satisfaction"),
+        "calm": t("emotion.alert.calm"),
+    }
 
 
 def _emotion_alert(emotion: EmotionSnapshot) -> str:
@@ -505,7 +429,7 @@ def _emotion_alert(emotion: EmotionSnapshot) -> str:
     alerts: list[str] = []
     for dimension, value in sorted(dimensions.items(), key=lambda item: item[1], reverse=True):
         if float(value) >= EMOTION_ALERT_THRESHOLD:
-            label = EMOTION_ALERT_LABELS.get(dimension)
+            label = _emotion_alert_labels().get(dimension)
             if label:
                 alerts.append(label)
     if not alerts:
@@ -521,19 +445,19 @@ def _format_recent_reflections(reflections: list[ReflectionPromptEntry]) -> str:
         if content and content not in seen:
             seen.add(content)
             lines.append(f"- {content}")
-    return _render_section("最近的反思", lines)
+    return _render_section(t("prompt.section.recent_reflections"), lines)
 
 
 def _format_long_term(memories: list[str]) -> str:
     lines = []
     for mem in memories:
         lines.append(f"- {_compact_prompt_text(mem)}")
-    return _render_section("浮上来的记忆", lines)
+    return _render_section(t("prompt.section.long_term"), lines)
 
 
 def _format_impressions(impressions: list[str]) -> str:
     lines = [f"- {_compact_prompt_text(impression)}" for impression in impressions]
-    return _render_section("我对他们的印象", lines)
+    return _render_section(t("prompt.section.impressions"), lines)
 
 
 NOTE_SOFT_LIMIT = 1000
@@ -541,33 +465,28 @@ NOTE_SEVERE_LIMIT = 1500
 
 
 def _format_note(note_text: str) -> str:
-    return _render_section("我的笔记", [str(note_text).strip()], keep_blank_lines=True)
+    return _render_section(t("prompt.section.note"), [str(note_text).strip()], keep_blank_lines=True)
 
 
 def _note_length_warning(note_text: str) -> str:
     note_len = len(note_text.strip())
     if note_len > NOTE_SEVERE_LIMIT:
-        return (
-            f"⚠ 当前笔记已严重超出字数限制（{note_len} 字），已造成信息丢失。"
-            f"下次覆写务必大幅压缩到 {NOTE_SOFT_LIMIT} 字以内，否则会丢失更多信息。"
-        )
+        return t("prompt.note_warning_severe", note_len=note_len, limit=NOTE_SOFT_LIMIT)
     if note_len > NOTE_SOFT_LIMIT:
-        return (
-            f"⚠ 当前笔记已超出字数限制（{note_len} 字）。"
-            f"下次覆写要压缩到 {NOTE_SOFT_LIMIT} 字以内，避免被截断丢失信息。"
-        )
+        return t("prompt.note_warning", note_len=note_len, limit=NOTE_SOFT_LIMIT)
     return ""
 
 
 def _system_prompt_suffix_with_note_warning(note_text: str) -> str:
-    suffix = SYSTEM_PROMPT_SUFFIX.strip()
+    suffix = _system_prompt_suffix().strip()
     note_warning = _note_length_warning(note_text)
     if not note_warning:
         return suffix
-    note_intro, separator, remainder = suffix.partition("\n\n## 示例")
+    examples_marker = t("prompt.section.examples_marker")
+    note_intro, separator, remainder = suffix.partition(f"\n\n## {examples_marker}")
     if not separator:
         return f"{suffix}\n{note_warning}"
-    return f"{note_intro}\n{note_warning}\n\n## 示例{remainder}"
+    return f"{note_intro}\n{note_warning}\n\n## {examples_marker}{remainder}"
 
 
 def _split_stimuli(stimuli: list[Stimulus]) -> tuple[list[Stimulus], list[Stimulus], list[Stimulus]]:
@@ -586,43 +505,49 @@ def _split_stimuli(stimuli: list[Stimulus]) -> tuple[list[Stimulus], list[Stimul
 
 def _format_conversations(conversations: list[Stimulus]) -> str:
     lines = [
-        "这一段是眼前正在发生、优先级最高的对话，不要和上面的“最近的对话”混淆。",
-        "如果我决定回应，需要用 {action:send_message} 真正把话发出去。",
-        "如果 {action:send_message} 没写 target 和 target_entity，默认就是发给这里当前正在对我说话的人。",
+        t("prompt.conversation.foreground_hint"),
+        t("prompt.conversation.send_hint"),
+        t("prompt.conversation.implicit_target_hint"),
         "",
     ]
     for conv in conversations:
         lines.append(_format_conversation_line(conv))
-    return _render_section("有人对我说话了", lines, keep_blank_lines=True)
+    return _render_section(t("prompt.section.conversations"), lines, keep_blank_lines=True)
 
 
 def _format_reply_focus(reply_focus: ReplyFocusPromptState, conversation_labels: dict[str, str]) -> str:
     target = _known_target_label(reply_focus["source"], conversation_labels)
     lines = [
-        f"这一轮下面没有新的对话消息，但我刚才还在和 {target} 这段对话里。",
-        "如果这一轮只是顺着这段对话继续说，{action:send_message, message:\"我想说的话\"} 默认仍然发给这里。",
+        t("prompt.reply_focus.no_new_messages", target=target),
+        t("prompt.reply_focus.default_target"),
     ]
-    return _render_section("刚才还在继续的对话", lines)
+    return _render_section(t("prompt.section.reply_focus"), lines)
 
 
 def _format_recent_conversations(conversations: list[RecentConversationPrompt]) -> str:
     lines: list[str] = []
     for conversation in conversations:
         last_time = _recent_conversation_local_time(conversation["last_timestamp"])
-        lines.append(f'与 {conversation["source_label"]} 的近期对话（最后一条消息时间：{last_time}）：')
+        lines.append(t("prompt.recent_conv.header", source_label=conversation["source_label"], last_time=last_time))
         lines.append("")
         summary = _truncate_conversation_summary(str(conversation.get("summary") or "").strip())
         if summary:
-            lines.append(f"更早的对话摘要：{summary}")
+            lines.append(t("prompt.recent_conv.summary_prefix", summary=summary))
             lines.append("")
         for message in conversation["messages"]:
             content = _compact_prompt_text(message["content"])
             if content:
-                lines.append(f'{message["speaker_name"]}：{content}')
+                lines.append(
+                    t(
+                        "prompt.format.speaker_line",
+                        speaker=message["speaker_name"],
+                        content=content,
+                    )
+                )
         lines.append("")
     while lines and not lines[-1]:
         lines.pop()
-    return _render_section("最近的对话", lines, keep_blank_lines=True)
+    return _render_section(t("prompt.section.recent_conversations"), lines, keep_blank_lines=True)
 
 
 def _format_degeneration_nudge(
@@ -631,16 +556,16 @@ def _format_degeneration_nudge(
     has_conversation: bool,
     has_external_results: bool,
 ) -> str:
-    lines = ["这一轮不能继续打转，至少一个念头必须外化成合格动作。"]
+    lines = [t("degeneration.nudge.must_act")]
     if intervention["must_externalize"]:
-        lines.append("note_rewrite、time、system_status 不算。")
+        lines.append(t("degeneration.nudge.exclude_note"))
     if has_conversation:
-        lines.append("优先回应眼前这段对话。")
+        lines.append(t("degeneration.nudge.prefer_conversation"))
     elif has_external_results:
-        lines.append("优先跟进刚得到的外部结果或建议方向。")
+        lines.append(t("degeneration.nudge.prefer_results"))
     elif intervention["suggestions"]:
-        lines.append(f"优先沿着这个方向推进：{intervention['suggestions'][0]}")
-    return _render_section("这一轮的硬约束", lines)
+        lines.append(t("degeneration.nudge.prefer_suggestion", suggestion=intervention['suggestions'][0]))
+    return _render_section(t("prompt.section.degeneration_nudge"), lines)
 
 
 def _format_sensory_stimuli(stimuli: list[Stimulus]) -> str:
@@ -649,7 +574,7 @@ def _format_sensory_stimuli(stimuli: list[Stimulus]) -> str:
         lines.append(
             f"- {_passive_stimulus_label(stimulus.type)} {_compact_prompt_text(stimulus.content)}"
         )
-    return _render_section("此刻我注意到", lines)
+    return _render_section(t("prompt.section.passive_stimuli"), lines)
 
 
 def _format_action_echoes(
@@ -659,19 +584,19 @@ def _format_action_echoes(
 ) -> str:
     lines: list[str] = []
     if recent_stimuli:
-        lines.append("最近的行动回音：")
+        lines.append(t("prompt.action_echoes.recent_header"))
         lines.append("")
         lines.extend(_action_echo_lines(recent_stimuli, conversation_labels))
     if recent_stimuli or current_stimuli:
         if lines:
             lines.append("")
-        lines.append("刚刚收到的行动回音：")
+        lines.append(t("prompt.action_echoes.current_header"))
         lines.append("")
         if current_stimuli:
             lines.extend(_action_echo_lines(current_stimuli, conversation_labels))
         else:
-            lines.append("- 无")
-    return _render_section("行动有了回音", lines, keep_blank_lines=True)
+            lines.append(t("prompt.action_echoes.none"))
+    return _render_section(t("prompt.section.action_echoes"), lines, keep_blank_lines=True)
 
 
 def _action_echo_lines(stimuli: list[Stimulus], conversation_labels: dict[str, str]) -> list[str]:
@@ -684,14 +609,15 @@ def _action_echo_lines(stimuli: list[Stimulus], conversation_labels: dict[str, s
 def _format_thought_history(thoughts: list[Thought]) -> str:
     lines = []
     current_cycle = -1
-    for t in thoughts:
-        if t.cycle_id != current_cycle:
-            current_cycle = t.cycle_id
-            lines.append(f"--- 第 {t.cycle_id} 轮 ---")
-        trigger = f" (← {t.trigger_ref})" if t.trigger_ref else ""
-        content = _strip_action_markers(t.content) or t.content
-        lines.append(f"[{t.type}-{t.thought_id}] {content}{trigger}")
-    return _render_section("最近的念头", lines)
+    for thought in thoughts:
+        if thought.cycle_id != current_cycle:
+            current_cycle = thought.cycle_id
+            lines.append(t("prompt.cycle_header", cycle_id=thought.cycle_id))
+        trigger = f" (← {thought.trigger_ref})" if thought.trigger_ref else ""
+        content = _strip_action_markers(thought.content) or thought.content
+        display_type = localized_thought_type(thought.type)
+        lines.append(f"[{display_type}-{thought.thought_id}] {content}{trigger}")
+    return _render_section(t("prompt.section.recent_thoughts"), lines)
 
 
 def _detect_thought_stagnation(
@@ -709,7 +635,7 @@ def _detect_thought_stagnation(
         [
             normalized
             for thought in cycle_thoughts
-            if thought.type != "反思"
+            if thought.type != "reflection"
             and (normalized := _normalize_stagnation_text(thought.content))
         ]
         for cycle_thoughts in recent_cycles
@@ -727,8 +653,8 @@ def _detect_thought_stagnation(
 
 def _group_recent_cycles(thoughts: list[Thought], n: int) -> list[list[Thought]]:
     cycles: dict[int, list[Thought]] = {}
-    for t in thoughts:
-        cycles.setdefault(t.cycle_id, []).append(t)
+    for thought in thoughts:
+        cycles.setdefault(thought.cycle_id, []).append(thought)
     sorted_cycle_ids = sorted(cycles.keys())[-n:]
     return [cycles[cid] for cid in sorted_cycle_ids]
 
@@ -755,21 +681,21 @@ def _stagnation_sources(
 ) -> list[str]:
     sources: list[str] = []
     if long_term_context:
-        sources.append("浮上来的记忆")
+        sources.append(t("prompt.section.long_term"))
     if note_text.strip():
-        sources.append("我的笔记")
+        sources.append(t("prompt.section.note"))
     if recent_action_echoes or action_echoes:
-        sources.append("行动有了回音")
+        sources.append(t("prompt.section.action_echoes"))
     if pending_actions:
-        sources.append("我已发起、在等执行的事")
+        sources.append(t("prompt.section.pending_actions"))
     if running_actions:
-        sources.append("我已经发起、正在等回音的事")
+        sources.append(t("prompt.section.running_actions"))
     if passive:
-        sources.append("此刻我注意到")
+        sources.append(t("prompt.section.passive_stimuli"))
     if visual_input_present:
-        sources.append("眼前的画面")
+        sources.append(t("prompt.section.visual_input"))
     if perception_cues:
-        sources.append("好像有一阵子没有……")
+        sources.append(t("prompt.section.perception_cues"))
     _ = recent_conversations
     return sources
 
@@ -787,26 +713,23 @@ def _stagnation_warning(
 ) -> str:
     repeated_terms = _stagnation_terms(cycle_texts)
     if repeated_terms:
-        repeated_text = f"最近反复出现的意象：{', '.join(repeated_terms)}。"
+        repeated_text = t("stagnation.repeated_terms", terms=", ".join(repeated_terms))
     else:
-        repeated_text = "最近几轮一直在复述同一组意象和情绪。"
+        repeated_text = t("stagnation.repeated_generic")
     if available_sources:
-        source_text = "、".join(available_sources)
+        source_text = t("prompt.format.source_separator").join(available_sources)
     else:
-        source_text = "一个新的具体问题、记忆、感知或行动"
+        source_text = t("stagnation.generic_source")
     if has_foreground:
         return (
-            "⚠ 我最近 3 轮的念头在打转。"
-            f"{repeated_text}"
-            "我不能再机械改写同一句话或同一组意象。"
-            f"这一轮我至少要有一个念头从新的源头出发：{source_text}。"
-            "如果眼前有人在说话，最多一个念头承接对话，其余念头不要继续复述。"
+            t("stagnation.warning_prefix_foreground")
+            + repeated_text
+            + t("stagnation.require_new_source_foreground", sources=source_text)
         )
     return (
-        "⚠ 我最近 3 轮的念头在打转。"
-        f"{repeated_text}"
-        f"这一轮我至少要有一个念头从新的源头出发：{source_text}。"
-        "不要三个念头继续围着同一组意象改写。"
+        t("stagnation.warning_prefix")
+        + repeated_text
+        + t("stagnation.require_new_source", sources=source_text)
     )
 
 
@@ -841,7 +764,7 @@ def _stagnation_term_candidates(text: str) -> list[str]:
         candidate = _trim_stagnation_prefix(candidate)
         if len(candidate) < 2:
             continue
-        if candidate in STAGNATION_TERM_STOPWORDS:
+        if candidate in _stagnation_stopwords():
             continue
         if len(candidate) > 24:
             candidate = f"{candidate[:24].rstrip()}..."
@@ -854,8 +777,15 @@ def _stagnation_term_candidates(text: str) -> list[str]:
 
 def _trim_stagnation_prefix(candidate: str) -> str:
     trimmed = candidate
-    while len(trimmed) >= 3 and trimmed[:1] in {"和", "与"}:
-        trimmed = trimmed[1:]
+    while True:
+        if len(trimmed) >= 3 and trimmed[:1] in {"和", "与"}:
+            trimmed = trimmed[1:]
+            continue
+        lowered = trimmed.lower()
+        if lowered.startswith("and "):
+            trimmed = trimmed[4:].lstrip()
+            continue
+        break
     return trimmed
 
 
@@ -865,7 +795,7 @@ def _format_running_actions(actions: list[ActionRecord], conversation_labels: di
         lines.append(
             f"- [{action.type}/{action.status}] {_running_action_summary(action, conversation_labels)}"
         )
-    return _render_section("我已经发起、正在等回音的事", lines)
+    return _render_section(t("prompt.section.running_actions"), lines)
 
 
 def _format_pending_actions(actions: list[ActionRecord], conversation_labels: dict[str, str]) -> str:
@@ -874,7 +804,7 @@ def _format_pending_actions(actions: list[ActionRecord], conversation_labels: di
         lines.append(
             f"- [{action.type}/{action.status}] {_pending_action_summary(action, conversation_labels)}"
         )
-    return _render_section("我已发起、在等执行的事", lines)
+    return _render_section(t("prompt.section.pending_actions"), lines)
 
 
 def _visible_pending_actions(actions: list[ActionRecord] | None) -> list[ActionRecord]:
@@ -890,21 +820,21 @@ def _visible_running_actions(actions: list[ActionRecord] | None) -> list[ActionR
 
 
 def _format_perception_cues(cues: list[str]) -> str:
-    return _render_section("好像有一阵子没有……", [f"- {cue}" for cue in cues])
+    return _render_section(t("prompt.section.perception_cues"), [f"- {cue}" for cue in cues])
 
 
 def _format_visual_input(*, has_conversation: bool) -> str:
     lines = [
-        "附带的图片是我此刻看到的画面，不是任何人发给我的图片，也不是需要我去分析的任务。",
-        "如果画面里的东西自然牵引了念头，可以纳入思考；如果没有，就不必刻意描述。",
+        t("visual.description"),
+        t("visual.natural_only"),
     ]
     if has_conversation:
-        lines.append("当对话和画面同时出现时，对话仍是前景，画面只是背景，除非画面本身与对话直接相关。")
-    return _render_section("眼前的画面", lines)
+        lines.append(t("visual.conversation_priority"))
+    return _render_section(t("prompt.section.visual_input"), lines)
 
 
 def _format_next_cycle(cycle_id: int) -> str:
-    return f"## 接下来的念头\n\n--- 第 {cycle_id} 轮 ---"
+    return f"## {t('prompt.section.next_cycle')}\n\n{t('prompt.cycle_header', cycle_id=cycle_id)}"
 
 
 def _render_section(title: str, lines: list[str], *, keep_blank_lines: bool = False) -> str:
@@ -916,7 +846,7 @@ def _render_section(title: str, lines: list[str], *, keep_blank_lines: bool = Fa
 
 
 def _passive_stimulus_label(stimulus_type: str) -> str:
-    return PASSIVE_STIMULUS_LABELS.get(stimulus_type, "[感知]")
+    return _passive_stimulus_labels().get(stimulus_type, t("stimulus.label.fallback"))
 
 
 def _conversation_prefix(stimulus: Stimulus) -> str:
@@ -937,7 +867,7 @@ def _format_conversation_line(stimulus: Stimulus) -> str:
             _format_conversation_block(message) for message in merged_messages
         )
     content = _compact_prompt_text(stimulus.content)
-    return f"{_conversation_prefix(stimulus)} 说：{content}"
+    return t("prompt.conversation.say", prefix=_conversation_prefix(stimulus), content=content)
 
 
 def _format_conversation_block(message: JsonValue) -> str:
@@ -949,7 +879,7 @@ def _format_conversation_block(message: JsonValue) -> str:
         return content
     if not content:
         return prefix
-    return f"{prefix} 说：\n{content}"
+    return f"{t('prompt.conversation.say_block', prefix=prefix)}\n{content}"
 
 
 def _conversation_dict_prefix(message: JsonObject) -> str:
@@ -975,10 +905,15 @@ def _conversation_dict_reply_context(message: JsonObject) -> str:
     if not reply_to_message_id or not reply_preview:
         return ""
     if bool(message.get("reply_to_from_self")):
-        quoted_owner = "引用了我之前说的"
+        quoted_owner = t("prompt.conversation.quote_self")
     else:
-        quoted_owner = "引用了自己之前说的"
-    return f'{quoted_owner} [msg:{reply_to_message_id}]：“{reply_preview}”'
+        quoted_owner = t("prompt.conversation.quote_other")
+    return t(
+        "prompt.format.quote_context",
+        owner=quoted_owner,
+        message_id=reply_to_message_id,
+        preview=reply_preview,
+    )
 
 
 def _conversation_speaker(stimulus: Stimulus) -> str:
@@ -991,17 +926,22 @@ def _conversation_reply_context(stimulus: Stimulus) -> str:
     if not reply_to_message_id or not reply_preview:
         return ""
     if bool(stimulus.metadata.get("reply_to_from_self")):
-        quoted_owner = "引用了我之前说的"
+        quoted_owner = t("prompt.conversation.quote_self")
     else:
-        quoted_owner = "引用了自己之前说的"
-    return f'{quoted_owner} [msg:{reply_to_message_id}]：“{reply_preview}”'
+        quoted_owner = t("prompt.conversation.quote_other")
+    return t(
+        "prompt.format.quote_context",
+        owner=quoted_owner,
+        message_id=reply_to_message_id,
+        preview=reply_preview,
+    )
 
 
 def _action_echo_label(stimulus: Stimulus) -> str:
     action_type = str(stimulus.metadata.get("action_type") or "").strip()
     if action_type:
-        return ACTION_ECHO_LABELS.get(action_type, UNKNOWN_ACTION_ECHO_LABEL)
-    return UNKNOWN_ACTION_ECHO_LABEL
+        return _action_echo_labels().get(action_type, t("stimulus.label.unknown"))
+    return t("stimulus.label.unknown")
 
 
 def _is_action_echo(stimulus: Stimulus) -> bool:
@@ -1024,10 +964,10 @@ def _running_action_summary(action: ActionRecord, conversation_labels: dict[str,
 def _pending_action_summary(action: ActionRecord, conversation_labels: dict[str, str]) -> str:
     summary = _running_action_summary(action, conversation_labels)
     if action.awaiting_confirmation:
-        return f"已受理，等待确认：{summary}"
+        return t("prompt.pending.awaiting_confirm", summary=summary)
     if action.retry_after is not None:
-        return f"已受理，等待恢复后重试：{summary}"
-    return f"已受理，等待执行：{summary}"
+        return t("prompt.pending.awaiting_retry", summary=summary)
+    return t("prompt.pending.awaiting_exec", summary=summary)
 
 
 def _running_send_message_summary(action: ActionRecord, conversation_labels: dict[str, str]) -> str:
@@ -1035,17 +975,17 @@ def _running_send_message_summary(action: ActionRecord, conversation_labels: dic
         str(
             action.request.get("target_source")
             or action.request.get("target_entity")
-            or "当前 Telegram 对话"
+            or t("action.default_target_label")
         ).strip(),
         conversation_labels,
     )
     message = _running_message_excerpt(str(action.request.get("message_text") or ""))
     if message:
-        return f"给 {target} 发送消息：“{message}”"
+        return t("prompt.send.message_with_excerpt", target=target, message=message)
     task_summary = _running_action_task_summary(action)
     if task_summary:
         return task_summary
-    return f"给 {target} 发送消息"
+    return t("prompt.send.message_only", target=target)
 
 
 def _running_action_task_summary(action: ActionRecord) -> str:
@@ -1092,15 +1032,15 @@ def _action_echo_text(stimulus: Stimulus, conversation_labels: dict[str, str]) -
     )
     message = _running_message_excerpt(str(data.get("message") or ""))
     if succeeded and target and message:
-        return f'已成功发送给 {target}：“{message}”'
+        return t("action.send_success_with_excerpt", target=target, excerpt=message)
     if succeeded and target:
-        return f"已成功发送给 {target}"
+        return t("action.send_success", target=target)
     if target and message:
-        return f'发送给 {target} 失败：“{message}” （{summary}）'
+        return t("action.send_fail_target_excerpt", target=target, excerpt=message, summary=summary)
     if message:
-        return f'发送失败：“{message}” （{summary}）'
+        return t("action.send_fail_excerpt", excerpt=message, summary=summary)
     if target:
-        return f"发送给 {target} 失败（{summary}）"
+        return t("action.send_fail_target", target=target, summary=summary)
     return _compact_prompt_text(stimulus.content)
 
 

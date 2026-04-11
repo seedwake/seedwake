@@ -12,7 +12,7 @@ import re
 import signal
 import sys
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import FrameType
@@ -30,6 +30,7 @@ from core.action import (
     pop_action_controls,
 )
 from core.attention import evaluate_attention, select_attention_anchor
+from core.i18n import localized_thought_type, prompt_block, t
 from core.camera import capture_camera_frame
 from core.cycle import run_cycle, write_prompt_log_block
 from core.embedding import embed_text
@@ -63,13 +64,17 @@ from core.common_types import (
     canonical_person_entity_tag,
     coerce_json_object,
     detect_rewritten_repetition,
+    EmotionSnapshot,
     EventPayload,
     HabitPromptEntry,
     JsonObject,
     PerceptionStimulusPayload,
     JsonValue,
+    ManasPromptState,
+    PrefrontalPromptState,
     RecentConversationPrompt,
     RawActionRequest,
+    SleepStateSnapshot,
     StatusEventPayload,
     person_entity_tags_from_telegram_identity,
     rewritten_pair_match_counts,
@@ -81,10 +86,10 @@ from core.common_types import (
 C_RESET = "\033[0m"
 C_DIM = "\033[2m"
 C_TYPE = {
-    "思考": "\033[36m",    # cyan
-    "意图": "\033[33m",    # yellow
-    "反应": "\033[32m",    # green
-    "反思": "\033[35m",    # magenta
+    "thinking": "\033[36m",    # cyan
+    "intention": "\033[33m",    # yellow
+    "reaction": "\033[32m",    # green
+    "reflection": "\033[35m",    # magenta
 }
 EVENT_CHANNEL = "seedwake:events"
 MAIN_LOOP_EXCEPTIONS = (
@@ -121,31 +126,21 @@ DEGENERATION_RETRY_ACTION_TYPES = {
     "file_modify",
     "system_change",
 }
-DEGENERATION_INTERVENTION_SYSTEM_PROMPT = (
-    "你在为一个刚刚检测到退化的念头流生成纠偏指令。"
-    "目标是打破重复改写，让下一轮把注意力转向外界、对话或结果推进。"
-    "建议必须具体、贴合上下文、可执行。"
-    "优先回应眼前正在发生的对话；其次围绕刚收到的行动结果继续推进；再次才是外部探索。"
-    "不要建议 note_rewrite、time、system_status。"
-    "只返回 JSON："
-    '{"summary":"","required_shift":"","suggestions":["",""],"must_externalize":true}'
-)
-DEGENERATION_REVIEW_SYSTEM_PROMPT = (
-    "你在审查一轮念头是否成功打破上一轮退化。"
-    "重点判断：是否还在改写同一组轨道、是否落实了要求的转向、是否真正外化了一个合格动作。"
-    "note_rewrite、time、system_status 不算合格外化。"
-    "只返回 JSON："
-    '{"reroll":false,"reason":""}'
-)
-RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT = (
-    f"你在压缩我更早的对话历史。"
-    f"根据已有摘要和补充消息，写一段新的中文自然语言摘要，替换旧摘要。"
-    f"请浓缩总结式概括，不要逐条复读。"
-    f"对方用名字称呼，assistant 称呼用\"我\"。"
-    f"不论旧摘要曾经有多长，"
-    f"新摘要字数必须严格控制在 {RECENT_CONVERSATION_SUMMARY_TARGET_CHARS} 字以内，否则新摘要会被截断，导致丢失信息。"
-    f"只输出摘要正文。"
-)
+MAIN_NONE_KEY = "main.none"
+
+
+def _degeneration_intervention_system_prompt() -> str:
+    return str(prompt_block("DEGENERATION_INTERVENTION_SYSTEM_PROMPT"))
+
+
+def _degeneration_review_system_prompt() -> str:
+    return str(prompt_block("DEGENERATION_REVIEW_SYSTEM_PROMPT"))
+
+
+def _recent_conversation_summary_base_prompt() -> str:
+    return str(prompt_block("CONVERSATION_SUMMARY_SYSTEM_PROMPT")).format(
+        target_chars=RECENT_CONVERSATION_SUMMARY_TARGET_CHARS,
+    )
 RECENT_CONVERSATION_SUMMARY_BATCH_MAX_CHARS = 2400
 LTM_EXCEPTIONS = (
     psycopg.Error,
@@ -225,6 +220,13 @@ def main() -> None:
     args = _parse_args()
     config = _load_config(args.config)
     setup_logging(config, component="core")
+    from core.i18n import init as init_i18n, language, validate_against
+    init_i18n(config.get("language", "zh"))
+    other = "en" if language() == "zh" else "zh"
+    validation_errors = validate_against(other)
+    if validation_errors:
+        for error in validation_errors:
+            logging.getLogger(__name__).warning("i18n key mismatch: %s", error)
     log_file = _open_log(args.log, config)
     prompt_log_file = _open_prompt_log(config, plain_log_path=args.log)
 
@@ -406,10 +408,10 @@ def _emit_startup(
 ) -> None:
     model_name = str(model_config.get("name") or "")
     provider = str(model_config.get("provider") or "ollama")
-    _output(log_file, "Seedwake v0.2 — 心相续引擎启动")
-    _output(log_file, f"模型: {model_name} [{provider}]  上下文窗口: {context_window} 轮")
-    _output(log_file, f"Redis: {'已连接' if redis_client else '未连接（使用内存）'}")
-    _output(log_file, f"PostgreSQL: {'已连接' if pg_conn else '未连接（跳过长期记忆）'}")
+    _output(log_file, t("log.engine_started"))
+    _output(log_file, t("log.model_info", model_name=model_name, provider=provider, context_window=context_window))
+    _output(log_file, t("log.redis_connected") if redis_client else t("log.redis_disconnected"))
+    _output(log_file, t("log.pg_connected") if pg_conn else t("log.pg_disconnected"))
     _output(log_file, "─" * 60)
     _publish_event(redis_client, "status", _status_payload("core_started"))
 
@@ -451,7 +453,7 @@ def _run_engine_loop(
             last_pg_reconnect,
         )
         try:
-            new_thoughts, degeneration_alert = _execute_cycle(
+            new_thoughts, _ = _execute_cycle(
                 runtime,
                 cycle_id,
                 identity,
@@ -1090,8 +1092,7 @@ def _execute_cycle(
         )
         impression_sources = _conversation_entity_sources(stimuli, recent_conversations)
         current_impressions = _retrieve_current_impressions(runtime.ltm, impression_sources)
-        if current_impressions and ltm_context:
-            ltm_context = [memory for memory in ltm_context if memory not in current_impressions] or None
+        ltm_context = _exclude_current_impressions_from_context(ltm_context, current_impressions)
         stimuli, prompt_running_actions, recent_action_echoes, pending_prompt_echoes = _prepare_prompt_action_state(
             runtime,
             cycle_id,
@@ -1117,63 +1118,20 @@ def _execute_cycle(
             reply_focus=runtime.action_manager.reply_focus_prompt_state(),
             visual_input_present=bool(cycle_images),
         )
-        reroll_reason: str | None = None
-        thoughts, inhibition_notes = _generate_reviewed_thoughts(
+        thoughts, inhibition_notes, reroll_reason, prefrontal_state = _generate_cycle_thoughts(
             runtime,
-            cycle_id,
-            identity,
-            recent_thoughts,
-            stimuli,
-            prompt_log_file,
-            prompt_context,
-            cycle_images,
+            cycle_id=cycle_id,
+            identity=identity,
+            recent_thoughts=recent_thoughts,
+            stimuli=stimuli,
+            prompt_log_file=prompt_log_file,
+            prompt_context=prompt_context,
+            cycle_images=cycle_images,
+            recent_conversations=recent_conversations,
+            active_habits=active_habits,
+            current_sleep_state=current_sleep_state,
+            prefrontal_state=prefrontal_state,
         )
-        if runtime.degeneration_intervention is not None:
-            reroll_reason = _degeneration_reroll_reason(
-                runtime.auxiliary_client,
-                runtime.auxiliary_model_config,
-                runtime.degeneration_intervention,
-                thoughts,
-                stimuli,
-                recent_conversations,
-                prompt_log_file,
-            )
-            if reroll_reason:
-                logger.info("cycle C%s degeneration intervention reroll triggered: %s", cycle_id, reroll_reason)
-                retry_intervention = {
-                    **runtime.degeneration_intervention,
-                    "retry_feedback": reroll_reason,
-                }
-                retry_prefrontal_state = runtime.prefrontal.current_state(
-                    cycle_id,
-                    identity,
-                    active_habits,
-                    current_sleep_state,
-                    retry_intervention,
-                )
-                prefrontal_state = retry_prefrontal_state
-                thoughts, inhibition_notes = _generate_reviewed_thoughts(
-                    runtime,
-                    cycle_id,
-                    identity,
-                    recent_thoughts,
-                    stimuli,
-                    prompt_log_file,
-                    replace(
-                        prompt_context,
-                        prefrontal_state=retry_prefrontal_state,
-                    ),
-                    cycle_images,
-                )
-                reroll_reason = _degeneration_reroll_reason(
-                    runtime.auxiliary_client,
-                    runtime.auxiliary_model_config,
-                    retry_intervention,
-                    thoughts,
-                    stimuli,
-                    recent_conversations,
-                    prompt_log_file,
-                )
         failure_count = _failed_action_echo_count(stimuli)
         degeneration_alert = _detect_runtime_degeneration(recent_thoughts, thoughts)
         if degeneration_alert:
@@ -1213,30 +1171,21 @@ def _execute_cycle(
             manas_state["consecutive_disruptions"],
         )
         reflection_started_at = time.perf_counter()
-        reflection = None
-        if runtime.metacognition.should_reflect(
-            cycle_id,
-            current_emotion,
-            degeneration_alert=degeneration_alert,
+        reflection = _maybe_generate_cycle_reflection(
+            runtime,
+            cycle_id=cycle_id,
+            recent_thoughts=recent_thoughts,
+            thoughts=thoughts,
+            current_emotion=current_emotion,
+            prefrontal_state=prefrontal_state,
+            active_habits=active_habits,
+            stimuli=stimuli,
             failure_count=failure_count,
-            stimuli_changed=bool(stimuli),
-            manas_reflection_requested=manas_state["reflection_requested"],
-        ):
-            reflection = runtime.metacognition.generate_reflection(
-                runtime.auxiliary_client,
-                runtime.auxiliary_model_config,
-                cycle_id=cycle_id,
-                recent_thoughts=[*recent_thoughts[-9:], *thoughts],
-                emotion=current_emotion,
-                goals=prefrontal_state["goal_stack"],
-                habits=active_habits,
-                prefrontal_state=prefrontal_state,
-                failure_count=failure_count,
-                degeneration_alert=degeneration_alert,
-                manas_state=manas_state,
-            )
-            if reflection is not None:
-                thoughts = [*thoughts, reflection]
+            degeneration_alert=degeneration_alert,
+            manas_state=manas_state,
+        )
+        if reflection is not None:
+            thoughts = [*thoughts, reflection]
         logger.info(
             "cycle C%s metacognition finished in %.1f ms (generated=%s%s)",
             cycle_id,
@@ -1326,6 +1275,152 @@ def _load_recent_conversations(
             entries,
             prompt_log_file,
         ),
+    )
+
+
+def _exclude_current_impressions_from_context(
+    ltm_context: list[str] | None,
+    current_impressions: list[str],
+) -> list[str] | None:
+    if not ltm_context or not current_impressions:
+        return ltm_context
+    return [memory for memory in ltm_context if memory not in current_impressions] or None
+
+
+def _generate_cycle_thoughts(
+    runtime: EngineRuntime,
+    *,
+    cycle_id: int,
+    identity: dict[str, str],
+    recent_thoughts: list[Thought],
+    stimuli: list[Stimulus],
+    prompt_log_file: TextIO | None,
+    prompt_context: PromptBuildContext,
+    cycle_images: list[str] | None,
+    recent_conversations: list[RecentConversationPrompt],
+    active_habits: list[HabitPromptEntry],
+    current_sleep_state: SleepStateSnapshot,
+    prefrontal_state: PrefrontalPromptState,
+) -> tuple[list[Thought], list[str], str | None, PrefrontalPromptState]:
+    reroll_reason: str | None = None
+    thoughts, inhibition_notes = _generate_reviewed_thoughts(
+        runtime,
+        cycle_id,
+        identity,
+        recent_thoughts,
+        stimuli,
+        prompt_log_file,
+        prompt_context,
+        cycle_images,
+    )
+    if runtime.degeneration_intervention is None:
+        return thoughts, inhibition_notes, reroll_reason, prefrontal_state
+    reroll_reason = _degeneration_reroll_reason(
+        runtime.auxiliary_client,
+        runtime.auxiliary_model_config,
+        runtime.degeneration_intervention,
+        thoughts,
+        stimuli,
+        recent_conversations,
+        prompt_log_file,
+    )
+    if not reroll_reason:
+        return thoughts, inhibition_notes, reroll_reason, prefrontal_state
+    logger.info("cycle C%s degeneration intervention reroll triggered: %s", cycle_id, reroll_reason)
+    retry_intervention = {
+        **runtime.degeneration_intervention,
+        "retry_feedback": reroll_reason,
+    }
+    retry_prefrontal_state = runtime.prefrontal.current_state(
+        cycle_id,
+        identity,
+        active_habits,
+        current_sleep_state,
+        retry_intervention,
+    )
+    retry_prompt_context = _prompt_context_with_prefrontal_state(prompt_context, retry_prefrontal_state)
+    thoughts, inhibition_notes = _generate_reviewed_thoughts(
+        runtime,
+        cycle_id,
+        identity,
+        recent_thoughts,
+        stimuli,
+        prompt_log_file,
+        retry_prompt_context,
+        cycle_images,
+    )
+    reroll_reason = _degeneration_reroll_reason(
+        runtime.auxiliary_client,
+        runtime.auxiliary_model_config,
+        retry_intervention,
+        thoughts,
+        stimuli,
+        recent_conversations,
+        prompt_log_file,
+    )
+    return thoughts, inhibition_notes, reroll_reason, retry_prefrontal_state
+
+
+def _prompt_context_with_prefrontal_state(
+    prompt_context: PromptBuildContext,
+    prefrontal_state: PrefrontalPromptState,
+) -> PromptBuildContext:
+    return PromptBuildContext(
+        manas_state=prompt_context.manas_state,
+        emotion=prompt_context.emotion,
+        sleep_state=prompt_context.sleep_state,
+        degeneration_intervention=prompt_context.degeneration_intervention,
+        active_habits=prompt_context.active_habits,
+        prefrontal_state=prefrontal_state,
+        recent_reflections=prompt_context.recent_reflections,
+        long_term_context=prompt_context.long_term_context,
+        current_impressions=prompt_context.current_impressions,
+        note_text=prompt_context.note_text,
+        stimuli=prompt_context.stimuli,
+        recent_action_echoes=prompt_context.recent_action_echoes,
+        running_actions=prompt_context.running_actions,
+        perception_cues=prompt_context.perception_cues,
+        recent_conversations=prompt_context.recent_conversations,
+        reply_focus=prompt_context.reply_focus,
+        visual_input_present=prompt_context.visual_input_present,
+    )
+
+
+def _maybe_generate_cycle_reflection(
+    runtime: EngineRuntime,
+    *,
+    cycle_id: int,
+    recent_thoughts: list[Thought],
+    thoughts: list[Thought],
+    current_emotion: EmotionSnapshot,
+    prefrontal_state: PrefrontalPromptState,
+    active_habits: list[HabitPromptEntry],
+    stimuli: list[Stimulus],
+    failure_count: int,
+    degeneration_alert: bool,
+    manas_state: ManasPromptState,
+) -> Thought | None:
+    if not runtime.metacognition.should_reflect(
+        cycle_id,
+        current_emotion,
+        degeneration_alert=degeneration_alert,
+        failure_count=failure_count,
+        stimuli_changed=bool(stimuli),
+        manas_reflection_requested=manas_state["reflection_requested"],
+    ):
+        return None
+    return runtime.metacognition.generate_reflection(
+        runtime.auxiliary_client,
+        runtime.auxiliary_model_config,
+        cycle_id=cycle_id,
+        recent_thoughts=[*recent_thoughts[-9:], *thoughts],
+        emotion=current_emotion,
+        goals=prefrontal_state["goal_stack"],
+        habits=active_habits,
+        prefrontal_state=prefrontal_state,
+        failure_count=failure_count,
+        degeneration_alert=degeneration_alert,
+        manas_state=manas_state,
     )
 
 
@@ -1432,14 +1527,14 @@ def _build_degeneration_intervention(
     write_prompt_log_block(
         prompt_log_file,
         title=f"DEGENERATION INTERVENTION C{cycle_id}",
-        prompt=f"[SYSTEM]\n{DEGENERATION_INTERVENTION_SYSTEM_PROMPT}\n\n[USER]\n{request}",
+        prompt=f"[SYSTEM]\n{_degeneration_intervention_system_prompt()}\n\n[USER]\n{request}",
         emoji="🟠",
     )
     try:
         response = client.chat(
             model=str(model_config["name"]),
             messages=[
-                {"role": "system", "content": DEGENERATION_INTERVENTION_SYSTEM_PROMPT},
+                {"role": "system", "content": _degeneration_intervention_system_prompt()},
                 {"role": "user", "content": request},
             ],
             options={"temperature": 0.2, "max_tokens": 320},
@@ -1473,7 +1568,7 @@ def _degeneration_reroll_reason(
 ) -> str | None:
     qualifying_actions = _qualifying_external_actions(thoughts)
     if intervention["must_externalize"] and not qualifying_actions:
-        return "这一轮仍然没有把念头外化成合格动作。"
+        return t("main.degeneration.no_action")
     request = _degeneration_review_request(
         intervention=intervention,
         thoughts=thoughts,
@@ -1484,14 +1579,14 @@ def _degeneration_reroll_reason(
     write_prompt_log_block(
         prompt_log_file,
         title=f"DEGENERATION REVIEW C{intervention['source_cycle_id']}",
-        prompt=f"[SYSTEM]\n{DEGENERATION_REVIEW_SYSTEM_PROMPT}\n\n[USER]\n{request}",
+        prompt=f"[SYSTEM]\n{_degeneration_review_system_prompt()}\n\n[USER]\n{request}",
         emoji="🟡",
     )
     try:
         response = client.chat(
             model=str(model_config["name"]),
             messages=[
-                {"role": "system", "content": DEGENERATION_REVIEW_SYSTEM_PROMPT},
+                {"role": "system", "content": _degeneration_review_system_prompt()},
                 {"role": "user", "content": request},
             ],
             options={"temperature": 0.0, "max_tokens": 220},
@@ -1518,7 +1613,7 @@ def _degeneration_reroll_reason(
         reason or "(none)",
     )
     if reroll:
-        return reason or "这一轮仍然在沿着旧轨道改写，没有真正完成转向。"
+        return reason or t("main.degeneration.still_looping")
     return None
 
 
@@ -1562,18 +1657,18 @@ def _degeneration_intervention_request(
     cycle_lines = _intervention_thought_lines(recent_thoughts, thoughts)
     stimulus_lines = _intervention_stimulus_lines(stimuli)
     conversation_lines = _intervention_conversation_lines(recent_conversations)
-    note_summary = _trim_text(_single_line(note_text), 260) if note_text.strip() else "（无）"
+    none = t(MAIN_NONE_KEY)
+    note_summary = _trim_text(_single_line(note_text), 260) if note_text.strip() else none
     return (
-        f"当前轮次：C{cycle_id}\n\n"
-        "最近 3 轮主念头：\n"
+        f"{t('main.intervention_current_cycle', cycle_id=cycle_id)}\n\n"
+        f"{t('main.intervention_recent_thoughts')}\n"
         f"{_join_bullets(cycle_lines)}\n\n"
-        "当前刺激与回音：\n"
+        f"{t('main.intervention_stimuli')}\n"
         f"{_join_bullets(stimulus_lines)}\n\n"
-        "最近的对话背景：\n"
+        f"{t('main.intervention_conv')}\n"
         f"{_join_bullets(conversation_lines)}\n\n"
-        f"我的笔记：{note_summary}\n\n"
-        "请给出一次只持续 1-2 轮的纠偏方案，"
-        "目标是打破重复改写，把注意力转向对话推进、行动结果或外界锚点。"
+        f"{t('main.intervention_note', note=note_summary)}\n\n"
+        f"{t('main.intervention_request')}"
     )
 
 
@@ -1588,7 +1683,7 @@ def _degeneration_review_request(
     thought_lines = [
         f"[{thought.type}] {_trim_text(_single_line(thought.content), 220)}"
         for thought in thoughts
-        if thought.type != "反思" and thought.content.strip()
+        if thought.type != "reflection" and thought.content.strip()
     ]
     action_lines = [
         _format_action_request_for_review(action_request)
@@ -1597,21 +1692,24 @@ def _degeneration_review_request(
     stimulus_lines = _intervention_stimulus_lines(stimuli)
     conversation_lines = _intervention_conversation_lines(recent_conversations)
     suggestions = intervention["suggestions"][:DEGENERATION_INTERVENTION_MAX_SUGGESTIONS]
-    suggestion_text = "；".join(suggestions) if suggestions else "（无）"
+    none = t(MAIN_NONE_KEY)
+    suggestion_text = "；".join(suggestions) if suggestions else none
+    externalize_value = t("main.yes") if intervention["must_externalize"] else t("main.no")
+    retry_feedback = intervention.get("retry_feedback", none) or none
     return (
-        f"上一次退化发生在：C{intervention['source_cycle_id']}\n"
-        f"退化摘要：{intervention['summary']}\n"
-        f"必须完成的转向：{intervention['required_shift']}\n"
-        f"建议动作：{suggestion_text}\n"
-        f"必须外化：{'是' if intervention['must_externalize'] else '否'}\n"
-        f"上一次失败反馈：{intervention.get('retry_feedback', '（无）')}\n\n"
-        "这一轮新念头：\n"
+        f"{t('main.review_source_cycle', cycle_id=intervention['source_cycle_id'])}\n"
+        f"{t('main.review_summary', summary=intervention['summary'])}\n"
+        f"{t('main.review_required_shift', shift=intervention['required_shift'])}\n"
+        f"{t('main.review_suggestions', suggestions=suggestion_text)}\n"
+        f"{t('main.review_must_externalize', value=externalize_value)}\n"
+        f"{t('main.review_retry_feedback', feedback=retry_feedback)}\n\n"
+        f"{t('main.review_new_thoughts')}\n"
         f"{_join_bullets(thought_lines)}\n\n"
-        "这一轮动作：\n"
-        f"{_join_bullets(action_lines or ['（无）'])}\n\n"
-        "当前刺激与回音：\n"
+        f"{t('main.review_new_actions')}\n"
+        f"{_join_bullets(action_lines or [none])}\n\n"
+        f"{t('main.review_stimuli')}\n"
         f"{_join_bullets(stimulus_lines)}\n\n"
-        "最近对话背景：\n"
+        f"{t('main.review_conv')}\n"
         f"{_join_bullets(conversation_lines)}\n"
     )
 
@@ -1626,8 +1724,8 @@ def _fallback_degeneration_intervention(
     return {
         "source_cycle_id": cycle_id,
         "remaining_cycles": DEGENERATION_INTERVENTION_MAX_CYCLES,
-        "summary": "最近几轮一直在围着同一组念头改写，没有把变化真正推向外界。",
-        "required_shift": "这一轮不要继续解释旧轨道，至少把一个念头外化成面向外界或对话推进的动作。",
+        "summary": t("degeneration.fallback.summary"),
+        "required_shift": t("degeneration.fallback.required_shift"),
         "suggestions": suggestions[:DEGENERATION_INTERVENTION_MAX_SUGGESTIONS],
         "must_externalize": True,
     }
@@ -1658,29 +1756,29 @@ def _fallback_intervention_suggestions(
 ) -> list[str]:
     if _foreground_conversation_present(stimuli):
         return [
-            "优先接住眼前正在发生的对话，把回应明确外化成一条 send_message。",
-            "不要继续解释旧情绪，直接推进这段对话的下一步。",
+            t("degeneration.fallback.conv_suggestion_1"),
+            t("degeneration.fallback.conv_suggestion_2"),
         ]
     if _action_result_present(stimuli):
         return [
-            "围绕刚收到的行动结果继续推进，不要再回头改写同一组念头。",
-            "把结果转成下一步动作，而不是继续内耗。",
+            t("degeneration.fallback.result_suggestion_1"),
+            t("degeneration.fallback.result_suggestion_2"),
         ]
     if recent_conversations:
         return [
-            "从最近这段对话里挑一个最具体的人或问题继续推进，不要再绕回旧意象。",
-            "如果没有明确对象，就改成一次面向外界的 reading、search 或 weather。",
+            t("degeneration.fallback.recent_conv_suggestion_1"),
+            t("degeneration.fallback.recent_conv_suggestion_2"),
         ]
     return [
-        "从外界抓一个新锚点：reading、search、news、weather 或 web_fetch 中任选一个推进。",
-        "不要再围着原来的情绪和意象改写。",
+        t("degeneration.fallback.no_context_suggestion_1"),
+        t("degeneration.fallback.no_context_suggestion_2"),
     ]
 
 
 def _intervention_thought_lines(recent_thoughts: list[Thought], thoughts: list[Thought]) -> list[str]:
     grouped: dict[int, list[str]] = {}
     for thought in [*recent_thoughts, *thoughts]:
-        if thought.type == "反思":
+        if thought.type == "reflection":
             continue
         content = _trim_text(_single_line(_normalize_cycle_text(thought.content)), 180)
         if not content:
@@ -1690,11 +1788,12 @@ def _intervention_thought_lines(recent_thoughts: list[Thought], thoughts: list[T
     lines: list[str] = []
     for cycle_key in recent_cycle_ids:
         lines.append(f"C{cycle_key}: {'；'.join(grouped[cycle_key][:3])}")
-    return lines or ["（无）"]
+    return lines or [t(MAIN_NONE_KEY)]
 
 
 def _intervention_stimulus_lines(stimuli: list[Stimulus]) -> list[str]:
     lines: list[str] = []
+    empty = t("main.empty")
     for stimulus in stimuli[:6]:
         content = _trim_text(_single_line(stimulus.content), 180)
         label = stimulus.type
@@ -1703,8 +1802,8 @@ def _intervention_stimulus_lines(stimuli: list[Stimulus]) -> list[str]:
             action_type = str(stimulus.metadata.get("action_type") or "").strip()
             if action_type:
                 label = f"{action_type}/{status or 'result'}"
-        lines.append(f"[{label}] {content or '（空）'}")
-    return lines or ["（无）"]
+        lines.append(f"[{label}] {content or empty}")
+    return lines or [t(MAIN_NONE_KEY)]
 
 
 def _intervention_conversation_lines(recent_conversations: list[RecentConversationPrompt]) -> list[str]:
@@ -1715,7 +1814,11 @@ def _intervention_conversation_lines(recent_conversations: list[RecentConversati
         message_lines = [
             _trim_text(
                 _single_line(
-                    f"{message['speaker_name']}：{message['content']}"
+                    t(
+                        "prompt.format.speaker_line",
+                        speaker=message["speaker_name"],
+                        content=message["content"],
+                    )
                 ),
                 140,
             )
@@ -1725,7 +1828,7 @@ def _intervention_conversation_lines(recent_conversations: list[RecentConversati
         parts = [part for part in [summary, *message_lines] if part]
         if parts:
             lines.append(f"{source_label} -> {'；'.join(parts)}")
-    return lines or ["（无）"]
+    return lines or [t(MAIN_NONE_KEY)]
 
 
 def _foreground_conversation_present(stimuli: list[Stimulus]) -> bool:
@@ -1774,7 +1877,7 @@ def _parse_json_object_response(raw_text: str) -> JsonObject | None:
 def _load_json_object(raw_text: str) -> JsonObject | None:
     try:
         parsed = json.loads(raw_text)
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return None
     return coerce_json_object(parsed)
 
@@ -2114,8 +2217,8 @@ def _store_to_ltm(
     if not ltm.available:
         return
     seen_contents: set[str] = set()
-    for t in thoughts:
-        clean_content = _sanitize_ltm_content(t.content)
+    for thought in thoughts:
+        clean_content = _sanitize_ltm_content(thought.content)
         if not clean_content or clean_content in seen_contents:
             continue
         seen_contents.add(clean_content)
@@ -2280,7 +2383,7 @@ def _detect_runtime_degeneration(recent_thoughts: list[Thought], current_thought
         [
             normalized
             for thought in grouped[cycle_id]
-            if thought.type != "反思"
+            if thought.type != "reflection"
             and (normalized := _normalize_cycle_text(thought.content))
         ]
         for cycle_id in recent_cycle_ids
@@ -2318,12 +2421,12 @@ def _recent_conversation_summary_request(
     existing_summary: str,
     transcript: str,
 ) -> str:
-    existing = existing_summary or "（无）"
+    existing = existing_summary or t(MAIN_NONE_KEY)
     return (
-        f"对方名字：{source_name}\n\n"
-        f"已有摘要：\n{existing}\n\n"
-        f"需要并入的新旧消息（按时间顺序）：\n{transcript}\n\n"
-        "请输出一段新的摘要（严格遵守字数限制，不要超过），用来替换上面的旧摘要。"
+        f"{t('main.conv_summary_subject', name=source_name)}\n\n"
+        f"{t('main.conv_summary_existing')}\n{existing}\n\n"
+        f"{t('main.conv_summary_messages')}\n{transcript}\n\n"
+        f"{t('main.conv_summary_instruction')}"
     )
 
 
@@ -2356,13 +2459,13 @@ def _recent_conversation_summary_line(
     source_name: str,
 ) -> str:
     role = str(entry.get("role") or "").strip()
-    speaker = "我" if role == "assistant" else source_name
+    speaker = t("main.conv_summary_speaker_self") if role == "assistant" else source_name
     content = " ".join(str(entry.get("content") or "").split())
     if not content:
         return ""
     max_content_chars = max(1, RECENT_CONVERSATION_SUMMARY_BATCH_MAX_CHARS - len(speaker) - 1)
     content = _clip_recent_conversation_summary_content(content, max_content_chars)
-    return f"{speaker}：{content}"
+    return t("prompt.format.speaker_line", speaker=speaker, content=content)
 
 
 def _clip_recent_conversation_summary_content(content: str, max_chars: int) -> str:
@@ -2374,26 +2477,28 @@ def _clip_recent_conversation_summary_content(content: str, max_chars: int) -> s
 
 
 def _conversation_summary_system_prompt(existing_summary: str) -> str:
+    base = _recent_conversation_summary_base_prompt()
     existing_len = len(existing_summary)
-    if existing_len > RECENT_CONVERSATION_SUMMARY_TARGET_CHARS * 2:
-        return (
-            RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT
-            + f"旧摘要已严重超出字数限制（{existing_len} 字），"
-            f"务必大幅压缩，只保留最核心的信息，确保新摘要在 {RECENT_CONVERSATION_SUMMARY_TARGET_CHARS} 字以内。"
+    target = RECENT_CONVERSATION_SUMMARY_TARGET_CHARS
+    if existing_len > target * 2:
+        return base + t(
+            "degeneration.conv_summary_severely_overlong",
+            existing_len=existing_len,
+            target_chars=target,
         )
-    if existing_len > RECENT_CONVERSATION_SUMMARY_TARGET_CHARS:
-        return (
-            RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT
-            + f"旧摘要已超出字数限制（{existing_len} 字），"
-            f"请在保留重要信息的前提下压缩到 {RECENT_CONVERSATION_SUMMARY_TARGET_CHARS} 字以内。"
+    if existing_len > target:
+        return base + t(
+            "degeneration.conv_summary_overlong",
+            existing_len=existing_len,
+            target_chars=target,
         )
-    return RECENT_CONVERSATION_SUMMARY_SYSTEM_PROMPT
+    return base
 
 
 def _clean_recent_conversation_summary(raw_summary: JsonValue) -> str:
     """Clean LLM output but do NOT truncate — store the full text."""
     summary = " ".join(str(raw_summary or "").split()).strip()
-    for prefix in ("摘要：", "对话摘要：", "新的摘要："):
+    for prefix in t("main.conv_summary_prefixes").split("|"):
         if summary.startswith(prefix):
             summary = summary[len(prefix):].strip()
     return summary
@@ -2415,7 +2520,7 @@ def _maybe_reconnect_redis(
         return last_attempt
     client = _connect_redis()
     if client and stm.attach_redis(client):
-        _output(log_file, "Redis 已恢复")
+        _output(log_file, t("main.redis_restored"))
     return now
 
 
@@ -2451,10 +2556,10 @@ def _maybe_reconnect_pg(
         if habit_memory is not None:
             habit_memory.attach_connection(None)
         conn.close()
-        _output(log_file, "PostgreSQL 恢复后初始化失败，稍后重试")
+        _output(log_file, t("main.pg_init_failed"))
         return identity, now
     ltm.attach_connection(conn)
-    _output(log_file, "PostgreSQL 已恢复")
+    _output(log_file, t("main.pg_restored"))
     return restored_identity, now
 
 
@@ -2488,12 +2593,13 @@ def _connect_pg() -> psycopg.Connection | None:
 def _print_cycle(log_file: TextIO | None, cycle_id: int, thoughts: list[Thought]) -> None:
     print(f"\n{C_DIM}── C{cycle_id} ──{C_RESET}")
     lines = [f"── C{cycle_id} ──"]
-    for t in thoughts:
-        color = C_TYPE.get(t.type, "")
-        trigger = f" {C_DIM}(← {t.trigger_ref}){C_RESET}" if t.trigger_ref else ""
-        print(f"  {color}[{t.type}]{C_RESET} {t.content}{trigger}")
-        plain_trigger = f" (← {t.trigger_ref})" if t.trigger_ref else ""
-        lines.append(f"  [{t.type}] {t.content}{plain_trigger}")
+    for thought in thoughts:
+        color = C_TYPE.get(thought.type, "")
+        display_type = localized_thought_type(thought.type)
+        trigger = f" {C_DIM}(← {thought.trigger_ref}){C_RESET}" if thought.trigger_ref else ""
+        print(f"  {color}[{display_type}]{C_RESET} {thought.content}{trigger}")
+        plain_trigger = f" (← {thought.trigger_ref})" if thought.trigger_ref else ""
+        lines.append(f"  [{display_type}] {thought.content}{plain_trigger}")
     _write_log_message(log_file, "\n".join(lines))
 
 
@@ -2501,8 +2607,9 @@ def _print_stimuli(log_file: TextIO | None, stimuli: list[Stimulus]) -> None:
     if not stimuli:
         return
 
-    print(f"{C_DIM}刺激{C_RESET}")
-    lines = ["刺激"]
+    header = t("main.stimuli_header")
+    print(f"{C_DIM}{header}{C_RESET}")
+    lines = [header]
     for stimulus in stimuli:
         display_content = _stimulus_display_content(stimulus)
         print(f"  {C_DIM}[{stimulus.type}]{C_RESET} {display_content}")
@@ -2592,8 +2699,9 @@ def _thought_event_payload(cycle_id: int, thoughts: list[Thought]) -> ThoughtEve
 
 
 def _thought_event_line(thought: Thought) -> str:
+    display_type = localized_thought_type(thought.type)
     plain_trigger = f" (← {thought.trigger_ref})" if thought.trigger_ref else ""
-    return f"[{thought.type}] {thought.content}{plain_trigger}"
+    return f"[{display_type}] {thought.content}{plain_trigger}"
 
 
 # -- Utilities -------------------------------------------------------------
@@ -2654,7 +2762,9 @@ def _load_config(path: str) -> dict:
     try:
         return load_yaml_config(path, required=True)
     except FileNotFoundError:
-        print(f"配置文件不存在: {path}", file=sys.stderr)
+        from core.i18n import init as init_i18n, t
+        init_i18n("zh")
+        print(t("main.config_not_found", path=path), file=sys.stderr)
         sys.exit(1)
 
 
@@ -2711,7 +2821,7 @@ def _install_signal_handler(
         if shutting_down:
             return
         shutting_down = True
-        print(f"\n\n{C_DIM}心相续止息。{C_RESET}")
+        print(f"\n\n{C_DIM}{t('main.shutdown')}{C_RESET}")
         drained = action_manager.shutdown_with_timeout(wait_timeout_seconds=5.0)
         if log_file:
             log_file.close()

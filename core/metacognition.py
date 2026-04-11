@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 import redis as redis_lib
 
+from core.i18n import t
 from core.model_client import MODEL_CLIENT_EXCEPTIONS, ModelClient
 from core.thought_parser import Thought
 from core.common_types import (
@@ -16,7 +17,6 @@ from core.common_types import (
 
 REFLECTIONS_KEY = "seedwake:reflections"
 REFLECTION_STATE_KEY = "seedwake:reflection_state"
-REFLECTION_HEADER_PATTERN = re.compile(r"^\[反思(?:-C\d+-\d+)?]\s*(?P<content>.+)$", re.MULTILINE)
 MAX_REFLECTIONS = 20
 METACOGNITION_REDIS_EXCEPTIONS = (
     redis_lib.RedisError,
@@ -27,13 +27,25 @@ METACOGNITION_REDIS_EXCEPTIONS = (
 )
 logger = logging.getLogger(__name__)
 
-REFLECTION_SYSTEM_PROMPT = (
-    "你在做一次元认知反思。"
-    "回看最近的念头流、情绪、目标、习气和失败情况，"
-    "用\"我\"做主语，写出一条简洁、具体的中文反思。"
-    "输出必须只有一行，格式是：[反思] ...。"
-    "不要给建议清单，不要解释规则。"
-)
+# Lazy-initialized pattern (built on first use from i18n label)
+_reflection_header_pat: re.Pattern | None = None
+_reflection_header_label: str | None = None
+
+
+def _reflection_header_pattern() -> re.Pattern:
+    global _reflection_header_pat, _reflection_header_label
+    label = t("metacognition.reflection_header_label")
+    if _reflection_header_pat is None or _reflection_header_label != label:
+        _reflection_header_label = label
+        _reflection_header_pat = re.compile(
+            rf"^\[{re.escape(label)}(?:-C\d+-\d+)?]\s*(?P<content>.+)$", re.MULTILINE,
+        )
+    return _reflection_header_pat
+
+
+def _reflection_system_prompt() -> str:
+    from core.i18n import prompt_block
+    return str(prompt_block("REFLECTION_SYSTEM_PROMPT"))
 
 
 class MetacognitionManager:
@@ -159,7 +171,7 @@ class MetacognitionManager:
             response = client.chat(
                 model=str(model_config["name"]),
                 messages=[
-                    {"role": "system", "content": REFLECTION_SYSTEM_PROMPT},
+                    {"role": "system", "content": _reflection_system_prompt()},
                     {"role": "user", "content": prompt},
                 ],
                 options={"temperature": 0.2, "max_tokens": 200},
@@ -175,7 +187,7 @@ class MetacognitionManager:
             thought_id=f"C{cycle_id}-4",
             cycle_id=cycle_id,
             index=4,
-            type="反思",
+            type="reflection",
             content=reflection_text,
         )
         self._store_reflection(thought)
@@ -246,39 +258,42 @@ def _reflection_request(
         for thought in recent_thoughts[-9:]
         if thought.content.strip()
     )
-    goals_text = "；".join(goals) if goals else "（无）"
-    habits_text = "；".join(habit["pattern"] for habit in habits[:3]) if habits else "（无）"
-    guidance_text = "；".join(prefrontal_state["guidance"]) if prefrontal_state["guidance"] else "（无）"
-    manas_text = "（无）"
+    none = t("metacognition.none")
+    goals_text = "；".join(goals) if goals else none
+    habits_text = "；".join(habit["pattern"] for habit in habits[:3]) if habits else none
+    guidance_text = "；".join(prefrontal_state["guidance"]) if prefrontal_state["guidance"] else none
+    manas_text = none
     if manas_state is not None:
         pieces = []
         if manas_state["warning"]:
             pieces.append(manas_state["warning"])
         if manas_state["session_context"]:
-            pieces.append(f"过渡语境：{manas_state['session_context']}")
+            pieces.append(t("metacognition.transition_context", context=manas_state["session_context"]))
         if manas_state["identity_notice"]:
             pieces.append(manas_state["identity_notice"])
         if pieces:
             manas_text = "；".join(pieces)
+    degen_value = t("metacognition.yes") if degeneration_alert else t("metacognition.no")
     return (
-        f"最近的念头：\n{recent_lines or '（无）'}\n\n"
-        f"当前情绪：{emotion['summary']}\n"
-        f"当前目标：{goals_text}\n"
-        f"活跃习气：{habits_text}\n"
-        f"自我连续性：{manas_text}\n"
-        f"前额叶提醒：{guidance_text}\n"
-        f"最近失败次数：{failure_count}\n"
-        f"是否检测到退化：{'是' if degeneration_alert else '否'}\n"
+        t("metacognition.recent_thoughts_label") + "\n" + (recent_lines or none) + "\n\n"
+        + t("metacognition.emotion_label", summary=emotion["summary"]) + "\n"
+        + t("metacognition.goals_label", text=goals_text) + "\n"
+        + t("metacognition.habits_label", text=habits_text) + "\n"
+        + t("metacognition.manas_label", text=manas_text) + "\n"
+        + t("metacognition.prefrontal_label", text=guidance_text) + "\n"
+        + t("metacognition.failures_label", count=failure_count) + "\n"
+        + t("metacognition.degeneration_label", value=degen_value) + "\n"
     )
 
 
 def _extract_reflection_content(raw_text: str) -> str:
-    match = REFLECTION_HEADER_PATTERN.search(raw_text)
+    match = _reflection_header_pattern().search(raw_text)
     if match is not None:
         return " ".join(match.group("content").split())
     compact = " ".join(raw_text.split())
-    if compact.startswith("反思："):
-        compact = compact.removeprefix("反思：").strip()
+    prefix = t("metacognition.reflection_prefix")
+    if compact.startswith(prefix):
+        compact = compact.removeprefix(prefix).strip()
     return compact[:240]
 
 

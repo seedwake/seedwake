@@ -10,6 +10,7 @@ from typing import Protocol
 
 import redis as redis_lib
 
+from core.i18n import localized_thought_type, prompt_block, t
 from core.embedding import embed_text
 from core.memory.habit import HabitMemory
 from core.memory.long_term import LongTermEntry, LongTermMemory
@@ -594,17 +595,17 @@ def _archive_candidates(thoughts: list[Thought], threshold: float) -> list[Thoug
     return [
         thought
         for thought in thoughts
-        if _sleep_importance(thought) >= threshold or thought.type == "反思"
+        if _sleep_importance(thought) >= threshold or thought.type == "reflection"
     ]
 
 
 def _sleep_importance(thought: Thought) -> float:
     importance = 0.15 + max(0.0, thought.attention_weight) * 0.55
-    if thought.type == "意图":
+    if thought.type == "intention":
         importance += 0.08
-    if thought.type == "反应":
+    if thought.type == "reaction":
         importance += 0.05
-    if thought.type == "反思":
+    if thought.type == "reflection":
         importance += 0.25
     if thought.action_request is not None:
         importance += 0.12
@@ -626,13 +627,14 @@ def _emotion_context_json(emotion: EmotionSnapshot) -> JsonObject:
 
 def _light_sleep_trace_line(thought: Thought) -> str:
     content = " ".join(strip_action_markers(thought.content).split()).strip()
-    return f"[{thought.type}] {content}" if content else ""
+    display_type = localized_thought_type(thought.type)
+    return f"[{display_type}] {content}" if content else ""
 
 
 def _light_sleep_action_result_line(stimulus: Stimulus) -> str:
     action_type = str(stimulus.metadata.get("action_type") or stimulus.type).strip() or stimulus.type
     content = " ".join(stimulus.content.split()).strip()
-    return f"[行动结果/{action_type}] {content}" if content else ""
+    return t("sleep.action_result_label", action_type=action_type, content=content) if content else ""
 
 
 def _archive_action_result_memories(
@@ -749,18 +751,16 @@ def _summarize_light_sleep_batch(
     if not batch:
         return ""
     prompt = (
-        "把下面这些我最近的经历压缩成一条更抽象的语义记忆。"
-        "用第一人称\"我\"，保留事实、关系、认识或稳定结论，"
-        "不要逐条复读，不要项目符号，控制在 180 字以内。\n\n"
-        f"当前情绪：{emotion['summary']}\n"
-        "经历：\n"
+        str(prompt_block("LIGHT_SLEEP_COMPRESS_USER_PROMPT"))
+        + f"\n\n{t('sleep.compress_emotion', summary=emotion['summary'])}\n"
+        + t("sleep.compress_experience") + "\n"
         + "\n".join(f"- {line}" for line in batch)
     )
     try:
         response = client.chat(
             model=str(model_config["name"]),
             messages=[
-                {"role": "system", "content": "你在压缩自己的短期经历，用\"我\"做主语，只输出一条中文语义记忆。"},
+                {"role": "system", "content": str(prompt_block("LIGHT_SLEEP_COMPRESS_SYSTEM_PROMPT"))},
                 {"role": "user", "content": prompt},
             ],
             options={"temperature": 0.2, "max_tokens": 160},
@@ -885,23 +885,19 @@ def _summarize_impression(
         return ""
     contact_hint = _impression_contact_hint(source)
     prompt = (
-        "更新我对一个对话对象的印象摘要。"
-        "根据已有印象和最近互动，用第一人称写一段中文自然语言摘要。"
-        "必须包含：关系、印象、最近互动、情感基调。"
-        "如果有可用联系方式，也要自然保留在摘要里。"
-        "不要项目符号，不要编造，不超过 180 字。\n\n"
-        f"对象：{subject_name}\n"
-        f"source={source}\n"
-        f"联系方式：{contact_hint or '（无）'}\n"
-        f"当前情绪：{emotion['summary']}\n"
-        f"已有印象：{existing_summary or '（无）'}\n"
-        f"最近互动：\n{dialogue}\n"
+        str(prompt_block("IMPRESSION_UPDATE_USER_PROMPT"))
+        + f"\n\n{t('sleep.impression_subject', name=subject_name)}\n"
+        + f"source={source}\n"
+        + t("sleep.impression_contact", hint=contact_hint or t("metacognition.none")) + "\n"
+        + t("sleep.impression_emotion", summary=emotion['summary']) + "\n"
+        + t("sleep.impression_existing", summary=existing_summary or t("metacognition.none")) + "\n"
+        + t("sleep.impression_recent") + f"\n{dialogue}\n"
     )
     try:
         response = client.chat(
             model=str(model_config["name"]),
             messages=[
-                {"role": "system", "content": "你在生成我对某人的印象摘要，用\"我\"做主语，只输出一段中文摘要。"},
+                {"role": "system", "content": str(prompt_block("IMPRESSION_UPDATE_SYSTEM_PROMPT"))},
                 {"role": "user", "content": prompt},
             ],
             options={"temperature": 0.2, "max_tokens": 300},
@@ -961,16 +957,16 @@ def _ensure_impression_contact(summary: str, contact_hint: str) -> str:
         return compact
     if contact_hint in compact:
         return compact
-    return _trim_generated_text(f"联系方式: {contact_hint}。{compact}", 300)
+    return _trim_generated_text(t("sleep.impression_contact_prefix", contact_hint=contact_hint, compact=compact), 300)
 
 
 def _impression_entry_line(entry: ConversationEntry, subject_name: str) -> str:
     role = str(entry.get("role") or "").strip()
-    speaker = "我" if role == "assistant" else subject_name
+    speaker = t("sleep.impression_speaker_self") if role == "assistant" else subject_name
     content = " ".join(str(entry.get("content") or "").split()).strip()
     if not content:
         return ""
-    return f"{speaker}：{content}"
+    return t("prompt.format.speaker_line", speaker=speaker, content=content)
 
 
 def _conversation_entry_timestamp(entry: ConversationEntry) -> datetime | None:
@@ -1037,7 +1033,7 @@ def _generate_deep_sleep_summary(
     expired_count: int,
 ) -> str:
     prompt = (
-        "请用一句中文总结这次深睡整理的意义，只输出一句自然语言。\n"
+        str(prompt_block("DEEP_SLEEP_SUMMARY_USER_PROMPT")) + "\n"
         f"cycle={cycle_id}\n"
         f"emotion={emotion['summary']}\n"
         f"archived={archived_count}\n"
@@ -1050,7 +1046,7 @@ def _generate_deep_sleep_summary(
         response = client.chat(
             model=str(model_config["name"]),
             messages=[
-                {"role": "system", "content": "你在总结自己的一次深睡整理，用\"我\"做主语。只输出一句中文总结。"},
+                {"role": "system", "content": str(prompt_block("DEEP_SLEEP_SUMMARY_SYSTEM_PROMPT"))},
                 {"role": "user", "content": prompt},
             ],
             options={"temperature": 0.2, "max_tokens": 120},
@@ -1079,9 +1075,7 @@ def _generate_deep_sleep_review(
     expired_count: int,
 ) -> str:
     prompt = (
-        "这是一次深睡后的自我评估。"
-        "请用第一人称，一小段中文总结我的近期状态，并给出一条最值得关注的调整方向。"
-        "不要项目符号，不超过 220 字。\n\n"
+        str(prompt_block("DEEP_SLEEP_REVIEW_USER_PROMPT")) + "\n\n"
         f"cycle={cycle_id}\n"
         f"emotion={emotion['summary']}\n"
         f"sleep_summary={sleep_summary}\n"
@@ -1097,7 +1091,7 @@ def _generate_deep_sleep_review(
         response = client.chat(
             model=str(model_config["name"]),
             messages=[
-                {"role": "system", "content": "你在做自己的深睡自评，用\"我\"做主语，只输出一段中文总结。"},
+                {"role": "system", "content": str(prompt_block("DEEP_SLEEP_REVIEW_SYSTEM_PROMPT"))},
                 {"role": "user", "content": prompt},
             ],
             options={"temperature": 0.2, "max_tokens": 220},
@@ -1119,8 +1113,8 @@ def _trim_generated_text(value: object, limit: int) -> str:
 
 def _sleep_summary(energy: float, mode: str) -> str:
     if mode == "drowsy":
-        return f"精力 {energy:.1f}/100，开始发困，适合进入浅睡整理。"
-    return f"精力 {energy:.1f}/100，当前仍清醒。"
+        return t("sleep.energy_drowsy", energy=energy)
+    return t("sleep.energy_awake", energy=energy)
 
 
 def _decode_redis_value(value: object) -> str | None:

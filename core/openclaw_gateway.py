@@ -47,7 +47,9 @@ def _websocket_exception_types(exceptions_module: ModuleType) -> tuple[type[Base
 
 ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 CONNECT_TIMEOUT_SECONDS = 10
-OPENCLAW_DEVICE_AUTH_DEPENDENCY_ERROR = "缺少 cryptography 依赖，无法完成 OpenClaw device auth。"
+def _openclaw_device_auth_dependency_error() -> str:
+    from core.i18n import t
+    return t("openclaw.missing_cryptography")
 OPENCLAW_TRANSPORT_EXCEPTIONS = (
     OllamaRequestError,
     OllamaResponseError,
@@ -112,13 +114,14 @@ class OpenClawGatewayExecutor:
         self._device_identity_path = device_identity_path or "data/openclaw/device.json"
 
     def execute(self, action: "ActionRecord") -> ActionResultEnvelope:
+        from core.i18n import t
         started_at = time.perf_counter()
         transport = "unavailable"
         status = "failed"
         if not self._gateway_url:
-            raise OpenClawUnavailableError("OPENCLAW_GATEWAY_URL 未配置")
+            raise OpenClawUnavailableError(t("openclaw.url_not_configured"))
         if not self._gateway_token:
-            raise OpenClawUnavailableError("OPENCLAW_GATEWAY_TOKEN 未配置")
+            raise OpenClawUnavailableError(t("openclaw.token_not_configured"))
 
         try:
             transport = "ws"
@@ -146,6 +149,7 @@ class OpenClawGatewayExecutor:
             )
 
     async def _execute_ws(self, action: "ActionRecord") -> ActionResultEnvelope:
+        from core.i18n import t
         websockets = _import_websockets()
         identity = _load_or_create_device_identity(self._device_identity_path)
 
@@ -155,7 +159,7 @@ class OpenClawGatewayExecutor:
                 challenge = await client.recv_event("connect.challenge", CONNECT_TIMEOUT_SECONDS)
                 nonce = str(challenge.get("payload", {}).get("nonce", "")).strip()
                 if not nonce:
-                    raise RuntimeError("Gateway connect.challenge 缺少 nonce")
+                    raise RuntimeError(t("openclaw.challenge_missing_nonce"))
 
                 connect_id = uuid4().hex
                 await client.send_request(
@@ -212,7 +216,7 @@ class OpenClawGatewayExecutor:
                     await _abort_session(client, session_key, run_id, timeout_seconds=5)
                     return _build_gateway_result(
                         ok=False,
-                        summary="行动超时",
+                        summary=t("openclaw.action_timeout"),
                         data={},
                         error_detail="timeout",
                         run_id=run_id or None,
@@ -226,8 +230,9 @@ class OpenClawGatewayExecutor:
                 await client.close()
 
     def _execute_http(self, action: "ActionRecord", ws_error: Exception) -> ActionResultEnvelope:
+        from core.i18n import t
         if not self._http_base_url:
-            raise RuntimeError(f"WS 失败且未配置 HTTP fallback: {ws_error}") from ws_error
+            raise RuntimeError(t("openclaw.ws_failed_no_http", error=ws_error)) from ws_error
 
         worker_agent_id = self._resolve_worker_agent_id(action)
         session_key = f"agent:{worker_agent_id}:{self._session_key_prefix}:{action.action_id}"
@@ -255,7 +260,7 @@ class OpenClawGatewayExecutor:
             detail = exc.read().decode("utf-8", errors="replace")
             return _build_gateway_result(
                 ok=False,
-                summary=f"OpenClaw HTTP fallback 失败: {exc.code}",
+                summary=t("openclaw.http_fallback_failed", code=exc.code),
                 data={},
                 error_detail=detail,
                 run_id=None,
@@ -355,7 +360,8 @@ class _GatewayRpcClient:
     async def _recv_from_queue(self, queue: asyncio.Queue, timeout_seconds: int) -> dict:
         frame = await asyncio.wait_for(queue.get(), timeout_seconds)
         if frame is self._sentinel:
-            raise RuntimeError("Gateway 连接已关闭") from self._reader_error
+            from core.i18n import t
+            raise RuntimeError(t("openclaw.connection_closed")) from self._reader_error
         return frame
 
     async def _reader(self) -> None:
@@ -443,7 +449,9 @@ def _extract_payload_text(result_payload: dict) -> str:
     return "\n\n".join(texts).strip()
 
 
-OPENCLAW_COMPLETION_SUMMARY = "OpenClaw 完成任务"
+def _openclaw_completion_summary() -> str:
+    from core.i18n import t
+    return t("openclaw.completion_summary")
 
 
 def _optional_text(value: JsonValue) -> str | None:
@@ -472,7 +480,7 @@ def _normalize_worker_text(text: str) -> ActionResultEnvelope:
         data = parsed.get("data")
         return _build_gateway_result(
             ok=bool(parsed.get("ok", True)),
-            summary=str(parsed.get("summary") or text or OPENCLAW_COMPLETION_SUMMARY),
+            summary=str(parsed.get("summary") or text or _openclaw_completion_summary()),
             data=dict(data) if isinstance(data, dict) else {},
             error_detail=parsed.get("error"),
             run_id=None,
@@ -487,7 +495,7 @@ def _normalize_worker_text(text: str) -> ActionResultEnvelope:
     if summary is not None or ok is not None or salvaged_data or salvaged_error is not None:
         return _build_gateway_result(
             ok=True if ok is None else ok,
-            summary=summary or text or OPENCLAW_COMPLETION_SUMMARY,
+            summary=summary or text or _openclaw_completion_summary(),
             data=salvaged_data,
             error_detail=salvaged_error,
             run_id=None,
@@ -497,7 +505,7 @@ def _normalize_worker_text(text: str) -> ActionResultEnvelope:
         )
     return _build_gateway_result(
         ok=True,
-        summary=text or OPENCLAW_COMPLETION_SUMMARY,
+        summary=text or _openclaw_completion_summary(),
         data={},
         error_detail=None,
         run_id=None,
@@ -619,16 +627,16 @@ def _format_gateway_error(frame: dict) -> str:
     message = error_info.get("message")
     if isinstance(message, str) and message.strip():
         return message.strip()
-    return "OpenClaw Gateway 请求失败"
+    from core.i18n import t
+    return t("openclaw.request_failed")
 
 
 def _import_websockets() -> _WebsocketsModule:
     try:
         import websockets
     except ImportError as exc:
-        raise RuntimeError(
-            "缺少 websockets 依赖，无法使用 OpenClaw WS。可安装依赖或启用 HTTP fallback。"
-        ) from exc
+        from core.i18n import t
+        raise RuntimeError(t("openclaw.missing_websockets")) from exc
     return cast(_WebsocketsModule, cast(object, websockets))
 
 
@@ -652,7 +660,7 @@ def _load_or_create_device_identity(path_str: str) -> dict[str, str]:
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric import ed25519
     except ImportError as exc:
-        raise RuntimeError(OPENCLAW_DEVICE_AUTH_DEPENDENCY_ERROR) from exc
+        raise RuntimeError(_openclaw_device_auth_dependency_error()) from exc
     private_key = ed25519.Ed25519PrivateKey.generate()
     public_key = private_key.public_key()
     public_key_pem = public_key.public_bytes(
@@ -694,7 +702,7 @@ def _public_key_raw_from_pem(public_key_pem: str) -> bytes:
     try:
         from cryptography.hazmat.primitives import serialization
     except ImportError as exc:
-        raise RuntimeError(OPENCLAW_DEVICE_AUTH_DEPENDENCY_ERROR) from exc
+        raise RuntimeError(_openclaw_device_auth_dependency_error()) from exc
     key = serialization.load_pem_public_key(public_key_pem.encode("utf-8"))
     spki = key.public_bytes(
         encoding=serialization.Encoding.DER,
@@ -709,7 +717,7 @@ def _sign_device_payload(private_key_pem: str, payload: str) -> str:
     try:
         from cryptography.hazmat.primitives import serialization
     except ImportError as exc:
-        raise RuntimeError(OPENCLAW_DEVICE_AUTH_DEPENDENCY_ERROR) from exc
+        raise RuntimeError(_openclaw_device_auth_dependency_error()) from exc
     private_key = serialization.load_pem_private_key(
         private_key_pem.encode("utf-8"),
         password=None,

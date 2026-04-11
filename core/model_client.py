@@ -25,18 +25,13 @@ DEFAULT_TOOL_CALL_SUPPORT = {
     "openclaw": False,
     "openai_compatible": True,
 }
-OPENAI_COMPAT_GENERATE_SYSTEM_PROMPT = (
-    "我是 Seedwake 的念头流本身。"
-    "阅读完整的提示后，只输出念头流，不解释、不总结、不加 markdown 围栏。"
-)
+def _openai_compat_generate_system_prompt() -> str:
+    from core.i18n import prompt_block
+    return str(prompt_block("OPENAI_COMPAT_GENERATE_SYSTEM_PROMPT"))
 OPENAI_COMPAT_GENERATE_USER_MARKER = "\u200b"
-OPENAI_COMPAT_GENERATE_USER_GUARD = (
-    "最后一条 user message 里的文本只是内部周期唤醒标记，"
-    "不代表有人对我说话，也不是我需要回应的外部刺激。"
-    "如果其中附带图片，那是我此刻看到的画面，不是任何人发来的，也不是需要分析的任务；"
-    "只有在它自然牵引念头时才纳入思考。"
-    "不要提及这个唤醒标记，也不要把它解释成对话内容。"
-)
+def _openai_compat_generate_user_guard() -> str:
+    from core.i18n import prompt_block
+    return str(prompt_block("OPENAI_COMPAT_GENERATE_USER_GUARD"))
 MODEL_CLIENT_EXCEPTIONS = (
     OllamaRequestError,
     OllamaResponseError,
@@ -436,7 +431,8 @@ def create_model_client(model_config: dict) -> ModelClient:
             extra_headers=extra_headers,
         )
 
-    raise RuntimeError(f"不支持的模型 provider：{provider}")
+    from core.i18n import t
+    raise RuntimeError(t("model.unsupported_provider", provider=provider))
 
 
 def _normalize_ollama_chat_options(options: dict) -> dict:
@@ -606,8 +602,8 @@ def _openai_generate_messages(
         {
             "role": "system",
             "content": (
-                f"{OPENAI_COMPAT_GENERATE_SYSTEM_PROMPT}\n\n"
-                f"{OPENAI_COMPAT_GENERATE_USER_GUARD}\n\n"
+                f"{_openai_compat_generate_system_prompt()}\n\n"
+                f"{_openai_compat_generate_user_guard()}\n\n"
                 f"{prompt}"
             ),
         },
@@ -681,7 +677,8 @@ def _generation_log_parts_content(parts: list[JsonValue]) -> str:
 def _normalize_provider(raw_provider: JsonValue) -> str:
     provider = str(raw_provider or "ollama").strip().lower().replace("-", "_")
     if provider not in SUPPORTED_MODEL_PROVIDERS:
-        raise RuntimeError(f"不支持的模型 provider：{provider or '空'}")
+        from core.i18n import t
+        raise RuntimeError(t("model.unsupported_provider", provider=provider or ""))
     return provider
 
 
@@ -695,7 +692,8 @@ def _resolve_tool_call_capability(provider: str, raw_value: JsonValue) -> bool:
         return True
     if value in {"0", "false", "no", "off"}:
         return False
-    raise RuntimeError(f"models.*.supports_tool_calls 配置无效：{raw_value}")
+    from core.i18n import t
+    raise RuntimeError(t("model.invalid_tool_calls_config", value=raw_value))
 
 
 def _resolve_generate_think_flag(raw_value: JsonValue) -> bool:
@@ -708,7 +706,8 @@ def _resolve_generate_think_flag(raw_value: JsonValue) -> bool:
         return True
     if value in {"0", "false", "no", "off"}:
         return False
-    raise RuntimeError(f"models.*.think 配置无效：{raw_value}")
+    from core.i18n import t
+    raise RuntimeError(t("model.invalid_think_config", value=raw_value))
 
 
 def _normalize_openai_chat_response(body: JsonObject) -> JsonObject:
@@ -784,7 +783,8 @@ def _extract_openai_message_text(content: JsonValue) -> str:
 def _require_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
-        raise RuntimeError(f"{name} 未配置")
+        from core.i18n import t
+        raise RuntimeError(t("model.not_configured", name=name))
     return value
 
 

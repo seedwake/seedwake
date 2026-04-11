@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from core.i18n import t
 from core.stimulus import Stimulus
 from core.common_types import MemorySnapshot, PerceptionStimulusPayload, SystemStatusSnapshot
 
@@ -67,7 +68,7 @@ class PerceptionManager:
                 "type": "time",
                 "priority": 4,
                 "source": "system:clock",
-                "content": f"现在是 {now.strftime('%Y-%m-%d %H:%M %Z')}",
+                "content": t("perception.time_content", time_str=now.strftime('%Y-%m-%d %H:%M %Z')),
                 "metadata": {
                     "local_iso": now.isoformat(),
                 },
@@ -85,7 +86,7 @@ class PerceptionManager:
                 "type": "system_status",
                 "priority": 3 if warnings else 4,
                 "source": "system:status",
-                "content": str(system_status.get("summary") or "系统状态已更新"),
+                "content": str(system_status.get("summary") or t("perception.system_status_default")),
                 "metadata": dict(system_status),
             }
             stimuli.append(system_stimulus)
@@ -97,16 +98,16 @@ class PerceptionManager:
         cues = []
 
         if self._should_offer("weather", cycle_id, self._config.weather_cue_interval_cycles, running_actions):
-            cues.append("感知外面的天气——外面现在是什么样的？")
+            cues.append(t("perception.cue.weather"))
 
         if (
             self._config.news_feed_urls
             and self._should_offer("news", cycle_id, self._config.news_cue_interval_cycles, running_actions)
         ):
-            cues.append("了解外界动态——最近发生了什么？")
+            cues.append(t("perception.cue.news"))
 
         if self._should_offer("reading", cycle_id, self._config.reading_cue_interval_cycles, running_actions):
-            cues.append("读一点什么——有什么值得读的吗？")
+            cues.append(t("perception.cue.reading"))
 
         return cues
 
@@ -178,22 +179,26 @@ def collect_system_status_snapshot(
     warnings = []
     load_ratio = load_1m / max(1, cpu_count)
     if load_ratio >= warn_load_ratio:
-        warnings.append("CPU 负载偏高")
+        warnings.append(t("perception.status.cpu_high"))
     if memory_used_ratio is not None and memory_used_ratio >= warn_memory_ratio:
-        warnings.append("内存占用偏高")
+        warnings.append(t("perception.status.memory_high"))
     if disk_used_ratio >= warn_disk_ratio:
-        warnings.append("磁盘占用偏高")
+        warnings.append(t("perception.status.disk_high"))
 
     summary_parts = [
-        f"1 分钟负载 {load_1m:.2f}（{cpu_count} 核）",
-        f"磁盘 {disk_used_ratio:.0%}",
+        t("perception.summary.load", load_1m=load_1m, cpu_count=cpu_count),
+        t("perception.summary.disk", disk_used_ratio=disk_used_ratio),
     ]
     if memory_used_ratio is not None:
-        summary_parts.append(f"内存 {memory_used_ratio:.0%}")
+        summary_parts.append(t("perception.summary.memory", memory_used_ratio=memory_used_ratio))
 
-    summary = "；".join(summary_parts)
+    summary = t("perception.summary.separator").join(summary_parts)
     if warnings:
-        summary = f"{'，'.join(warnings)}。{summary}"
+        summary = t(
+            "perception.summary.warning_prefix",
+            warnings=t("perception.summary.warning_separator").join(warnings),
+            summary=summary,
+        )
 
     return {
         "summary": summary,
