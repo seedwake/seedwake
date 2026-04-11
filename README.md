@@ -307,11 +307,11 @@ All subsequent commands should use `uv run ...` to avoid interference from a sys
 ```bash
 # English bootstrap / English logs / English LLM prompts
 cp config.example.en.yml config.yml
+cp .env.en.example .env
 
 # Or the Chinese version
 # cp config.example.zh.yml config.yml
-
-cp .env.example .env
+# cp .env.zh.example .env
 ```
 
 `config.yml` is the single configuration file read at startup — every subsection below is describing a piece of it.
@@ -619,7 +619,8 @@ seedwake/
 ├── config.example.zh.yml          # Chinese default config template
 ├── config.example.en.yml          # English default config template
 ├── config.yml                     # Actual config (not in version control)
-├── .env.example                   # Environment variable template
+├── .env.en.example                # Environment variable template (English comments)
+├── .env.zh.example                # Environment variable template (Chinese comments)
 ├── .env                           # Actual secrets and connection addresses (not in version control)
 │
 ├── core/                          # Thought-stream engine (the heart of Seedwake)

@@ -307,11 +307,11 @@ uv sync
 ```bash
 # 中文 bootstrap / 中文日志 / 中文 LLM prompt
 cp config.example.zh.yml config.yml
+cp .env.zh.example .env
 
 # 或者英文版本
 # cp config.example.en.yml config.yml
-
-cp .env.example .env
+# cp .env.en.example .env
 ```
 
 `config.yml` 是启动时读取的唯一配置文件，后面所有子节都是对它里面各个段落的说明。
@@ -621,7 +621,8 @@ seedwake/
 ├── config.example.zh.yml          # 中文默认配置模板
 ├── config.example.en.yml          # 英文默认配置模板
 ├── config.yml                     # 实际配置（不进版本库）
-├── .env.example                   # 环境变量模板
+├── .env.en.example                # 环境变量模板（英文注释）
+├── .env.zh.example                # 环境变量模板（中文注释）
 ├── .env                           # 实际密钥与连接地址（不进版本库）
 │
 ├── core/                          # 念头流引擎（Seedwake 的心脏）

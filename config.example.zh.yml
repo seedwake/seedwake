@@ -1,13 +1,13 @@
-# Seedwake Configuration
-# Copy to config.yml and modify as needed.
-# Secrets (tokens, passwords) go in .env — see .env.example.
+# Seedwake 配置文件
+# 复制为 config.yml 后按需修改。
+# 密钥（token、密码）放在 .env 里 —— 参见 .env.zh.example / .env.en.example。
 
 # 语言 / Language: "zh" (中文) or "en" (English)
 # 决定所有 LLM prompt、日志、Telegram 通知的语言。启动时确定，运行中不变。
 language: "zh"
 
 models:
-  # Main model for thought generation
+  # 主模型：生成念头流
   primary:
     provider: "ollama"   # ollama | openclaw | openai_compatible
     # supports_tool_calls:
@@ -22,7 +22,7 @@ models:
     num_ctx: 131072
     temperature: 0.8
 
-  # Auxiliary model for memory consolidation, sleep tasks, etc. (Phase 2+)
+  # 辅助模型：记忆整理、睡眠任务、反思、对话摘要、情绪推断等（Phase 2+）
   auxiliary:
     provider: "ollama"
     name: "qwen3.5:9b"
@@ -30,19 +30,19 @@ models:
     num_ctx: 65536
     temperature: 0.3
 
-  # Embedding model for semantic retrieval (Phase 2+)
+  # embedding 模型：长期记忆和注意力的语义检索（Phase 2+）
   embedding:
-    provider: "ollama"   # Usually keep local even when primary uses remote provider
+    provider: "ollama"   # 建议始终本地，即使 primary 用远程 provider
     name: "qwen3-embedding"
 
 short_term_memory:
-  context_window_size: 30       # rounds kept in prompt context
-  buffer_size: 500              # total rounds in Redis buffer
+  context_window_size: 30       # prompt 上下文里保留多少轮念头
+  buffer_size: 500              # Redis 短期记忆 buffer 里保留多少轮
 
 long_term_memory:
-  retrieval_top_k: 5            # vector search results per cycle
-  time_decay_factor: 0.95       # weighted retrieval decay
-  importance_threshold: 0.1     # prune threshold during sleep
+  retrieval_top_k: 5            # 每 cycle 从 pgvector 召回多少条记忆
+  time_decay_factor: 0.95       # 召回时间加权衰减系数
+  importance_threshold: 0.1     # 睡眠整理时的重要度淘汰阈值
 
 runtime:
   error_retry_delay_seconds: 1.0
@@ -57,9 +57,9 @@ runtime:
 
 actions:
   default_timeout_seconds: 300
-  worker_agent_id: "seedwake-worker"      # dedicated remote OpenClaw agent
-  ops_worker_agent_id: "seedwake-ops"     # dedicated remote OpenClaw ops agent for system/file changes
-  session_key_prefix: "seedwake:action"   # each action gets an isolated OpenClaw session
+  worker_agent_id: "seedwake-worker"      # 普通 OpenClaw worker agent id
+  ops_worker_agent_id: "seedwake-ops"     # 处理 system_change / file_modify 的 ops worker agent id
+  session_key_prefix: "seedwake:action"   # 每个 action 在 OpenClaw 侧独立 session
   use_openclaw_http_fallback: false
   default_weather_location: "replace_me_city"
   auto_execute: [search, web_fetch, news, weather, reading, send_message]
@@ -81,8 +81,8 @@ perception:
   system_status_warn_load_ratio: 1.0
   system_status_warn_memory_ratio: 0.9
   system_status_warn_disk_ratio: 0.9
-  # Camera MJPEG stream URL for visual perception (used by primary generate for multimodal-capable providers)
-  # Leave empty to disable camera input
+  # 摄像头 MJPEG stream，用作主模型生成时的被动视觉输入（仅支持图像输入的 provider 才能启用）
+  # 留空则关闭摄像头输入
   # camera_stream_url: "http://localhost:8081"
 
 habits:
@@ -126,12 +126,12 @@ degeneration:
   similarity_threshold: 0.6
 
 telegram:
-  allowed_user_ids: [123456789]    # Telegram users allowed to chat in private
-  admin_user_ids: [123456789]      # Telegram users allowed to receive action/status updates and approve actions
-  notification_channel_id: -1001234567890  # Optional: send action/status updates to this channel instead of admin DMs
+  allowed_user_ids: [123456789]    # 允许私聊 Seedwake 的 Telegram user id
+  admin_user_ids: [123456789]      # 接收行动审批 / 状态通知、有权批准行动的管理员 user id
+  notification_channel_id: -1001234567890  # 可选：把通知发到某个频道，而不是管理员私聊
 
 admins:
-  - username: alice                # admin / audit identity
+  - username: alice                # 管理员 / 审计身份
     token: "replace_me_admin_token"
 
 prompt:

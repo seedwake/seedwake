@@ -1,6 +1,6 @@
 # Seedwake Configuration
 # Copy to config.yml and modify as needed.
-# Secrets (tokens, passwords) go in .env — see .env.example.
+# Secrets (tokens, passwords) go in .env — see .env.en.example / .env.zh.example.
 
 # Language: "zh" (Chinese) or "en" (English)
 # Determines the language of all LLM prompts, logs, and Telegram notifications.
