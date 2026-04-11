@@ -233,6 +233,14 @@ If you think this is a waste of time, that is also an understandable position. T
 
 ---
 
+## Miscellaneous
+
+Seedwake is a compound of *seed* and *wake*. "Seed" comes from the Yogācāra concept of *bīja* — the seeds stored in the *ālaya-vijñāna* (storehouse consciousness), both the sediment of past experience and the condition under which the next moment of consciousness arises. A well-known formulation in Yogācāra, found in volume 2 of the *Cheng Weishi Lun* (《成唯识论》, translated into Chinese by Xuanzang around 659 CE from the commentary tradition on Vasubandhu's *Triṃśikā* 《唯识三十颂》), goes: "seeds give rise to manifest activity; manifest activity perfumes seeds" (种子生现行，现行熏种子) — seeds give rise to present mental activity, and those activities in turn perfume and modify the stored seeds. Seedwake's chain of short-term memory → habit seeds → long-term memory → the next round of thoughts is a computational correspondent to this structure.
+
+As for *wake*: it is the project's hope that one day the mind-stream really does wake up.
+
+---
+
 ## How It Runs
 
 Seedwake is not a "wait for your commands" service. It is **one host-side process plus a set of container dependencies**. Once the dependencies are up and the core program is started, the thought stream keeps itself going.
