@@ -3,9 +3,9 @@
 > A continuously running AI thought-stream engine, organized around the Buddhist concept of *santāna* — the continuity of mind.
 
 <p align="center">
-  <a href="./README_ZH.md">🌐 中文文档</a> ·
-  <a href="#disclaimer">📖 About</a> ·
-  <a href="#how-it-runs">🚀 Deployment</a> ·
+  <a href="./README_ZH.md">🌐 中文文档</a> |
+  <a href="#disclaimer">📖 About</a> |
+  <a href="#how-it-runs">🚀 Deployment</a> |
   <a href="#contributing">🤝 Contributing</a>
 </p>
 
@@ -20,13 +20,13 @@ This is an **experimental** project.
 - It does not claim rigorous reliability or reproducibility.
 - What it demonstrates is a **way of thinking** — using the Buddhist view of consciousness as an architectural principle for organizing a continuously running AI system — not a tool you can pick up and use, and not a hypothesis with a predetermined answer.
 
-If you are looking for an engineering answer to "will AI become conscious?" — this project does not have one. No one does.
+If you want an engineering answer to "will AI become conscious?", this project cannot provide one. At this point, no one can give that answer.
 
-If you are looking for an honest inquiry — what happens when, in the absence of any agreed understanding of what consciousness is, we build a system organized around Buddhist principles and let it run — then you are in the right place.
+If you're curious what a system organized along Buddhist lines turns into after running for a long time, you're welcome to stay and watch.
 
 ---
 
-## In One Sentence
+## What It Is
 
 Seedwake **does not center on chat or task completion**. It is a system that **never stops thinking**. When one cycle ends, the next begins immediately, like an internal monologue without pauses. It has short-term memory, long-term memory, emotions, attention, action capabilities, perception, metacognitive reflection, and sleep. Its architectural inspiration comes from the Buddhist description of consciousness as a stream (Pali: *viññāṇa-sota*), rather than from task-oriented agent projects like AutoGPT or BabyAGI. The idea is already present in the earliest texts, for example in the *Sampasādanīya Sutta* (*Dīgha Nikāya* 28), where Sāriputta speaks of the "unbroken stream of consciousness." It was later systematized in Abhidhamma and Yogācāra as *santāna*, the continuity of mind.
 
