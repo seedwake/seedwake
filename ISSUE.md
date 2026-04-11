@@ -1,5 +1,7 @@
 # ISSUE: Long-Running Negative Spiral and Regulatory Mechanism Gaps
 
+> Chinese version: [ISSUE_ZH.md](./ISSUE_ZH.md)
+
 ## Date Observed: 2026-04-05
 
 ## Summary
