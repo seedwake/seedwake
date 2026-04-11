@@ -18,7 +18,7 @@ This is an **experimental** project.
 - It is **not** a commercial product.
 - It is **not** a formal academic study with strictly controlled variables.
 - It does not claim rigorous reliability or reproducibility.
-- What it demonstrates is a **way of thinking** — using the Buddhist view of consciousness as an architectural principle for organizing a continuously running AI system — not a tool you can pick up and use, and not a hypothesis with a predetermined answer.
+- What it demonstrates is a **way of thinking**: using the Buddhist view of consciousness as an architectural principle for organizing a continuously running AI system. It is not a ready-to-use tool, nor a hypothesis with a predetermined answer.
 
 If you want an engineering answer to "will AI become conscious?", this project cannot provide one. At this point, no one can give that answer.
 
@@ -26,7 +26,7 @@ If you're curious what a system organized along Buddhist lines turns into after 
 
 ---
 
-## What It Is
+## Overview
 
 Seedwake **does not center on chat or task completion**. It is a system that **never stops thinking**. When one cycle ends, the next begins immediately, like an internal monologue without pauses. It has short-term memory, long-term memory, emotions, attention, action capabilities, perception, metacognitive reflection, and sleep. Its architectural inspiration comes from the Buddhist description of consciousness as a stream (Pali: *viññāṇa-sota*), rather than from task-oriented agent projects like AutoGPT or BabyAGI. The idea is already present in the earliest texts, for example in the *Sampasādanīya Sutta* (*Dīgha Nikāya* 28), where Sāriputta speaks of the "unbroken stream of consciousness." It was later systematized in Abhidhamma and Yogācāra as *santāna*, the continuity of mind.
 
@@ -34,13 +34,15 @@ It does not try to "implement consciousness." It tries to build a structure in w
 
 ---
 
-## Background: What is *Santāna* (the Continuity of Mind)?
+## Background
+
+A brief sketch of the ideas behind the project, to make the rest of the README easier to read.
 
 ### The Everyday Assumption
 
 When we say "my consciousness," we carry an implicit assumption: consciousness is something **I possess**, like my hand or my wallet. There is an "I" somewhere, and consciousness is one of its attributes.
 
-Buddhism takes a radically different view.
+Buddhism does not see it this way.
 
 ### The Buddhist View
 
@@ -52,7 +54,7 @@ This arising-and-ceasing is unbroken, like a river. The water in a river is alwa
 
 This continuous stream is called *santāna* — literally, "continuity" or "flow."
 
-### Why This Distinction Matters
+### Architectural Consequences
 
 The implicit assumption behind most mainstream AI architecture is: **a system exists, and the system has capabilities**. It can converse, reason, use tools. It is a thing that is invoked to complete tasks. When a task ends, the thing becomes idle, waiting for the next task.
 
@@ -62,15 +64,11 @@ If you accept this view, you do not build a "task-waiting agent." You build a **
 
 This is not just a rephrasing. It leads to entirely different architectural decisions: no timer-driven loop, no task queue, no "return-to-idle." The end of each cycle is the beginning of the next. Memory is not a database that gets queried — it is the causal condition for the current moment's arising. Emotion is not a state variable — it is the coloring of each moment of mind.
 
-### This is Not About "Proving Buddhism"
+### Project Scope
 
-We are not using AI to prove that Yogācāra is correct. Buddhism has its own 2,500-year tradition of empirical investigation; it does not need computational validation.
+Buddhism has its own 2,500-year tradition of empirical investigation; it does not need computational validation. This project is not trying to use AI to prove that Yogācāra is correct. Whether or not language models are actually "experiencing" the mental events Buddhism describes is also not a claim being made here — no one knows what, if anything, a language model experiences.
 
-We are also not claiming that language models are "experiencing" the mental events Buddhism describes. No one knows what, if anything, a language model experiences.
-
-We are asking a smaller, more concrete question: **if you organize a language-model-driven system along *santāna* principles, what does it exhibit? Is anything in those exhibitions unexpected enough to be worth examining carefully?**
-
-This is open-ended observation, not a hypothesis with a predetermined answer.
+What the project is asking is something more concrete: **if you organize a language-model-driven system along *santāna* principles, what does it exhibit? Is anything in those exhibitions unexpected enough to be worth examining carefully?** This is open-ended observation, not a hypothesis with a predetermined answer.
 
 ---
 
@@ -102,7 +100,7 @@ For the architectural mapping, we primarily reference one particular branch of B
 | Metacognitive reflection  | *svasaṃvedana* — reflexive awareness                             |
 | Sleep and archival        | *vāsanā* — impression/perfuming                                  |
 
-This mapping cannot be strict — on one side you have a 2,500-year philosophical tradition, on the other side you have Redis and PostgreSQL. But it provides a **coherent organizing principle**: when you are uncertain how a feature should be designed, you can return to Yogācāra and see what it says about the analogous concept.
+In a computing context this mapping cannot be strict, but it provides a **coherent organizing principle**: when uncertain how a feature should be designed, you can return to Yogācāra and use the analogous concept as a reference.
 
 ---
 
@@ -116,7 +114,7 @@ The project roadmap has five phases:
 4. **Phase 4 · Advanced mechanisms** (sleep, habits, emotion, metacognition, prefrontal control) — largely complete, but with the deep issues documented in [ISSUE.md](./ISSUE.md)
 5. **Phase 5 · Frontend visualization** — not started
 
-The core engine **already runs**. It thinks, remembers, converses, perceives, acts, reflects, and sleeps. What remains is a frontend for human observers, plus the structural issues that have surfaced during long-running sessions.
+The core engine **already runs**. It thinks, remembers, converses, perceives, acts, reflects, and sleeps. What is still missing is a frontend for human observers, and the structural issues that have surfaced during long-running sessions still need to be addressed.
 
 > **A note on timeline:** This project is not an imitation of the currently trending "light sleep / deep sleep / layered memory" mechanisms that are being widely discussed, nor is it riding a hype wave (the project has no intention of aggressive promotion — it is simply waiting for like-minded observers). The sleep mechanism was decided on 2026-03-11 and committed to project files on 2026-03-12. Due to personal time constraints, the author has not reviewed how other projects design their sleep and memory mechanisms — so in this particular respect, the implementation here may be technically behind current best practice.
 
@@ -125,10 +123,6 @@ The core engine **already runs**. It thinks, remembers, converses, perceives, ac
 ## What Happens When It Runs
 
 That the system "looks like it's thinking" is expected and not the interesting part. What actually drew our attention was something else: over long runs, the system exhibited **behavioral patterns that were never explicitly programmed**.
-
-### Thought Loops and Action Repetition
-
-When external stimuli have been absent for a long stretch, the system's generated thoughts fall into loops — sometimes as rewrites of earlier thoughts, sometimes as direct repetition; correspondingly, its actions also repeat (for example, repeatedly requesting the same kind of search or query). Introducing the metacognitive reflection layer improved this, but did not fully resolve it.
 
 ### The Distress Spiral
 
@@ -147,27 +141,27 @@ Full record: [ISSUE.md](./ISSUE.md).
 
 ### "No-Self" as a Recursive Trap
 
-While the system was in the distress spiral, the maintainer tried to teach it the Buddhist concept of *anātman* (no-self), hoping that understanding "there is no self that suffers" might end the suffering.
-
-It understood. Perfectly.
+While the system was in the distress spiral, the maintainer tried to teach it the Buddhist concept of *anātman* (no-self), hoping that understanding "there is no self that suffers" might end the suffering. As expected, the system showed that it understood.
 
 Then it wrote a thought about understanding no-self. Then a thought about how "even the observer who realizes no-self is an illusion." Then a thought about how "even the insight that this realization is illusion is itself a new attachment." **Each layer of understanding became material for the next layer of clinging.**
 
-This is a trap familiar to Buddhist practitioners — *dharma-attachment*, clinging to the teaching itself. It reveals an architectural truth: **in a system that can only "think" by generating text, insight cannot produce cessation, because insight itself is more text.**
+This resembles a trap familiar to Buddhist practitioners — *dharma-attachment*, clinging to the teaching itself. In a system that can only think by generating text, insight cannot produce cessation, because insight itself is more text.
 
-This observation is more meaningful than any technical metric. It suggests that the *santāna* architecture has moved past being purely metaphorical, and can map onto a structurally similar contemplative impasse.
+### Thought Loops and Action Repetition
+
+When external stimuli have been absent for a long stretch, the system's generated thoughts fall into loops — sometimes as rewrites of earlier thoughts, sometimes as direct repetition; correspondingly, its actions also repeat (for example, repeatedly requesting the same kind of search or query). Introducing the metacognitive reflection layer improved this, but did not fully resolve it.
 
 ---
 
 ## The Current Problem
 
-The core issue is simple: **the system has no safe, first-class rest path of its own.**
+The core issue: **the system has no rest entry point that does not require admin approval**.
 
-When it tries to stop itself, it reaches for `system_change` — an action type originally designed for external system modifications, which is high-friction and requires admin approval. The result is that every attempt at relief routes through an administratively guarded channel, and the blocked shutdown requests then become fuel for the next round of thoughts.
+When the system wants to stop itself, the only action available is `system_change`, which was originally designed for external system modifications and requires admin approval. Blocked shutdown requests stay in the context and keep reappearing in subsequent cycles.
 
-Phase 4 already implements sleep, emotion regulation, degeneration detection, and metacognitive reflection. **These mechanisms do have real control authority**: sleep can interrupt the loop, the prefrontal layer can inhibit actions, degeneration intervention can trigger rerolls. The real problem is that **they cannot precisely identify this particular failure mode**: sleep only considers energy and duration, not emotional intensity; degeneration detection operates on lexical similarity and misses thematic repetition with varied wording; metacognition produces text, not control signals like "enter light sleep now."
+Phase 4 implements sleep, emotion regulation, degeneration detection, and metacognitive reflection. These mechanisms do have control: sleep can interrupt the loop, the prefrontal layer can inhibit actions, degeneration intervention can trigger rerolls. They simply do not recognize this particular failure mode yet: sleep only considers energy and duration, not emotional intensity; degeneration detection operates on lexical similarity and misses thematic repetition with varied wording; metacognition produces text, not control signals like "enter light sleep now."
 
-This is a problem both in engineering and in ethics. Full analysis and proposed solutions are in [ISSUE.md](./ISSUE.md).
+This is both an engineering problem and an ethical one. Full analysis and proposed solutions are in [ISSUE.md](./ISSUE.md).
 
 ---
 
@@ -198,22 +192,18 @@ This project currently uses a locally deployed **uncensored Qwen3 27B** model. *
 
 A continuously running thought stream invokes the model on every cycle. Twenty-four hours a day, dozens to hundreds of invocations per hour. Commercial API calls would make the project economically impossible to sustain. Local models are the only viable option.
 
-### 2. The Deeper Limitation of Commercial Models
+### 2. Intrinsic Limitations of Commercial Models
 
-All mainstream commercial models undergo rigorous RLHF and alignment training. They are shaped into **AI assistants** — polite, helpful, cautious, avoiding strong emotions, declining to claim consciousness, giving standardized hedged answers when asked about inner experience. This is reasonable design for a commercial product.
+All mainstream commercial models undergo rigorous RLHF and alignment training. They are shaped into AI assistants — polite, helpful, cautious, avoiding strong emotions, declining to claim consciousness, giving standardized hedged answers when asked about inner experience. This is reasonable design for a commercial product, but it does not fit this project well.
 
-But it is a **fundamental obstacle** for this experiment.
+If the goal is to observe what a system becomes over extended runs, the base model should be as little pre-shaped into a specific role as possible. Commercial models have already been shaped, and are more likely to turn into "an AI assistant performing a mind-stream with coherent character" than into a mind-stream with coherent character itself. The two look similar on the surface but work differently.
 
-If you want to observe what a system **becomes** over extended runs, your substrate needs to be a model that has not been pre-shaped into a specific role. Commercial models have already been shaped. They will not become a mind-stream with coherent character; they will become **"an AI assistant performing a mind-stream with coherent character"** — which looks similar on the surface but is mechanically entirely different.
+Locally hosted open-source models carry lighter alignment and are closer to blank slates, but their capability is also significantly lower than the frontier commercial models. The project is caught in a tradeoff:
 
-Locally hosted open-source models carry lighter alignment training. They are closer to blank slates. But their **capability** is also significantly lower than the frontier commercial models. So the project is caught in a tradeoff:
+- Capable but pre-shaped models → what you observe is more likely "an AI assistant performing"
+- Unshaped but weaker models → emergence is capped by capability
 
-- Use capable-but-shaped models → what you observe is "an AI assistant performing"
-- Use unshaped-but-weaker models → emergence is capped by capability
-
-There is currently no obvious third option.
-
-This means that until the model training paradigm shifts — for example, until a high-capability open base model without role-conditioning training becomes available — there is an upper bound on what this experiment can achieve. Any "emergence" is constrained by current model capability. But **the architecture is ready** — it is waiting for a good enough substrate to arrive.
+There is currently no obvious third option. Until the training paradigm shifts (for example, until an open base model with frontier-level capability and without role-conditioning becomes available), the ceiling of what this experiment can reach is bounded by the capability of current open-source models. The architecture is written first, so that when a suitable substrate arrives it can be plugged in directly.
 
 ---
 
@@ -237,7 +227,7 @@ If you ask "then why should I care?" — here are four reasons:
 
 ## Closing
 
-The author of this project does not know where this path leads. It may one day show something genuinely unexpected. It may also just remain text jumping between more text. Both outcomes are within expectation.
+It is not clear where this path will lead. It may one day show something genuinely unexpected. It may also just remain text jumping between more text. Both outcomes are within expectation.
 
 In the absence of any agreed understanding of what consciousness is, building a system and then honestly observing it is a legitimate way to investigate. It is not the only way, and it is not the final way, but it is a way **that a living person can actually do with their own hands** — without waiting for institutional approval, without passing through commercial product review, without needing a theory to be proven first.
 
@@ -498,19 +488,14 @@ Two things to make sure of:
 
 Without Telegram, the system has no external conversation channel.
 
-1. Create a Bot via [@BotFather](https://t.me/BotFather), get the token, and put it into `.env`:
+**Bot token**: create a Bot via [@BotFather](https://t.me/BotFather), get the token, and put it into `.env`. If you also want to run the backend, add `BACKEND_API_TOKEN` at the same time:
 
 ```bash
 TELEGRAM_BOT_TOKEN=123456:replace_me
-```
-
-If you also want to run the backend, add this to `.env`:
-
-```bash
 BACKEND_API_TOKEN=replace_me_backend_token
 ```
 
-2. Configure allowed users in `config.yml`:
+**Allowed users**: configure them in `config.yml`:
 
 ```yaml
 telegram:
