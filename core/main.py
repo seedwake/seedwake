@@ -2070,7 +2070,7 @@ def _display_cycle_terminal(
         color = C_TYPE.get(thought.type, "")
         display_type = localized_thought_type(thought.type)
         trigger = f" {C_DIM}(← {thought.trigger_ref}){C_RESET}" if thought.trigger_ref else ""
-        print(f"  {color}[{display_type}]{C_RESET} {thought.content}{trigger}")
+        print(f"{color}[{display_type}]{C_RESET} {thought.content}{trigger}")
 
 
 def _record_cycle_log(
@@ -2095,7 +2095,7 @@ def _record_cycle_log(
     for thought in thoughts:
         display_type = localized_thought_type(thought.type)
         plain_trigger = f" (← {thought.trigger_ref})" if thought.trigger_ref else ""
-        lines.append(f"  [{display_type}] {thought.content}{plain_trigger}")
+        lines.append(f"[{display_type}] {thought.content}{plain_trigger}")
 
     _write_log_message(log_file, "\n".join(lines))
 
