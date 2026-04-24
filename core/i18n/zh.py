@@ -440,6 +440,7 @@ STRINGS: dict[str, str] = {
     'action.submitted': '行动提交 {action_id} [{type}/{executor}]',
     'action.submitted_status': '已提交',
     'action.running_status': '执行中',
+    'action.planner_declined': '被 planner 拒绝',
     'action.timeout': '行动超时',
     'action.failed': '行动失败：{error}',
     'action.internal_error': '行动内部错误：{error}',

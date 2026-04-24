@@ -71,8 +71,9 @@ const rotation = ref(0);
 const boostPos = ref(0);
 const boostVel = ref(0);
 const BASE_SPEED = 2.6;  // deg/sec → ~140s per revolution
-const STIFFNESS = 0.6;   // softer spring → slower rise, longer fall
-const DAMPING = 1.55;    // ≈ critical damping for k=0.6: no oscillation, full settle ~6s
+const STIFFNESS = 0.15;  // slow, soft spring
+const DAMPING = 0.77;    // critical damping for k=0.15 (c = 2√k): no oscillation,
+                         // peak at ~2.6s, fully settled ~13s
 
 let rafId: number | null = null;
 let lastTime = 0;
@@ -101,8 +102,9 @@ watch(() => props.emotions, (next, prev) => {
     delta += Math.abs((next[d.key] || 0) - (prev[d.key] || 0));
   }
   if (delta > 0.015) {
-    // kick scaled down to match the softer spring (peak amplitude stays comparable)
-    boostVel.value += Math.min(delta * 100, 250);
+    // kick scaled for the slower spring: peak amplitude stays roughly the same
+    // as before (~24 deg/s for a delta of 0.5), but rise/fall is ~2x longer
+    boostVel.value += Math.min(delta * 50, 125);
   }
 }, { deep: true });
 
@@ -124,9 +126,12 @@ const rotationTransform = computed(
   <div class="emotion">
     <svg viewBox="0 0 260 260" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
       <defs>
-        <!-- per-drop radial gradient: dense pigment center → feathered transparent edge -->
+        <!-- Iterate over the static DIMS (not the value-bound `drops` computed) so
+             these defs mount once and are never re-evaluated on emotion updates —
+             otherwise Vue would re-run the v-for on every value change and the
+             SVG gradients/filters would visually flicker. -->
         <radialGradient
-          v-for="d in drops"
+          v-for="d in DIMS"
           :key="`${d.key}-grad`"
           :id="gradId(d.key)"
           cx="50%" cy="50%" r="50%"
@@ -137,9 +142,8 @@ const rotationTransform = computed(
           <stop offset="100%" :stop-color="`oklch(0.72 0.04 ${d.hue})`" stop-opacity="0" />
         </radialGradient>
 
-        <!-- per-drop paper-bleed filter: turbulence displaces the edge irregularly -->
         <filter
-          v-for="d in drops"
+          v-for="d in DIMS"
           :key="`${d.key}-filter`"
           :id="filterId(d.key)"
           x="-30%" y="-30%" width="160%" height="160%"
@@ -166,7 +170,6 @@ const rotationTransform = computed(
           :fill="`url(#${gradId(d.key)})`"
           :filter="`url(#${filterId(d.key)})`"
           :class="['drop', `drop-${d.key}`]"
-          :style="`animation-duration: ${d.breatheSec.toFixed(2)}s;`"
         />
       </g>
     </svg>
@@ -183,12 +186,14 @@ const rotationTransform = computed(
   animation-iteration-count: infinite;
   animation-timing-function: ease-in-out;
 }
-/* stagger so drops don't all pulse in phase */
-.drop-curiosity   { animation-delay:  0s; }
-.drop-satisfied   { animation-delay: -1.4s; }
-.drop-calm        { animation-delay: -2.8s; }
-.drop-concern     { animation-delay: -4.2s; }
-.drop-frustration { animation-delay: -5.6s; }
+/* Per-dim breathing rhythm: duration + phase offset baked into CSS so neither
+   survives Vue re-renders as an inline-style churn (which would restart the
+   animation from scratch every emotion update). */
+.drop-curiosity   { animation-duration: 6.4s; animation-delay:  0s; }
+.drop-satisfied   { animation-duration: 7.3s; animation-delay: -1.4s; }
+.drop-calm        { animation-duration: 8.1s; animation-delay: -2.8s; }
+.drop-concern     { animation-duration: 6.9s; animation-delay: -4.2s; }
+.drop-frustration { animation-duration: 7.6s; animation-delay: -5.6s; }
 
 @keyframes sw-drop-breathe {
   0%, 100% { transform: scale(0.88); opacity: 0.88; }

@@ -101,6 +101,53 @@ def _recent_action_echo_record(
     }, ensure_ascii=False)
 
 
+def _stimulus_queue_record(
+    *,
+    stimulus_id: str,
+    stimulus_type: str,
+    content: str,
+    timestamp: str,
+    source: str,
+    priority: int = 1,
+    action_id: str | None = None,
+    metadata: dict[str, str] | None = None,
+) -> str:
+    return json.dumps({
+        "stimulus_id": stimulus_id,
+        "type": stimulus_type,
+        "priority": priority,
+        "source": source,
+        "content": content,
+        "timestamp": timestamp,
+        "action_id": action_id,
+        "metadata": metadata or {},
+    }, ensure_ascii=False)
+
+
+def _action_result_queue_record(
+    *,
+    stimulus_id: str,
+    action_id: str,
+    content: str,
+    timestamp: str,
+    action_type: str = "weather",
+) -> str:
+    return _stimulus_queue_record(
+        stimulus_id=stimulus_id,
+        stimulus_type="action_result",
+        priority=2,
+        source=f"action:{action_id}",
+        content=content,
+        timestamp=timestamp,
+        action_id=action_id,
+        metadata={
+            "origin": "action",
+            "action_type": action_type,
+            "status": "succeeded",
+        },
+    )
+
+
 class FakePubSub:
     def __init__(self, messages):
         self._messages = messages
@@ -486,6 +533,125 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(body["items"][0]["stimulus_id"], "stim_echo")
         self.assertEqual(body["items"][0]["bucket"], "echo_recent")
         self.assertEqual(body["items"][0]["summary"], "weather returned")
+
+    def test_stimuli_query_dedupes_current_and_recent_echo_for_same_action(self) -> None:
+        self.redis.set(LATEST_CYCLE_KEY, "10")
+        self.redis.rpush(
+            STIMULUS_REDIS_KEY,
+            _action_result_queue_record(
+                stimulus_id="stim_current_echo",
+                action_id="act_1",
+                content="current action result",
+                timestamp="2026-03-27T12:00:01+00:00",
+            ),
+        )
+        self.redis.rpush(
+            RECENT_ACTION_ECHO_KEY,
+            _recent_action_echo_record(
+                cycle_id=9,
+                stimulus_id="stim_recent_echo",
+                action_id="act_1",
+                content="newer cached action result",
+                timestamp="2026-03-27T12:00:03+00:00",
+            ),
+        )
+
+        response = self.client.get(
+            "/api/stimuli?limit=20",
+            headers={"X-API-Token": "token_backend"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["items"][0]["stimulus_id"], "stim_current_echo")
+        self.assertEqual(body["items"][0]["bucket"], "echo_current")
+        self.assertEqual(body["items"][0]["source"], "action:act_1")
+
+    def test_stimuli_query_dedupes_multiple_actions_across_echo_buckets(self) -> None:
+        self.redis.set(LATEST_CYCLE_KEY, "10")
+        for action_id in ["act_1", "act_2"]:
+            self.redis.rpush(
+                STIMULUS_REDIS_KEY,
+                _action_result_queue_record(
+                    stimulus_id=f"stim_current_{action_id}",
+                    action_id=action_id,
+                    content=f"current {action_id}",
+                    timestamp=f"2026-03-27T12:00:0{1 if action_id == 'act_1' else 2}+00:00",
+                ),
+            )
+            self.redis.rpush(
+                RECENT_ACTION_ECHO_KEY,
+                _recent_action_echo_record(
+                    cycle_id=9,
+                    stimulus_id=f"stim_recent_{action_id}",
+                    action_id=action_id,
+                    content=f"recent {action_id}",
+                    timestamp=f"2026-03-27T12:00:0{3 if action_id == 'act_1' else 4}+00:00",
+                ),
+            )
+
+        response = self.client.get(
+            "/api/stimuli?limit=20",
+            headers={"X-API-Token": "token_backend"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["count"], 2)
+        self.assertEqual(
+            {item["source"]: item["bucket"] for item in body["items"]},
+            {"action:act_1": "echo_current", "action:act_2": "echo_current"},
+        )
+        self.assertEqual(
+            {item["stimulus_id"] for item in body["items"]},
+            {"stim_current_act_1", "stim_current_act_2"},
+        )
+
+    def test_stimuli_query_dedupes_passive_by_stimulus_id_only(self) -> None:
+        self.redis.rpush(
+            STIMULUS_REDIS_KEY,
+            _stimulus_queue_record(
+                stimulus_id="stim_time",
+                stimulus_type="time",
+                source="system:time",
+                content="older time",
+                timestamp="2026-03-27T12:00:01+00:00",
+            ),
+        )
+        self.redis.rpush(
+            STIMULUS_REDIS_KEY,
+            _stimulus_queue_record(
+                stimulus_id="stim_time",
+                stimulus_type="time",
+                source="system:time",
+                content="newer time",
+                timestamp="2026-03-27T12:00:03+00:00",
+            ),
+        )
+        self.redis.rpush(
+            STIMULUS_REDIS_KEY,
+            _stimulus_queue_record(
+                stimulus_id="stim_time_other",
+                stimulus_type="time",
+                source="system:time",
+                content="other time",
+                timestamp="2026-03-27T12:00:02+00:00",
+            ),
+        )
+
+        response = self.client.get(
+            "/api/stimuli?limit=20",
+            headers={"X-API-Token": "token_backend"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["count"], 2)
+        self.assertEqual(
+            [(item["stimulus_id"], item["summary"]) for item in body["items"]],
+            [("stim_time", "newer time"), ("stim_time_other", "other time")],
+        )
 
     def test_stimuli_query_merges_pending_and_consumed_by_timestamp(self) -> None:
         self.redis.set(LATEST_CYCLE_KEY, "10")

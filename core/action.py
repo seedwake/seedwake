@@ -266,14 +266,16 @@ class ActionManager:
             conversation_reply_to_message_id = None
         for thought in thoughts:
             for action_index, action_thought in enumerate(self._submitted_action_thoughts(thought)):
+                action_id = self._submitted_action_id(thought.thought_id, action_index)
                 action = self._plan_submitted_action(
                     action_thought,
+                    action_id=action_id,
                     conversation_source=conversation_source,
                     conversation_reply_to_message_id=conversation_reply_to_message_id,
                 )
                 if action is None:
                     continue
-                action.action_id = self._submitted_action_id(thought.thought_id, action_index)
+                action.action_id = action_id
                 self._upsert_action(action)
                 created.append(action)
                 self._dispatch_submitted_action(action)
@@ -284,6 +286,7 @@ class ActionManager:
         self,
         thought: Thought,
         *,
+        action_id: str,
         conversation_source: str | None,
         conversation_reply_to_message_id: str | None,
     ) -> ActionRecord | None:
@@ -300,6 +303,12 @@ class ActionManager:
             logger.info("planner returned no plan for %s (action_type=%s)",
                         thought.thought_id, raw_action_type)
             self._emit_planner_feedback(thought, raw_action_type, skip_reason)
+            self._record_planner_declined_action(
+                thought,
+                action_id=action_id,
+                raw_action_type=raw_action_type,
+                reason=skip_reason,
+            )
             return None
         action = _action_from_plan(
             thought=thought,
@@ -868,6 +877,45 @@ class ActionManager:
             f"planner:{thought.thought_id}",
             summary,
             metadata=metadata,
+        )
+
+    def _record_planner_declined_action(
+        self,
+        thought: Thought,
+        *,
+        action_id: str,
+        raw_action_type: str,
+        reason: str | None,
+    ) -> None:
+        reason_text = (reason or "").strip()
+        result = _failure_result(
+            t("action.planner_declined"),
+            "planner_declined",
+            transport="planner",
+            summary_key="action.planner_declined",
+            summary_params={"reason": reason_text},
+        )
+        action = ActionRecord(
+            action_id=action_id,
+            type=raw_action_type,
+            request=_build_action_request_payload(
+                task=t("action.planner_declined"),
+                reason=reason_text,
+                raw_action=thought.action_request,
+                news_feed_urls=[],
+            ),
+            executor="planner",
+            status="failed",
+            source_thought_id=thought.thought_id,
+            source_content=thought.content,
+            result=result,
+        )
+        self._upsert_action(action)
+        self._publish_action_event(
+            action,
+            "failed",
+            "action.planner_declined",
+            {"reason": reason_text},
         )
 
     def _publish_action_event(

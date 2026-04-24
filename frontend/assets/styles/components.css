@@ -193,7 +193,10 @@ body.drowsy .thoughts { opacity: 0.5; }
   display: grid; grid-template-columns: 64px 1fr;
   gap: 20px; align-items: start;
   position: relative;
-  animation: sw-enter 0.8s ease-out both;
+  /* Per-card enter delay (set inline via --enter-delay in StreamPanel) staggers
+     a batch of thoughts that arrive together so they cascade in instead of
+     popping in all at once. */
+  animation: sw-enter 0.8s ease-out var(--enter-delay, 0ms) both;
   transition: opacity 900ms ease, transform 900ms cubic-bezier(.3,.02,.2,1);
   will-change: opacity, transform;
 }
@@ -229,20 +232,38 @@ html[lang="en"] .thought .body { letter-spacing: 0; font-size: 18px; line-height
   color: var(--ink-faint); letter-spacing: 0.05em;
 }
 .thought .trigger .arrow { color: var(--ink-mute); margin-right: 5px; }
+/* Flex row, vertically center-aligned: dot, sans lowercase `kind`, mono
+   uppercase `state` all sit on one horizontal line. The state gets a 1px
+   translateY nudge downward because mono uppercase glyphs (cap-height) sit
+   visually higher inside the line-box than sans lowercase glyphs (x-height) —
+   aligning box centers alone would leave the state label looking too high. */
 .thought .action-chip {
   margin-top: 12px; display: inline-flex; align-items: center; gap: 8px;
-  padding: 5px 10px 5px 8px; border: 1px solid var(--rule); border-radius: 2px;
-  font-family: var(--sans); font-size: 10px; color: var(--ink-soft);
+  padding: 6px 10px 5px 9px; border: 1px solid var(--rule); border-radius: 2px;
+  font-size: 10px; line-height: 1; color: var(--ink-soft);
   letter-spacing: 0.08em; background: oklch(0.97 0.01 75 / 0.6);
+  white-space: nowrap;
 }
-.action-chip .state-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--st-pending); }
+.action-chip .state-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--st-pending);
+  flex: 0 0 6px;
+}
 .action-chip[data-state="running"]   .state-dot { background: var(--st-running); animation: sw-pulse 1.4s ease-in-out infinite; }
 .action-chip[data-state="succeeded"] .state-dot { background: var(--st-ok); }
 .action-chip[data-state="failed"]    .state-dot { background: var(--st-fail); }
-.action-chip .kind { color: var(--ink); }
+.action-chip .kind {
+  font-family: var(--sans); font-size: 10px; line-height: 1; color: var(--ink);
+  /* sans lowercase sits visually low in the line-box (baseline near bottom,
+     glyph only fills x-height), so nudge up to match the dot's center. */
+  transform: translateY(-1px);
+}
 .action-chip .state {
-  font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.14em;
-  text-transform: uppercase; color: var(--ink-faint);
+  font-family: var(--mono); font-size: 10px; line-height: 1;
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint);
+  /* mono uppercase sits visually high (cap-height extends above x-height),
+     nudge down by the same amount — symmetric with .kind so dot/kind/state
+     all meet at the same horizontal centerline. */
+  transform: translateY(1px);
 }
 @keyframes sw-pulse { 0%,100% { opacity: 0.45; } 50% { opacity: 1; } }
 

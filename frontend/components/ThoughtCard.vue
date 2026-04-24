@@ -77,15 +77,19 @@ const displayContent = computed(() => {
       <div v-if="triggerRef" class="trigger">
         <span class="arrow">←</span>{{ triggerRef }}
       </div>
+      <!-- Only show the chip when we actually know the action's state.
+           If actionStatus is undefined the planner declined the request (no
+           ActionRecord was created in Redis); chip stayed "pending" before,
+           which read as "action stuck" — misleading. Hiding is cleaner. -->
       <div
-        v-if="actionKind"
+        v-if="actionKind && actionStatus"
         class="action-chip"
-        :data-state="actionStatus?.state || 'pending'"
+        :data-state="actionStatus.state"
       >
         <span class="state-dot" />
         <span class="kind">{{ actionKind }}</span>
         <span class="state">
-          {{ t(`action_state.${actionStatus?.state || 'pending'}`) }}
+          {{ t(`action_state.${actionStatus.state}`) }}
         </span>
       </div>
     </div>

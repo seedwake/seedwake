@@ -5,10 +5,12 @@ from concurrent.futures import wait
 from datetime import datetime, timedelta, timezone
 from email.message import Message
 from threading import Barrier
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib import error
 
+from backend.routes.query import list_actions
 from core.i18n import init as _init_i18n
 
 # noinspection PyProtectedMember
@@ -3675,6 +3677,40 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         self.assertEqual(recent, [])
 
+    def test_recent_action_echo_cache_skips_adjacent_duplicate_action_ids(self) -> None:
+        redis_client = ListRedisStub()
+        first_echo = Stimulus(
+            stimulus_id="stim_search_1",
+            type="action_result",
+            priority=2,
+            source="action:act_search",
+            content="第一次搜索完成",
+            action_id="act_search",
+            metadata={"origin": "action", "action_type": "search", "status": "succeeded"},
+        )
+        duplicate_echo = Stimulus(
+            stimulus_id="stim_search_2",
+            type="action_result",
+            priority=2,
+            source="action:act_search",
+            content="第二次重复搜索完成",
+            action_id="act_search",
+            metadata={"origin": "action", "action_type": "search", "status": "succeeded"},
+        )
+
+        remember_recent_action_echoes(_as_conversation_redis(redis_client), 10, [first_echo])
+        remember_recent_action_echoes(_as_conversation_redis(redis_client), 11, [duplicate_echo])
+
+        stored = redis_client.lrange(RECENT_ACTION_ECHO_KEY, 0, -1)
+        recent = load_recent_action_echoes(
+            _as_conversation_redis(redis_client),
+            current_cycle_id=12,
+            exclude_action_ids=set(),
+        )
+
+        self.assertEqual(len(stored), 1)
+        self.assertEqual([stimulus.stimulus_id for stimulus in recent], ["stim_search_1"])
+
     def test_recent_action_echo_cache_keeps_send_message_results_for_following_cycles(self) -> None:
         redis_client = ListRedisStub()
         send_echo = Stimulus(
@@ -3704,6 +3740,37 @@ class PromptBuilderPhase3Tests(unittest.TestCase):
 
         self.assertEqual([stimulus.action_id for stimulus in recent], ["act_send"])
         self.assertEqual(recent[0].metadata["action_type"], "send_message")
+
+    def test_recent_action_echo_cache_keeps_note_rewrite_results_for_following_cycles(self) -> None:
+        redis_client = ListRedisStub()
+        note_echo = Stimulus(
+            stimulus_id="stim_note",
+            type="action_result",
+            priority=2,
+            source="action:act_note",
+            content="[笔记] 我的笔记已覆写",
+            action_id="act_note",
+            metadata={
+                "origin": "action",
+                "action_type": "note_rewrite",
+                "status": "succeeded",
+                "result": {
+                    "ok": True,
+                    "data": {"note": "新的笔记"},
+                },
+            },
+        )
+        remember_recent_action_echoes(_as_conversation_redis(redis_client), 10, [note_echo])
+
+        recent = load_recent_action_echoes(
+            _as_conversation_redis(redis_client),
+            current_cycle_id=11,
+            exclude_action_ids=set(),
+        )
+
+        self.assertEqual([stimulus.action_id for stimulus in recent], ["act_note"])
+        self.assertEqual(recent[0].metadata["action_type"], "note_rewrite")
+        self.assertEqual(recent[0].content, "[笔记] 我的笔记已覆写")
 
     def test_recent_action_echo_cache_keeps_fresh_completion_from_older_cycle(self) -> None:
         redis_client = ListRedisStub()
@@ -5499,6 +5566,44 @@ class ActionManagerTests(unittest.TestCase):
         self.assertEqual(stimulus.type, "action_result")
         self.assertIn("参数不足，先不执行", stimulus.content)
         self.assertIn("我刚才想 news", stimulus.content)
+
+    def test_planner_ignore_persists_failed_action_record(self) -> None:
+        redis_client = _RedisNewsSeenStub()
+        queue = StimulusQueue(redis_client=None)
+        action_events: list[JsonObject] = []
+        manager = _build_action_manager(
+            queue,
+            _Planner((None, "参数不足，先不执行")),
+            redis_client=redis_client,
+            event_callback=lambda event_type, payload: (
+                action_events.append(payload) if event_type == "action" else None
+            ),
+        )
+        try:
+            created = manager.submit_from_thoughts([
+                _make_thought(action_request={"type": "news", "params": ""})
+            ])
+        finally:
+            manager.shutdown()
+
+        self.assertEqual(created, [])
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(redis=redis_client)))
+        response = list_actions(request, "backend_api")
+        items = response["items"]
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertEqual(item["action_id"], "act_C1-1")
+        self.assertEqual(item["type"], "news")
+        self.assertEqual(item["executor"], "planner")
+        self.assertEqual(item["status"], "failed")
+        self.assertEqual(item["source_thought_id"], "C1-1")
+        result = _as_json_object(item["result"])
+        self.assertNotIn("summary_key", result)
+        self.assertEqual(item["summary"]["key"], "action.planner_declined")
+        self.assertEqual(item["summary"]["params"], {"reason": "参数不足，先不执行"})
+        self.assertEqual(action_events[0]["status"], "failed")
+        self.assertEqual(action_events[0]["summary"]["key"], "action.planner_declined")
+        self.assertEqual(action_events[0]["source_thought_id"], "C1-1")
 
     def test_weather_fallback_uses_default_location(self) -> None:
         thought = _make_thought(

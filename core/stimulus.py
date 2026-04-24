@@ -39,7 +39,15 @@ RECENT_CONVERSATION_WINDOW_HOURS = 24
 RECENT_CONVERSATION_SUMMARY_VERSION = 2
 RECENT_CONVERSATION_SUMMARY_MAX_CHARS = 500
 ACTION_ECHO_ORIGIN = "action"
-RECENT_ACTION_ECHO_ACTION_TYPES = {"news", "search", "reading", "web_fetch", "weather", "send_message"}
+RECENT_ACTION_ECHO_ACTION_TYPES = {
+    "news",
+    "search",
+    "reading",
+    "web_fetch",
+    "weather",
+    "send_message",
+    "note_rewrite",
+}
 MERGED_CONVERSATION_HISTORY_METADATA_KEYS = (
     "telegram_user_id",
     "telegram_chat_id",
@@ -623,6 +631,8 @@ def remember_recent_action_echoes(
     if not retained:
         return
     for stimulus in retained:
+        if not _should_append_recent_action_echo(redis_client, stimulus):
+            continue
         started_at = time.perf_counter()
         redis_client.rpush(
             RECENT_ACTION_ECHO_KEY,
@@ -636,6 +646,30 @@ def remember_recent_action_echoes(
         trim_started_at,
         f"key={RECENT_ACTION_ECHO_KEY}, limit={RECENT_ACTION_ECHO_LIMIT}",
     )
+
+
+def _should_append_recent_action_echo(
+    redis_client: ConversationRedisLike,
+    stimulus: Stimulus,
+) -> bool:
+    action_id = str(stimulus.action_id or "").strip()
+    if not action_id:
+        return True
+    started_at = time.perf_counter()
+    raw_items = redis_client.lrange(RECENT_ACTION_ECHO_KEY, -1, -1)
+    _log_redis_operation("lrange", started_at, f"key={RECENT_ACTION_ECHO_KEY}, count={len(raw_items)}")
+    if not raw_items:
+        return True
+    record = _recent_action_echo_record_from_raw(raw_items[-1])
+    if record is None:
+        return True
+    try:
+        previous_stimulus = _stimulus_from_dict(record["stimulus"])
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.warning("skipping malformed latest recent action echo stimulus: %s", exc)
+        return True
+    previous_action_id = str(previous_stimulus.action_id or "").strip()
+    return previous_action_id != action_id
 
 
 def load_recent_action_echoes(

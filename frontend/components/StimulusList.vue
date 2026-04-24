@@ -3,13 +3,35 @@ import type { StimulusQueueItem } from "~/types/api";
 
 const props = defineProps<{ stimuli: StimulusQueueItem[] }>();
 const { t, te } = useI18n();
+const store = useSeedwakeState();
 
 // useSeedwakeState.setStimuli normalizes incoming items to ASC by timestamp
 // (oldest first), matching the conversation/action panel convention. So we
 // just take the trailing N — that gives the newest 10 in oldest-first order,
 // ready for top-to-bottom render with newest at the bottom.
 const MAX_ITEMS = 10;
-const displayItems = computed(() => props.stimuli.slice(-MAX_ITEMS));
+const ACTION_PREFIX = "action:";
+
+// send_message echoes are redundant here — the outbound message already
+// appears in the conversation panel. Cross-reference the stimulus's action
+// source against the actions store to hide them.
+const sendMessageActionIds = computed<Set<string>>(() => {
+  const ids = new Set<string>();
+  for (const a of store.actions.value) {
+    if (a.type === "send_message") ids.add(a.action_id);
+  }
+  return ids;
+});
+
+const displayItems = computed(() => {
+  const filtered = props.stimuli.filter((s) => {
+    const src = (s.source || "").trim();
+    if (!src.startsWith(ACTION_PREFIX)) return true;
+    const actionId = src.slice(ACTION_PREFIX.length);
+    return !sendMessageActionIds.value.has(actionId);
+  });
+  return filtered.slice(-MAX_ITEMS);
+});
 
 const panelRef = ref<HTMLElement | null>(null);
 // Auto-scroll signal tracks the newest item's timestamp, not just length — so

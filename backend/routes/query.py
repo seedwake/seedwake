@@ -40,6 +40,8 @@ REDIS_UNAVAILABLE_RESPONSE = {
 }
 STIMULUS_SUMMARY_MAX_CHARS = 240
 PENDING_STIMULUS_SCAN_LIMIT = 100
+type StimulusBucket = Literal["noticed", "echo_current", "echo_recent"]
+type BucketedStimulus = tuple[StimulusBucket, Stimulus]
 
 
 @router.get("/state", responses=REDIS_UNAVAILABLE_RESPONSE)
@@ -191,10 +193,11 @@ def _merged_stimulus_items(
     consumed_stimuli: list[Stimulus],
     limit: int,
 ) -> list[StimulusQueueItem]:
-    bucketed_stimuli = [
+    bucketed_stimuli: list[BucketedStimulus] = [
         *_bucketed_pending_stimuli(pending_stimuli),
         *[("echo_recent", stimulus) for stimulus in consumed_stimuli],
     ]
+    bucketed_stimuli = _dedup_bucketed_stimuli(bucketed_stimuli)
     bucketed_stimuli.sort(key=lambda item: item[1].timestamp, reverse=True)
     return [
         _stimulus_queue_item(stimulus, bucket)
@@ -202,10 +205,46 @@ def _merged_stimulus_items(
     ]
 
 
+def _dedup_bucketed_stimuli(bucketed_items: list[BucketedStimulus]) -> list[BucketedStimulus]:
+    selected: dict[str, BucketedStimulus] = {}
+    for item in bucketed_items:
+        key = _stimulus_dedup_key(item[1])
+        existing = selected.get(key)
+        if existing is None or _bucketed_stimulus_is_preferred(item, existing):
+            selected[key] = item
+    return list(selected.values())
+
+
+def _stimulus_dedup_key(stimulus: Stimulus) -> str:
+    source = str(stimulus.source or "").strip()
+    if source.startswith("action:"):
+        return source
+    return f"stimulus:{stimulus.stimulus_id}"
+
+
+def _bucketed_stimulus_is_preferred(
+    candidate: BucketedStimulus,
+    existing: BucketedStimulus,
+) -> bool:
+    candidate_priority = _bucket_preference(candidate[0])
+    existing_priority = _bucket_preference(existing[0])
+    if candidate_priority != existing_priority:
+        return candidate_priority > existing_priority
+    return candidate[1].timestamp > existing[1].timestamp
+
+
+def _bucket_preference(bucket: StimulusBucket) -> int:
+    if bucket == "echo_current":
+        return 3
+    if bucket == "noticed":
+        return 2
+    return 1
+
+
 def _bucketed_pending_stimuli(
     stimuli: list[Stimulus],
-) -> list[tuple[Literal["noticed", "echo_current"], Stimulus]]:
-    bucketed: list[tuple[Literal["noticed", "echo_current"], Stimulus]] = []
+) -> list[BucketedStimulus]:
+    bucketed: list[BucketedStimulus] = []
     for stimulus in stimuli:
         if stimulus.type == "conversation":
             continue
@@ -218,7 +257,7 @@ def _bucketed_pending_stimuli(
 
 def _stimulus_queue_item(
     stimulus: Stimulus,
-    bucket: Literal["noticed", "echo_current", "echo_recent"],
+    bucket: StimulusBucket,
 ) -> StimulusQueueItem:
     return {
         "stimulus_id": stimulus.stimulus_id,

@@ -93,6 +93,7 @@ const resumeHint = computed(() => {
             :attended="!!item.attended"
             :visual-index="viForItem(i)"
             :action-status="actionForThought(store.actions.value, item.thought.thought_id)"
+            :style="`--enter-delay: ${(item.thought.index - 1) * 240}ms`"
           />
         </template>
       </div>

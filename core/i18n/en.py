@@ -447,6 +447,7 @@ STRINGS: dict[str, str] = {
     'action.submitted': 'Action submitted {action_id} [{type}/{executor}]',
     'action.submitted_status': 'Submitted',
     'action.running_status': 'Running',
+    'action.planner_declined': 'Planner declined',
     'action.timeout': 'Action timed out',
     'action.failed': 'Action failed: {error}',
     'action.internal_error': 'Action internal error: {error}',
