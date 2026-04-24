@@ -932,6 +932,7 @@ class ActionManager:
             "type": action.type,
             "executor": action.executor,
             "status": status,
+            "request": action.request,
             "source_thought_id": action.source_thought_id,
             "summary": _i18n_text(summary_key, summary_params),
             "run_id": action.run_id,
@@ -964,6 +965,7 @@ class ActionManager:
                 source=source,
                 content=message,
                 metadata={"action_id": action.action_id, "target_name": target_name},
+                event_callback=self._event_callback,
             )
         except ACTION_REDIS_EXCEPTIONS as exc:
             logger.warning("failed to persist native message history for %s: %s", action.action_id, exc)

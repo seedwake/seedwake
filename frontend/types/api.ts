@@ -40,6 +40,7 @@ export interface ActionEventPayload {
   run_id: string | null;
   session_key: string | null;
   awaiting_confirmation: boolean;
+  request?: Record<string, unknown>;
 }
 
 export interface ReplyEventPayload {

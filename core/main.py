@@ -315,7 +315,10 @@ def _build_runtime_components(
         embedding_client=embedding_client,
         embedding_model=embedding_model,
     )
-    stimulus_queue = StimulusQueue(_as_conversation_redis(redis_client))
+    stimulus_queue = StimulusQueue(
+        _as_conversation_redis(redis_client),
+        event_callback=lambda event_type, payload: _publish_event(stm.redis_client, event_type, payload),
+    )
     perception = PerceptionManager.from_config(_perception_config(config))
     emotion = EmotionManager(
         redis_client,

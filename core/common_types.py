@@ -104,6 +104,10 @@ class ConversationEntry(TypedDict):
     message_id: NotRequired[str]
 
 
+class ConversationEntryEventPayload(ConversationEntry):
+    pass
+
+
 class RecentConversationMessage(TypedDict):
     role: str
     speaker_name: str
@@ -242,6 +246,7 @@ class ActionEventPayload(TypedDict):
     type: str
     executor: str
     status: str
+    request: NotRequired[JsonObject]
     source_thought_id: NotRequired[str]
     summary: I18nTextPayload
     run_id: str | None
@@ -328,7 +333,14 @@ class StimuliResponse(TypedDict):
     requested_by: str
 
 
-type EventPayload = ActionEventPayload | ReplyEventPayload | StateEventPayload | StatusEventPayload | ThoughtEventPayload
+type EventPayload = (
+    ActionEventPayload
+    | ConversationEntryEventPayload
+    | ReplyEventPayload
+    | StateEventPayload
+    | StatusEventPayload
+    | ThoughtEventPayload
+)
 
 
 class EventEnvelope(TypedDict):

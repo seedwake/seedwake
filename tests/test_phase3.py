@@ -885,6 +885,22 @@ class StimulusQueueTests(unittest.TestCase):
         self.assertIn(CONVERSATION_HISTORY_KEY, redis_stub.lists)
         self.assertIn('"role": "user"', redis_stub.lists[CONVERSATION_HISTORY_KEY][0])
 
+    def test_conversation_push_publishes_entry_event(self) -> None:
+        redis_stub = ListRedisStub()
+        events = []
+        queue = StimulusQueue(
+            redis_client=_as_conversation_redis(redis_stub),
+            event_callback=lambda event_type, payload: events.append((event_type, payload)),
+        )
+
+        queue.push("conversation", 1, "telegram:1", "你好")
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], "conversation_entry")
+        self.assertEqual(events[0][1]["role"], "user")
+        self.assertEqual(events[0][1]["source"], "telegram:1")
+        self.assertEqual(events[0][1]["content"], "你好")
+
     def test_pop_many_prefers_higher_priority(self) -> None:
         queue = StimulusQueue(redis_client=None)
         queue.push("time", 4, "system:clock", "现在是早上")
@@ -5335,6 +5351,13 @@ class ActionManagerTests(unittest.TestCase):
         action_events = [payload for event_type, payload in events if event_type == "action"]
         self.assertEqual(action_events[0]["summary"]["key"], "action.submitted_status")
         self.assertEqual(action_events[1]["summary"]["key"], "action.running_status")
+        self.assertEqual(action_events[0]["request"]["message_text"], "我在。")
+        self.assertEqual(action_events[1]["request"]["message_text"], "我在。")
+        conversation_events = [payload for event_type, payload in events if event_type == "conversation_entry"]
+        self.assertEqual(len(conversation_events), 1)
+        self.assertEqual(conversation_events[0]["role"], "assistant")
+        self.assertEqual(conversation_events[0]["source"], "telegram:1")
+        self.assertEqual(conversation_events[0]["content"], "我在。")
         self.assertEqual(events[-1][0], "reply")
         self.assertEqual(events[-1][1]["source"], "telegram:1")
         self.assertEqual(events[-1][1]["target_source"], "telegram:1")

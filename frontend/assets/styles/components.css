@@ -215,6 +215,10 @@ body.drowsy .thoughts {
   to   { opacity: var(--op, 1); transform: translateY(0); }
 }
 .thought.exiting { opacity: 0 !important; transform: translateY(-10px); }
+/* deferred-entry: hold the sw-enter animation at its `from` frame while the
+   stream viewport is still gliding to the new bottom, then let it resume once
+   StreamPanel clears the flag. The reveal reads as scroll-first, card-after. */
+.thought.deferred-entry { animation-play-state: paused; }
 
 .thought .gutter { text-align: right; position: relative; }
 .thought .cid { font-family: var(--mono); font-size: 10px; color: var(--ink-faint); letter-spacing: 0.06em; line-height: 1.4; }

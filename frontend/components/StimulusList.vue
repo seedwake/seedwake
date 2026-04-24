@@ -36,11 +36,15 @@ const displayItems = computed(() => {
 const panelRef = ref<HTMLElement | null>(null);
 // Auto-scroll signal tracks the newest item's timestamp, not just length — so
 // when a fresh stimulus replaces an old one (cap stays at 10) we still scroll.
-const { isOverflowing } = useAutoScroll(panelRef, () => {
-  const arr = displayItems.value;
-  if (arr.length === 0) return 0;
-  return new Date(arr[arr.length - 1]!.timestamp).getTime();
-});
+const { isOverflowing } = useAutoScroll(
+  panelRef,
+  () => {
+    const arr = displayItems.value;
+    if (arr.length === 0) return 0;
+    return new Date(arr[arr.length - 1]!.timestamp).getTime();
+  },
+  { smooth: true, idleReturnMs: 12000 },
+);
 
 function typeLabel(type: string): string {
   const key = `stimulus_type.${type}`;

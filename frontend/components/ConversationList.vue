@@ -5,7 +5,11 @@ const props = defineProps<{ entries: ConversationEntry[] }>();
 const { t } = useI18n();
 
 const panelRef = ref<HTMLElement | null>(null);
-const { isOverflowing } = useAutoScroll(panelRef, () => props.entries.length);
+const { isOverflowing } = useAutoScroll(
+  panelRef,
+  () => props.entries.length,
+  { smooth: true, idleReturnMs: 12000 },
+);
 
 function isSelf(entry: ConversationEntry): boolean {
   if (entry.direction === "outbound") return true;

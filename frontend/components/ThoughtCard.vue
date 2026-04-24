@@ -6,6 +6,7 @@ const props = defineProps<{
   attended: boolean;
   visualIndex: number;
   actionStatus?: { state: string; summary: string };
+  deferred?: boolean;
 }>();
 
 const { t } = useI18n();
@@ -40,6 +41,15 @@ const vi = computed(() => Math.min(5, Math.max(0, props.visualIndex)));
 
 const actionKind = computed(() => props.thought.action_request?.type || null);
 
+// Planner LLM runs for ~30s between thought emission and the first `pending`
+// SSE event, which is after drip-feed already revealed the thought. Without a
+// placeholder the chip stays hidden through that window and only lights up at
+// the terminal event — the user sees it "pop in as COMPLETED" out of nowhere.
+// Treat a thought with a raw action_request but no backend-confirmed status
+// as implicit pending; it'll resolve to running/succeeded/failed as events
+// arrive (planner-declined now surfaces as a `failed` event).
+const chipState = computed(() => props.actionStatus?.state || "pending");
+
 // Clean the displayed body:
 //  - strip the trailing `{action:..., content:"..."}` DSL block (rendered via the
 //    action chip instead);
@@ -60,7 +70,7 @@ const displayContent = computed(() => {
 <template>
   <article
     class="thought"
-    :class="{ attended }"
+    :class="{ attended, 'deferred-entry': deferred }"
     :data-type="canonicalType"
     :data-vi="vi"
   >
@@ -77,19 +87,19 @@ const displayContent = computed(() => {
       <div v-if="triggerRef" class="trigger">
         <span class="arrow">←</span>{{ triggerRef }}
       </div>
-      <!-- Only show the chip when we actually know the action's state.
-           If actionStatus is undefined the planner declined the request (no
-           ActionRecord was created in Redis); chip stayed "pending" before,
-           which read as "action stuck" — misleading. Hiding is cleaner. -->
+      <!-- Show the chip whenever the thought has an action_request. Default
+           state is 'pending' until a backend event confirms a different state;
+           codex persists planner-declined actions as `failed`, so the chip
+           won't get stuck pending if the planner ultimately refuses. -->
       <div
-        v-if="actionKind && actionStatus"
+        v-if="actionKind"
         class="action-chip"
-        :data-state="actionStatus.state"
+        :data-state="chipState"
       >
         <span class="state-dot" />
         <span class="kind">{{ actionKind }}</span>
         <span class="state">
-          {{ t(`action_state.${actionStatus.state}`) }}
+          {{ t(`action_state.${chipState}`) }}
         </span>
       </div>
     </div>

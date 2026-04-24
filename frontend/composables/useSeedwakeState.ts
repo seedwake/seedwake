@@ -166,6 +166,19 @@ export function useSeedwakeState() {
       };
       conversation.value = [...conversation.value, entry].slice(-30);
     },
+    appendConversationEntry(entry: ConversationEntry) {
+      // Dedupe by entry_id — backend may emit conversation_entry AND the
+      // pre-existing `reply` event for outbound messages while both code paths
+      // coexist. Prefer the richer of the two (last write wins by id).
+      const idx = conversation.value.findIndex((e) => e.entry_id === entry.entry_id);
+      if (idx >= 0) {
+        const next = [...conversation.value];
+        next[idx] = { ...next[idx], ...entry };
+        conversation.value = next;
+        return;
+      }
+      conversation.value = [...conversation.value, entry].slice(-30);
+    },
     setStimuli(items: StimulusQueueItem[]) {
       // Same action can surface twice in the merged payload: once in pending
       // (`echo_current`) and once in the consumed cache (`echo_recent`), each

@@ -13,7 +13,11 @@ const pendingActions = computed(() =>
 );
 
 const panelRef = ref<HTMLElement | null>(null);
-const { isOverflowing } = useAutoScroll(panelRef, () => pendingActions.value.length);
+const { isOverflowing } = useAutoScroll(
+  panelRef,
+  () => pendingActions.value.length,
+  { smooth: true, idleReturnMs: 12000 },
+);
 
 function stateKey(a: ActionItem): string {
   if (a.awaiting_confirmation) return "awaiting";

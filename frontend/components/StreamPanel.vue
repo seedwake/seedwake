@@ -13,12 +13,22 @@ const store = useSeedwakeState();
 // they arrive paired with the first thought of their cycle.
 const rawItems = computed<StreamItem[]>(() => store.streamItems.value);
 const visibleItems = ref<StreamItem[]>([]);
+// Thoughts whose sw-enter animation is temporarily paused while the viewport
+// smooth-scrolls to the new bottom. The space for the card is already in the
+// layout (so scrollHeight reflects the new bottom), but the card itself stays
+// invisible until the scroll settles — so the reveal reads as "first the view
+// glides to the bottom, then the thought floats up".
+const deferredEntryKeys = ref<Set<string>>(new Set());
 const THOUGHT_INTERVAL_MS = 3000;
+const ENTRY_DEFER_MS = 600;
 
 const streamRef = ref<HTMLElement | null>(null);
 // smooth:true so each release glides the viewport to the new bottom rather than
 // jump-cutting. First population still uses instant scroll inside useAutoScroll.
-useAutoScroll(streamRef, () => visibleItems.value.length, { smooth: true });
+useAutoScroll(streamRef, () => visibleItems.value.length, {
+  smooth: true,
+  idleReturnMs: 12000,
+});
 
 let releaseTimer: ReturnType<typeof setTimeout> | null = null;
 let initialReleaseDone = false;
@@ -28,9 +38,16 @@ function pendingFromRaw(): StreamItem[] {
   return rawItems.value.filter((v) => !have.has(v.key));
 }
 
-function syncRemovals(): void {
-  const rawKeys = new Set(rawItems.value.map((v) => v.key));
-  visibleItems.value = visibleItems.value.filter((v) => rawKeys.has(v.key));
+function syncVisible(): void {
+  // Drop items no longer in raw AND refresh surviving ones to the freshest ref
+  // from rawItems. The second step matters because `attended` flips false for
+  // historical cycles once a new cycle becomes latest — without rewriting the
+  // ref, Vue keeps rendering the thought with its stale attended class.
+  const rawByKey = new Map<string, StreamItem>();
+  for (const item of rawItems.value) rawByKey.set(item.key, item);
+  visibleItems.value = visibleItems.value
+    .filter((v) => rawByKey.has(v.key))
+    .map((v) => rawByKey.get(v.key)!);
 }
 
 function releaseOne(): void {
@@ -38,7 +55,23 @@ function releaseOne(): void {
   const pending = pendingFromRaw();
   if (pending.length === 0) return;
   const item = pending[0]!;
+  // For thoughts, mark the key deferred BEFORE the reactive append, so Vue's
+  // very first render of the card already has the paused animation class in
+  // place — no frame where the card is visible at its final state. Separators
+  // pass through immediately (they're just hairlines).
+  if (item.kind === "thought") {
+    const next = new Set(deferredEntryKeys.value);
+    next.add(item.key);
+    deferredEntryKeys.value = next;
+  }
   visibleItems.value = [...visibleItems.value, item];
+  if (item.kind === "thought") {
+    setTimeout(() => {
+      const next = new Set(deferredEntryKeys.value);
+      next.delete(item.key);
+      deferredEntryKeys.value = next;
+    }, ENTRY_DEFER_MS);
+  }
   if (pendingFromRaw().length > 0) {
     // separators are just cycle dividers — no dwell time before the next thought
     const delay = item.kind === "separator" ? 0 : THOUGHT_INTERVAL_MS;
@@ -47,7 +80,7 @@ function releaseOne(): void {
 }
 
 watch(rawItems, () => {
-  syncRemovals();
+  syncVisible();
   if (pendingFromRaw().length === 0) return;
   if (!initialReleaseDone) {
     // first populate (SSR hydrate / SSE initial snapshot) — release the whole
@@ -145,6 +178,7 @@ const resumeHint = computed(() => {
             v-else-if="item.thought"
             :thought="item.thought"
             :attended="!!item.attended"
+            :deferred="deferredEntryKeys.has(item.key)"
             :visual-index="viForItem(i)"
             :action-status="actionForThought(store.actions.value, item.thought.thought_id)"
           />

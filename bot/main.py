@@ -36,6 +36,7 @@ from core.common_types import (
     ActionEventPayload,
     AuthorizedTelegramUser,
     EventEnvelope,
+    EventPayload,
     I18nTextPayload,
     JsonObject,
     JsonValue,
@@ -226,7 +227,10 @@ async def _handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if not text:
         return
     content = _build_conversation_content(text)
-    queue = StimulusQueue(_as_conversation_redis(redis_client))
+    queue = StimulusQueue(
+        _as_conversation_redis(redis_client),
+        event_callback=lambda event_type, payload: _publish_event(redis_client, event_type, payload),
+    )
     queue.push(
         "conversation",
         1,
@@ -499,6 +503,20 @@ def _as_action_redis(redis_client: redis_lib.Redis | None) -> ActionRedisLike | 
 
 def _as_conversation_redis(redis_client: redis_lib.Redis | None) -> ConversationRedisLike | None:
     return cast(ConversationRedisLike | None, redis_client)
+
+
+def _publish_event(
+    redis_client: redis_lib.Redis,
+    event_type: str,
+    payload: EventPayload,
+) -> None:
+    try:
+        redis_client.publish(EVENT_CHANNEL, json.dumps({
+            "type": event_type,
+            "payload": payload,
+        }, ensure_ascii=False))
+    except BOT_REDIS_EXCEPTIONS:
+        logger.exception("failed to publish bot event %s", event_type)
 
 
 def _mark_redis_unavailable(application: Application) -> None:

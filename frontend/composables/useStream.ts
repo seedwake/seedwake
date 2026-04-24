@@ -3,7 +3,9 @@
 
 import type {
   ActionEventPayload,
+  ActionItem,
   ActionsResponse,
+  ConversationEntry,
   ConversationHistoryResponse,
   ReplyEventPayload,
   StateEventPayload,
@@ -65,7 +67,10 @@ export function useStream() {
     es.addEventListener("action", (e: MessageEvent<string>) => {
       const payload = parseJson<ActionEventPayload>(e.data, "action");
       if (payload) {
-        store.upsertAction({
+        // Only include `request` when the event actually carries one; the field
+        // is optional and a stale-but-correct `request` from an earlier upsert
+        // must not get wiped by a later event that omits it.
+        const update: Partial<ActionItem> & { action_id: string } = {
           action_id: payload.action_id,
           type: payload.type,
           executor: payload.executor,
@@ -75,7 +80,9 @@ export function useStream() {
           run_id: payload.run_id,
           session_key: payload.session_key,
           awaiting_confirmation: payload.awaiting_confirmation,
-        });
+        };
+        if (payload.request !== undefined) update.request = payload.request;
+        store.upsertAction(update as ActionItem);
       }
     });
 
@@ -113,6 +120,13 @@ export function useStream() {
     es.addEventListener("conversation", (e: MessageEvent<string>) => {
       const payload = parseJson<ConversationHistoryResponse>(e.data, "conversation");
       if (payload?.items) store.setConversation(payload.items);
+    });
+
+    // Per-entry live append (both inbound Telegram and outbound seedwake sends);
+    // emitted from core/stimulus.append_conversation_history.
+    es.addEventListener("conversation_entry", (e: MessageEvent<string>) => {
+      const payload = parseJson<ConversationEntry>(e.data, "conversation_entry");
+      if (payload?.entry_id) store.appendConversationEntry(payload);
     });
 
     es.addEventListener("stimuli", (e: MessageEvent<string>) => {

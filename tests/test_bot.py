@@ -1,3 +1,4 @@
+import json
 import unittest
 from types import SimpleNamespace
 from typing import cast
@@ -10,6 +11,7 @@ from telegram.ext import Application, ContextTypes
 
 # noinspection PyProtectedMember
 from bot.main import (
+    EVENT_CHANNEL,
     create_application,
     _dispatch_event,
     _ensure_redis_client,
@@ -44,6 +46,7 @@ class FakeRedis:
     def __init__(self):
         self.lists = {}
         self.hashes = {}
+        self.messages = []
 
     def rpush(self, key, value):
         self.lists.setdefault(key, []).append(value)
@@ -56,6 +59,9 @@ class FakeRedis:
 
     def hvals(self, key):
         return list(self.hashes.get(key, {}).values())
+
+    def publish(self, channel, payload):
+        self.messages.append((channel, payload))
 
 
 class FakeTelegramMessage(SimpleNamespace):
@@ -361,6 +367,12 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         history = redis_client.lists[CONVERSATION_HISTORY_KEY][0]
         self.assertIn('"role": "user"', history)
         self.assertIn('"content": "你好"', history)
+        self.assertEqual(redis_client.messages[0][0], EVENT_CHANNEL)
+        envelope = json.loads(redis_client.messages[0][1])
+        self.assertEqual(envelope["type"], "conversation_entry")
+        self.assertEqual(envelope["payload"]["role"], "user")
+        self.assertEqual(envelope["payload"]["source"], "telegram:1")
+        self.assertEqual(envelope["payload"]["content"], "你好")
         _reply_text_mock(update).assert_not_awaited()
 
     async def test_handle_text_message_stores_reply_context_metadata(self) -> None:
