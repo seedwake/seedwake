@@ -22,7 +22,11 @@ from core.state import (
     RUNTIME_STATE_KEY,
     load_or_build_state_snapshot,
 )
-from core.stimulus import CONVERSATION_HISTORY_KEY, REDIS_KEY as STIMULUS_REDIS_KEY
+from core.stimulus import (
+    CONVERSATION_HISTORY_KEY,
+    RECENT_ACTION_ECHO_KEY,
+    REDIS_KEY as STIMULUS_REDIS_KEY,
+)
 from test_support import slice_window
 
 
@@ -66,6 +70,34 @@ def _conversation_history_entry(
         "timestamp": timestamp,
         "stimulus_id": stimulus_id,
         "metadata": {},
+    }, ensure_ascii=False)
+
+
+def _recent_action_echo_record(
+    *,
+    cycle_id: int,
+    stimulus_id: str,
+    action_id: str,
+    content: str,
+    timestamp: str,
+    action_type: str = "weather",
+) -> str:
+    return json.dumps({
+        "cycle_id": cycle_id,
+        "stimulus": {
+            "stimulus_id": stimulus_id,
+            "type": "action_result",
+            "priority": 2,
+            "source": f"action:{action_id}",
+            "content": content,
+            "timestamp": timestamp,
+            "action_id": action_id,
+            "metadata": {
+                "origin": "action",
+                "action_type": action_type,
+                "status": "succeeded",
+            },
+        },
     }, ensure_ascii=False)
 
 
@@ -359,7 +391,7 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(body["cycle"]["current"], 99)
         self.assertEqual(body["emotions"]["satisfied"], 0.4)
 
-    def test_stimuli_query_reads_ranked_queue(self) -> None:
+    def test_stimuli_query_reads_pending_queue(self) -> None:
         self.redis.rpush(
             STIMULUS_REDIS_KEY,
             json.dumps({
@@ -394,9 +426,142 @@ class BackendTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["items"][0]["stimulus_id"], "stim_late")
+        self.assertEqual(body["items"][0]["bucket"], "noticed")
+        self.assertEqual(body["items"][0]["summary"], "later")
+
+    def test_stimuli_query_buckets_current_action_echoes(self) -> None:
+        self.redis.rpush(
+            STIMULUS_REDIS_KEY,
+            json.dumps({
+                "stimulus_id": "stim_current_echo",
+                "type": "action_result",
+                "priority": 2,
+                "source": "action:act_1",
+                "content": "current action result",
+                "timestamp": "2026-03-27T12:00:02+00:00",
+                "action_id": "act_1",
+                "metadata": {
+                    "origin": "action",
+                    "action_type": "weather",
+                    "status": "succeeded",
+                },
+            }, ensure_ascii=False),
+        )
+
+        response = self.client.get(
+            "/api/stimuli?limit=20",
+            headers={"X-API-Token": "token_backend"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["items"][0]["stimulus_id"], "stim_current_echo")
+        self.assertEqual(body["items"][0]["bucket"], "echo_current")
+        self.assertEqual(body["items"][0]["summary"], "current action result")
+
+    def test_stimuli_query_reads_consumed_action_echoes(self) -> None:
+        self.redis.set(LATEST_CYCLE_KEY, "10")
+        self.redis.rpush(
+            RECENT_ACTION_ECHO_KEY,
+            _recent_action_echo_record(
+                cycle_id=9,
+                stimulus_id="stim_echo",
+                action_id="act_1",
+                content="weather returned",
+                timestamp="2026-03-27T12:00:03+00:00",
+            ),
+        )
+
+        response = self.client.get(
+            "/api/stimuli?limit=20",
+            headers={"X-API-Token": "token_backend"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["items"][0]["stimulus_id"], "stim_echo")
+        self.assertEqual(body["items"][0]["bucket"], "echo_recent")
+        self.assertEqual(body["items"][0]["summary"], "weather returned")
+
+    def test_stimuli_query_merges_pending_and_consumed_by_timestamp(self) -> None:
+        self.redis.set(LATEST_CYCLE_KEY, "10")
+        self.redis.rpush(
+            STIMULUS_REDIS_KEY,
+            json.dumps({
+                "stimulus_id": "stim_pending",
+                "type": "time",
+                "priority": 1,
+                "source": "system:time",
+                "content": "pending message",
+                "timestamp": "2026-03-27T12:00:01+00:00",
+                "action_id": None,
+                "metadata": {},
+            }, ensure_ascii=False),
+        )
+        self.redis.rpush(
+            RECENT_ACTION_ECHO_KEY,
+            _recent_action_echo_record(
+                cycle_id=9,
+                stimulus_id="stim_echo",
+                action_id="act_1",
+                content="newer action echo",
+                timestamp="2026-03-27T12:00:03+00:00",
+            ),
+        )
+
+        response = self.client.get(
+            "/api/stimuli?limit=20",
+            headers={"X-API-Token": "token_backend"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
         self.assertEqual(body["count"], 2)
-        self.assertEqual(body["items"][0]["stimulus_id"], "stim_urgent")
-        self.assertEqual(body["items"][0]["summary"], "hello")
+        self.assertEqual(
+            [(item["stimulus_id"], item["bucket"]) for item in body["items"]],
+            [("stim_echo", "echo_recent"), ("stim_pending", "noticed")],
+        )
+
+    def test_stimuli_query_limits_merged_items_after_sort(self) -> None:
+        self.redis.set(LATEST_CYCLE_KEY, "10")
+        self.redis.rpush(
+            STIMULUS_REDIS_KEY,
+            json.dumps({
+                "stimulus_id": "stim_pending",
+                "type": "time",
+                "priority": 1,
+                "source": "system:time",
+                "content": "pending message",
+                "timestamp": "2026-03-27T12:00:01+00:00",
+                "action_id": None,
+                "metadata": {},
+            }, ensure_ascii=False),
+        )
+        self.redis.rpush(
+            RECENT_ACTION_ECHO_KEY,
+            _recent_action_echo_record(
+                cycle_id=9,
+                stimulus_id="stim_echo",
+                action_id="act_1",
+                content="newer action echo",
+                timestamp="2026-03-27T12:00:03+00:00",
+            ),
+        )
+
+        response = self.client.get(
+            "/api/stimuli?limit=1",
+            headers={"X-API-Token": "token_backend"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["items"][0]["stimulus_id"], "stim_echo")
+        self.assertEqual(body["items"][0]["bucket"], "echo_recent")
 
     def test_conversation_history_skips_malformed_items(self) -> None:
         self.redis.rpush(CONVERSATION_HISTORY_KEY, "{bad json")

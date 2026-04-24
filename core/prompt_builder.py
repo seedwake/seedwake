@@ -10,7 +10,7 @@ from datetime import datetime
 
 from core.action import ActionRecord
 from core.i18n import localized_thought_type, t
-from core.stimulus import RECENT_CONVERSATION_SUMMARY_MAX_CHARS, Stimulus
+from core.stimulus import RECENT_CONVERSATION_SUMMARY_MAX_CHARS, Stimulus, is_action_echo
 from core.thought_parser import Thought
 from core.common_types import (
     DegenerationIntervention,
@@ -30,7 +30,6 @@ from core.common_types import (
 
 ACTION_MARKER_PATTERN = re.compile(r"\s*\{action:[^}]+\}", re.DOTALL)
 ACTION_MARKER_SUFFIX_PATTERN = re.compile(r"\s*\{action:[^}]+\}\s*$")
-ACTION_ECHO_ORIGIN = "action"
 PENDING_ACTION_VISIBLE_STATUSES = {"pending"}
 RUNNING_ACTION_VISIBLE_STATUSES = {"running"}
 PROMPT_SECTION_LOG_THRESHOLD_MS = 10.0
@@ -518,7 +517,7 @@ def _split_stimuli(stimuli: list[Stimulus]) -> tuple[list[Stimulus], list[Stimul
     for stimulus in stimuli:
         if stimulus.type == "conversation":
             conversations.append(stimulus)
-        elif _is_action_echo(stimulus):
+        elif is_action_echo(stimulus):
             action_echoes.append(stimulus)
         else:
             passive.append(stimulus)
@@ -965,13 +964,6 @@ def _action_echo_label(stimulus: Stimulus) -> str:
     if action_type:
         return _action_echo_labels().get(action_type, t("stimulus.label.unknown"))
     return t("stimulus.label.unknown")
-
-
-def _is_action_echo(stimulus: Stimulus) -> bool:
-    origin = str(stimulus.metadata.get("origin") or "").strip()
-    if origin == ACTION_ECHO_ORIGIN:
-        return True
-    return stimulus.source.startswith("action:") or stimulus.source.startswith("planner:")
 
 
 def _running_action_summary(action: ActionRecord, conversation_labels: dict[str, str]) -> str:

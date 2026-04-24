@@ -38,6 +38,7 @@ RECENT_CONVERSATION_RAW_LIMIT = 10
 RECENT_CONVERSATION_WINDOW_HOURS = 24
 RECENT_CONVERSATION_SUMMARY_VERSION = 2
 RECENT_CONVERSATION_SUMMARY_MAX_CHARS = 500
+ACTION_ECHO_ORIGIN = "action"
 RECENT_ACTION_ECHO_ACTION_TYPES = {"news", "search", "reading", "web_fetch", "weather", "send_message"}
 MERGED_CONVERSATION_HISTORY_METADATA_KEYS = (
     "telegram_user_id",
@@ -371,6 +372,13 @@ def load_stimulus_queue(
             logger.warning("skipping invalid stimulus queue record: %s", exc)
     ranked = _select_ranked(stimuli, limit)
     return [stimulus for _, stimulus in ranked]
+
+
+def is_action_echo(stimulus: Stimulus) -> bool:
+    origin = str(stimulus.metadata.get("origin") or "").strip()
+    if origin == ACTION_ECHO_ORIGIN:
+        return True
+    return stimulus.source.startswith("action:") or stimulus.source.startswith("planner:")
 
 
 def forget_action_result_history_ids(

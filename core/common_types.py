@@ -314,6 +314,7 @@ type ThoughtEventPayload = list[SerializedThought]
 class StimulusQueueItem(TypedDict):
     stimulus_id: str
     type: str
+    bucket: Literal["noticed", "echo_current", "echo_recent"]
     priority: int
     source: str | None
     summary: str

@@ -104,16 +104,16 @@ export function useSeedwakeState() {
   }
 
   function upsertAction(incoming: ActionItem) {
+    // Keep terminal actions in state so historical thought cards can look up
+    // their final status (succeeded/failed) instead of falling back to "pending".
+    // ActionList (right panel) filters to non-terminal for the in-flight view.
     const idx = actions.value.findIndex((a) => a.action_id === incoming.action_id);
-    const terminal = new Set(["succeeded", "failed", "timeout"]);
     if (idx >= 0) {
       const next = [...actions.value];
       next[idx] = { ...next[idx], ...incoming };
-      actions.value = terminal.has(incoming.status)
-        ? next.filter((a) => a.action_id !== incoming.action_id || !terminal.has(a.status))
-        : next;
-    } else if (!terminal.has(incoming.status)) {
-      actions.value = [...actions.value, incoming].slice(-20);
+      actions.value = next;
+    } else {
+      actions.value = [...actions.value, incoming].slice(-50);
     }
   }
 
@@ -168,8 +168,11 @@ export function useSeedwakeState() {
       );
     },
     setActions(items: ActionItem[]) {
-      const pending = items.filter((a) => !["succeeded", "failed", "timeout"].includes(a.status));
-      actions.value = pending.slice(-20);
+      // Backend returns newest-first (sorted by submitted_at DESC). Reverse to
+      // oldest-first so it matches upsertAction's append-to-end convention;
+      // then slice(-50) keeps the newest 50, not the oldest.
+      const oldestFirst = [...items].reverse();
+      actions.value = oldestFirst.slice(-50);
     },
   };
 }

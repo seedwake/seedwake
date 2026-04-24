@@ -85,9 +85,12 @@ export interface StateEventPayload {
   uptime: StateUptimePayload;
 }
 
+export type StimulusBucket = "noticed" | "echo_current" | "echo_recent";
+
 export interface StimulusQueueItem {
   stimulus_id: string;
   type: string;
+  bucket: StimulusBucket;
   priority: number;
   source: string | null;
   summary: string;

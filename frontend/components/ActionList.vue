@@ -5,8 +5,15 @@ const props = defineProps<{ actions: ActionItem[] }>();
 const { t } = useI18n();
 const resolve = useI18nText();
 
+// Store keeps terminal actions so thought cards can show final status; in-flight
+// panel only shows non-terminal (pending/running/awaiting_confirmation).
+const TERMINAL = new Set(["succeeded", "failed", "timeout"]);
+const pendingActions = computed(() =>
+  props.actions.filter((a) => !TERMINAL.has(a.status)),
+);
+
 const panelRef = ref<HTMLElement | null>(null);
-const { isOverflowing } = useAutoScroll(panelRef, () => props.actions.length);
+const { isOverflowing } = useAutoScroll(panelRef, () => pendingActions.value.length);
 
 function stateKey(a: ActionItem): string {
   if (a.awaiting_confirmation) return "awaiting";
@@ -26,11 +33,11 @@ function stateLabel(a: ActionItem): string {
       <span>{{ t("right.in_flight_label_en") }}</span>
     </div>
     <div class="scroll" ref="panelRef" :class="{ 'edge-fade': isOverflowing }">
-      <p v-if="actions.length === 0" class="msg">
+      <p v-if="pendingActions.length === 0" class="msg">
         <span class="text" style="color: var(--ink-faint)">{{ t("right.empty_actions") }}</span>
       </p>
       <div
-        v-for="a in actions"
+        v-for="a in pendingActions"
         :key="a.action_id"
         class="action-row"
         :data-state="stateKey(a)"

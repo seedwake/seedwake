@@ -171,18 +171,18 @@ body.drowsy .stream-head h1 { color: var(--ink-mute); font-weight: 300; }
 }
 
 .stream {
-  flex: 1; position: relative; overflow: hidden;
-  padding: 0 44px 60px;
+  flex: 1; position: relative;
+  overflow-y: auto;
+  scrollbar-width: none;
+  padding: 40px 44px 20px;
+  /* viewport-anchored fade: top half fades from transparent → solid, bottom half
+     stays fully solid so whatever the user scrolls up to is readable. */
+  mask-image: linear-gradient(to bottom, transparent 0%, black 50%, black 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 50%, black 100%);
 }
-.stream::before, .stream::after {
-  content: ""; position: absolute; left: 0; right: 0; height: 120px;
-  pointer-events: none; z-index: 3;
-}
-.stream::before { top: 0;    background: linear-gradient(to bottom, var(--paper-1) 12%, transparent 100%); }
-.stream::after  { bottom: 0; background: linear-gradient(to top,    var(--paper-1) 20%, transparent 100%); }
+.stream::-webkit-scrollbar { display: none; }
 
 .thoughts {
-  position: absolute; left: 44px; right: 44px; bottom: 110px;
   display: flex; flex-direction: column; gap: 34px;
   transition: opacity 800ms ease;
 }
@@ -246,13 +246,11 @@ html[lang="en"] .thought .body { letter-spacing: 0; font-size: 18px; line-height
 }
 @keyframes sw-pulse { 0%,100% { opacity: 0.45; } 50% { opacity: 1; } }
 
-/* opacity by visual position (data-vi) */
-.thought[data-vi="0"] { --op: 0.18; }
-.thought[data-vi="1"] { --op: 0.32; }
-.thought[data-vi="2"] { --op: 0.48; }
-.thought[data-vi="3"] { --op: 0.68; }
-.thought[data-vi="4"] { --op: 0.88; }
-.thought[data-vi="5"] { --op: 1; }
+/* All thoughts render at full opacity; the stream's viewport-level mask (see .stream)
+   is what produces the "older content drifts up and fades" effect. Making the fade
+   track the scroll window rather than item age means scrolling up brings history into
+   a clear reading zone at the bottom of the viewport. */
+.thought { --op: 1; }
 
 /* attended — cinnabar ember */
 .thought.attended .gutter::after {
@@ -376,15 +374,17 @@ html[lang="en"] .msg .text { letter-spacing: 0; font-size: 13px; }
 .action-row[data-state="succeeded"] .sd { background: var(--st-ok); }
 .action-row[data-state="failed"]    .sd { background: var(--st-fail); }
 .action-row[data-state="pending"]   .sd { background: var(--st-pending); }
+.action-row[data-state="done"]      .sd { background: var(--ink-faint); opacity: 0.55; }
 .action-row .detail { grid-column: 1 / -1; font-family: var(--mono); font-size: 9.5px; color: var(--ink-faint); letter-spacing: 0.02em; line-height: 1.7; }
 
 .footmark { position: absolute; left: 28px; bottom: 18px; font-family: var(--mono); font-size: 9px; letter-spacing: 0.26em; color: var(--ink-faint); text-transform: uppercase; }
 
 .stream-foot {
-  position: absolute; left: 44px; right: 44px; bottom: 22px;
+  flex: 0 0 auto;
+  margin: 0 44px 22px;
   display: flex; justify-content: space-between; align-items: baseline;
   font-family: var(--mono); font-size: 9.5px;
-  color: var(--ink-faint); letter-spacing: 0.14em; z-index: 4;
+  color: var(--ink-faint); letter-spacing: 0.14em;
   transition: opacity 600ms ease;
 }
 body.deep .stream-foot { opacity: 0; }

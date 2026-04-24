@@ -71,8 +71,8 @@ const rotation = ref(0);
 const boostPos = ref(0);
 const boostVel = ref(0);
 const BASE_SPEED = 2.6;  // deg/sec → ~140s per revolution
-const STIFFNESS = 4;
-const DAMPING = 4;       // critically damped: rise → peak → smooth return, no oscillation
+const STIFFNESS = 0.6;   // softer spring → slower rise, longer fall
+const DAMPING = 1.55;    // ≈ critical damping for k=0.6: no oscillation, full settle ~6s
 
 let rafId: number | null = null;
 let lastTime = 0;
@@ -101,7 +101,8 @@ watch(() => props.emotions, (next, prev) => {
     delta += Math.abs((next[d.key] || 0) - (prev[d.key] || 0));
   }
   if (delta > 0.015) {
-    boostVel.value += Math.min(delta * 220, 400);
+    // kick scaled down to match the softer spring (peak amplitude stays comparable)
+    boostVel.value += Math.min(delta * 100, 250);
   }
 }, { deep: true });
 

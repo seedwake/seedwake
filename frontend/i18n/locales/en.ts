@@ -106,7 +106,7 @@ export default {
   action_state: {
     pending: "PENDING",
     running: "RUNNING",
-    succeeded: "SUCCEEDED",
+    succeeded: "COMPLETED",
     failed: "FAILED",
     awaiting: "AWAITING",
   },

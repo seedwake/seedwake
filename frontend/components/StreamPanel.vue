@@ -5,16 +5,19 @@ const { t } = useI18n();
 const resolveI18nText = useI18nText();
 const store = useSeedwakeState();
 
-// Only show the tail of the stream so visual position maps cleanly to data-vi.
-const TAIL_LEN = 6;
-const visibleItems = computed(() => {
-  const items = store.streamItems.value;
-  return items.slice(Math.max(0, items.length - TAIL_LEN));
-});
+// Render every thought in the rolling window so the user can scroll up to see history;
+// auto-scroll keeps the view pinned to the latest when they're already at the bottom.
+const visibleItems = computed(() => store.streamItems.value);
 
+const streamRef = ref<HTMLElement | null>(null);
+useAutoScroll(streamRef, () => visibleItems.value.length);
+
+// data-vi drives the per-card opacity ramp — newest = 5 (full), cascading back to 0.
+// Items further than 5 back stay at 0, which combined with the top mask reads as
+// "fading into the past" without hiding content entirely.
 function viForItem(index: number): number {
-  // older items have lower visualIndex, newest = TAIL_LEN-1
-  return index;
+  const total = visibleItems.value.length;
+  return Math.max(0, 5 - (total - 1 - index));
 }
 
 // Match an action to a thought by source_thought_id.
@@ -76,7 +79,7 @@ const resumeHint = computed(() => {
       <h1>{{ t("section.stream") }}</h1>
       <span class="counter">{{ counter }}</span>
     </header>
-    <div class="stream">
+    <div class="stream" ref="streamRef">
       <div class="thoughts">
         <template v-for="(item, i) in visibleItems" :key="item.key">
           <CycleSeparator

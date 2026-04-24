@@ -4,8 +4,21 @@ import type { StimulusQueueItem } from "~/types/api";
 const props = defineProps<{ stimuli: StimulusQueueItem[] }>();
 const { t, te } = useI18n();
 
+// useSeedwakeState.setStimuli normalizes incoming items to ASC by timestamp
+// (oldest first), matching the conversation/action panel convention. So we
+// just take the trailing N — that gives the newest 10 in oldest-first order,
+// ready for top-to-bottom render with newest at the bottom.
+const MAX_ITEMS = 10;
+const displayItems = computed(() => props.stimuli.slice(-MAX_ITEMS));
+
 const panelRef = ref<HTMLElement | null>(null);
-const { isOverflowing } = useAutoScroll(panelRef, () => props.stimuli.length);
+// Auto-scroll signal tracks the newest item's timestamp, not just length — so
+// when a fresh stimulus replaces an old one (cap stays at 10) we still scroll.
+const { isOverflowing } = useAutoScroll(panelRef, () => {
+  const arr = displayItems.value;
+  if (arr.length === 0) return 0;
+  return new Date(arr[arr.length - 1]!.timestamp).getTime();
+});
 
 function typeLabel(type: string): string {
   const key = `stimulus_type.${type}`;
@@ -35,14 +48,14 @@ function relativeTime(ts: string): string {
       <span>{{ t("right.stimulus_label_en") }}</span>
     </div>
     <div class="scroll" ref="panelRef" :class="{ 'edge-fade': isOverflowing }">
-      <p v-if="stimuli.length === 0" class="msg">
+      <p v-if="displayItems.length === 0" class="msg">
         <span class="text" style="color: var(--ink-faint)">{{ t("right.empty_stimuli") }}</span>
       </p>
       <div
-        v-for="s in stimuli"
+        v-for="s in displayItems"
         :key="s.stimulus_id"
         class="action-row"
-        data-state="pending"
+        :data-state="s.bucket === 'echo_recent' ? 'done' : 'pending'"
       >
         <div class="kind">
           {{ typeLabel(s.type) }}<template v-if="s.source"> · {{ s.source }}</template>

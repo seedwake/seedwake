@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import Annotated
+from typing import Annotated, Literal
 
 import redis as redis_lib
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -11,7 +11,7 @@ from backend.deps import require_redis, resolve_api_client
 from core.action import load_action_items
 from core.memory.short_term import REDIS_KEY as THOUGHT_REDIS_KEY
 from core.state import load_or_build_state_snapshot
-from core.stimulus import Stimulus, load_stimulus_queue
+from core.stimulus import Stimulus, is_action_echo, load_recent_action_echoes, load_stimulus_queue
 from core.common_types import (
     ActionsResponse,
     JsonObject,
@@ -39,6 +39,7 @@ REDIS_UNAVAILABLE_RESPONSE = {
     503: {"description": "Redis unavailable"},
 }
 STIMULUS_SUMMARY_MAX_CHARS = 240
+PENDING_STIMULUS_SCAN_LIMIT = 100
 
 
 @router.get("/state", responses=REDIS_UNAVAILABLE_RESPONSE)
@@ -97,11 +98,18 @@ def list_stimuli(
     limit: StimulusLimit = 20,
 ) -> StimuliResponse:
     redis_client = require_redis(request)
+    config = coerce_json_object(request.app.state.config) or {}
+    current_cycle_id = load_or_build_state_snapshot(redis_client, config)["cycle"]["current"]
     try:
-        stimuli = load_stimulus_queue(redis_client, limit)
+        pending_stimuli = load_stimulus_queue(redis_client, PENDING_STIMULUS_SCAN_LIMIT)
+        consumed_stimuli = load_recent_action_echoes(
+            redis_client,
+            current_cycle_id=current_cycle_id,
+            exclude_action_ids=None,
+        )
     except REDIS_ROUTE_EXCEPTIONS as exc:
         raise HTTPException(status_code=503, detail=f"redis read failed: {exc}") from exc
-    items = [_stimulus_queue_item(stimulus) for stimulus in stimuli]
+    items = _merged_stimulus_items(pending_stimuli, consumed_stimuli, limit)
     return {
         "ok": True,
         "items": items,
@@ -178,10 +186,44 @@ def _action_response_summary(item: JsonObject) -> JsonObject:
     return {"key": "action.completed_default", "params": {}}
 
 
-def _stimulus_queue_item(stimulus: Stimulus) -> StimulusQueueItem:
+def _merged_stimulus_items(
+    pending_stimuli: list[Stimulus],
+    consumed_stimuli: list[Stimulus],
+    limit: int,
+) -> list[StimulusQueueItem]:
+    bucketed_stimuli = [
+        *_bucketed_pending_stimuli(pending_stimuli),
+        *[("echo_recent", stimulus) for stimulus in consumed_stimuli],
+    ]
+    bucketed_stimuli.sort(key=lambda item: item[1].timestamp, reverse=True)
+    return [
+        _stimulus_queue_item(stimulus, bucket)
+        for bucket, stimulus in bucketed_stimuli[:limit]
+    ]
+
+
+def _bucketed_pending_stimuli(
+    stimuli: list[Stimulus],
+) -> list[tuple[Literal["noticed", "echo_current"], Stimulus]]:
+    bucketed: list[tuple[Literal["noticed", "echo_current"], Stimulus]] = []
+    for stimulus in stimuli:
+        if stimulus.type == "conversation":
+            continue
+        if is_action_echo(stimulus):
+            bucketed.append(("echo_current", stimulus))
+        else:
+            bucketed.append(("noticed", stimulus))
+    return bucketed
+
+
+def _stimulus_queue_item(
+    stimulus: Stimulus,
+    bucket: Literal["noticed", "echo_current", "echo_recent"],
+) -> StimulusQueueItem:
     return {
         "stimulus_id": stimulus.stimulus_id,
         "type": stimulus.type,
+        "bucket": bucket,
         "priority": stimulus.priority,
         "source": stimulus.source or None,
         "summary": _compact_summary(stimulus.content),
