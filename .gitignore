@@ -5,6 +5,9 @@ inspections/
 # Data
 data/
 
+# Codex
+.codex/
+
 # Claude
 .claude/
 

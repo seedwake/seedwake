@@ -48,7 +48,12 @@ from core.prefrontal import PrefrontalManager, build_goal_stack
 from core.prompt_builder import PromptBuildContext
 from core.runtime import connect_redis_from_env, load_yaml_config
 from core.sleep import SleepManager, SleepRedisLike
-from core.state import build_state_payload, store_state_snapshot
+from core.state import (
+    build_state_payload,
+    increment_completed_cycle_count,
+    initialize_runtime_boot_state,
+    store_state_snapshot,
+)
 from core.stimulus import (
     ConversationRedisLike,
     Stimulus,
@@ -448,6 +453,11 @@ def _run_engine_loop(
     last_pg_reconnect = 0.0
     _ensure_runtime_state_tracking(runtime, last_completed_cycle_id)
     runtime.boot_cycle_baseline = _safe_latest_cycle_id(runtime.stm, last_completed_cycle_id)
+    initialize_runtime_boot_state(
+        runtime.stm.redis_client,
+        started_at=runtime.started_at,
+        baseline_cycle=runtime.boot_cycle_baseline,
+    )
     _publish_runtime_state(runtime, runtime.boot_cycle_baseline)
 
     while True:
@@ -572,6 +582,7 @@ def _record_completed_cycle_time(runtime: EngineRuntime, elapsed_seconds: float)
     _ensure_runtime_state_tracking(runtime, 0)
     runtime.completed_cycle_count += 1
     runtime.total_cycle_seconds += max(0.0, elapsed_seconds)
+    increment_completed_cycle_count(runtime.stm.redis_client)
 
 
 def _post_cycle_phase4(

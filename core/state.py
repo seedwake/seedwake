@@ -4,7 +4,8 @@ import json
 import logging
 from datetime import datetime, timezone
 from math import ceil
-from typing import Protocol, cast
+from typing import Protocol, TypedDict, cast
+from uuid import uuid4
 
 import redis as redis_lib
 
@@ -23,6 +24,8 @@ from core.memory.short_term import LATEST_CYCLE_KEY
 from core.sleep import SLEEP_STATE_KEY
 
 RUNTIME_STATE_KEY = "seedwake:runtime_state"
+BOOT_MARKER_KEY = "seedwake:boot_marker"
+COMPLETED_CYCLES_KEY = "seedwake:completed_cycles"
 STATE_REDIS_EXCEPTIONS = (
     redis_lib.RedisError,
     json.JSONDecodeError,
@@ -36,6 +39,13 @@ logger = logging.getLogger(__name__)
 class StateRedisLike(Protocol):
     def get(self, key: str) -> str | bytes | None: ...
     def set(self, key: str, value: str) -> bool | str | None: ...
+    def incr(self, key: str) -> int: ...
+
+
+class BootMarker(TypedDict):
+    boot_id: str
+    started_at: datetime
+    baseline_cycle: int
 
 
 def build_state_payload(
@@ -45,7 +55,7 @@ def build_state_payload(
     current_cycle: int,
     started_at: datetime,
     boot_cycle_baseline: int,
-    completed_cycle_count: int,
+    completed_cycle_count: int | None,
     total_cycle_seconds: float,
     energy_per_cycle: float,
     drowsy_threshold: float,
@@ -57,9 +67,10 @@ def build_state_payload(
     uptime_seconds = max(0, int((timestamp - started_at).total_seconds()))
     current = max(0, current_cycle)
     since_boot = _cycle_since_boot(current, boot_cycle_baseline, completed_cycle_count)
+    completed_count = completed_cycle_count if completed_cycle_count is not None else 0
     avg_seconds = (
-        round(total_cycle_seconds / completed_cycle_count, 3)
-        if completed_cycle_count > 0
+        round(total_cycle_seconds / completed_count, 3)
+        if completed_count > 0
         else 0.0
     )
     energy = _coerce_float(sleep_state.get("energy"), 100.0)
@@ -93,6 +104,35 @@ def runtime_mode_from_sleep(sleep_mode: str) -> RuntimeMode:
     return "waking"
 
 
+def initialize_runtime_boot_state(
+    redis_client: StateRedisLike | None,
+    *,
+    started_at: datetime,
+    baseline_cycle: int,
+) -> None:
+    if redis_client is None:
+        return
+    marker: JsonObject = {
+        "boot_id": str(uuid4()),
+        "started_at": _utc_iso_z(started_at),
+        "baseline_cycle": max(0, baseline_cycle),
+    }
+    try:
+        redis_client.set(BOOT_MARKER_KEY, json.dumps(marker, ensure_ascii=False))
+        redis_client.set(COMPLETED_CYCLES_KEY, "0")
+    except STATE_REDIS_EXCEPTIONS as exc:
+        logger.warning("failed to initialize runtime boot state: %s", exc)
+
+
+def increment_completed_cycle_count(redis_client: StateRedisLike | None) -> None:
+    if redis_client is None:
+        return
+    try:
+        redis_client.incr(COMPLETED_CYCLES_KEY)
+    except STATE_REDIS_EXCEPTIONS as exc:
+        logger.warning("failed to increment completed cycle count: %s", exc)
+
+
 def store_state_snapshot(redis_client: StateRedisLike | None, payload: StateEventPayload) -> None:
     if redis_client is None:
         return
@@ -122,22 +162,30 @@ def load_or_build_state_snapshot(
     redis_client: StateRedisLike | None,
     config: JsonObject,
 ) -> StateEventPayload:
+    now = datetime.now(timezone.utc)
     stored = load_state_snapshot(redis_client)
     if stored is not None:
-        return stored
-    now = datetime.now(timezone.utc)
+        return _refresh_uptime(stored, now)
     current_cycle = _load_latest_cycle_id(redis_client)
     sleep_state = _load_sleep_state(redis_client)
     emotion = _load_emotion_snapshot(redis_client)
     energy_per_cycle = _config_float(config, "sleep", "energy_per_cycle", 0.2)
     drowsy_threshold = _config_float(config, "sleep", "drowsy_threshold", 30.0)
+    boot_marker = _load_boot_marker(redis_client)
+    completed_cycle_count = _load_completed_cycle_count(redis_client)
+    started_at = boot_marker["started_at"] if boot_marker is not None else now
+    boot_cycle_baseline = (
+        boot_marker["baseline_cycle"]
+        if boot_marker is not None
+        else current_cycle
+    )
     return build_state_payload(
         sleep_state=sleep_state,
         emotion=emotion,
         current_cycle=current_cycle,
-        started_at=now,
-        boot_cycle_baseline=max(0, current_cycle - 1),
-        completed_cycle_count=0,
+        started_at=started_at,
+        boot_cycle_baseline=boot_cycle_baseline,
+        completed_cycle_count=completed_cycle_count,
         total_cycle_seconds=0.0,
         energy_per_cycle=energy_per_cycle,
         drowsy_threshold=drowsy_threshold,
@@ -148,11 +196,11 @@ def load_or_build_state_snapshot(
 def _cycle_since_boot(
     current_cycle: int,
     boot_cycle_baseline: int,
-    completed_cycle_count: int,
+    completed_cycle_count: int | None,
 ) -> int:
-    if completed_cycle_count > 0:
-        return completed_cycle_count
-    return 0
+    if completed_cycle_count is not None:
+        return max(0, completed_cycle_count)
+    return max(0, current_cycle - max(0, boot_cycle_baseline))
 
 
 def _next_drowsy_cycle(
@@ -210,6 +258,18 @@ def _state_payload_from_json(payload: JsonObject) -> StateEventPayload | None:
     }
 
 
+def _refresh_uptime(payload: StateEventPayload, now: datetime) -> StateEventPayload:
+    started_at = _parse_datetime(payload["uptime"]["started_at"])
+    if started_at is None:
+        return payload
+    refreshed = dict(payload)
+    refreshed["uptime"] = {
+        "started_at": _utc_iso_z(started_at),
+        "seconds": max(0, int((now - started_at).total_seconds())),
+    }
+    return cast(StateEventPayload, refreshed)
+
+
 def _load_latest_cycle_id(redis_client: StateRedisLike | None) -> int:
     if redis_client is None:
         return 0
@@ -217,6 +277,32 @@ def _load_latest_cycle_id(redis_client: StateRedisLike | None) -> int:
         return _coerce_int(_decode_redis_optional(redis_client.get(LATEST_CYCLE_KEY)), 0)
     except STATE_REDIS_EXCEPTIONS:
         return 0
+
+
+def _load_boot_marker(redis_client: StateRedisLike | None) -> BootMarker | None:
+    payload = _load_json_object(redis_client, BOOT_MARKER_KEY)
+    if payload is None:
+        return None
+    started_at = _parse_datetime(str(payload.get("started_at") or ""))
+    if started_at is None:
+        return None
+    return {
+        "boot_id": str(payload.get("boot_id") or ""),
+        "started_at": started_at,
+        "baseline_cycle": max(0, _coerce_int(payload.get("baseline_cycle"), 0)),
+    }
+
+
+def _load_completed_cycle_count(redis_client: StateRedisLike | None) -> int | None:
+    if redis_client is None:
+        return None
+    try:
+        raw = redis_client.get(COMPLETED_CYCLES_KEY)
+    except STATE_REDIS_EXCEPTIONS:
+        return None
+    if raw is None:
+        return None
+    return max(0, _coerce_int(_decode_redis_value(raw), 0))
 
 
 def _load_sleep_state(redis_client: StateRedisLike | None) -> SleepStateSnapshot:
@@ -304,6 +390,18 @@ def _decode_redis_value(value: str | bytes) -> str:
 
 def _utc_iso_z(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _coerce_float(value: JsonValue, default: float) -> float:

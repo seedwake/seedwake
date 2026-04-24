@@ -16,7 +16,12 @@ from core.action import ACTION_CONTROL_KEY
 from core.emotion import EMOTION_STATE_KEY
 from core.memory.short_term import LATEST_CYCLE_KEY
 from core.sleep import SLEEP_STATE_KEY
-from core.state import RUNTIME_STATE_KEY
+from core.state import (
+    BOOT_MARKER_KEY,
+    COMPLETED_CYCLES_KEY,
+    RUNTIME_STATE_KEY,
+    load_or_build_state_snapshot,
+)
 from core.stimulus import CONVERSATION_HISTORY_KEY, REDIS_KEY as STIMULUS_REDIS_KEY
 from test_support import slice_window
 
@@ -117,6 +122,11 @@ class FakeRedis:
     def set(self, key, value):
         self.strings[key] = value
         return True
+
+    def incr(self, key):
+        value = int(self.strings.get(key) or 0) + 1
+        self.strings[key] = str(value)
+        return value
 
     def get(self, key):
         return self.strings.get(key)
@@ -244,7 +254,7 @@ class BackendTests(unittest.TestCase):
                     "frustration": 0.11,
                 },
                 "cycle": {"current": 1641, "since_boot": 12, "avg_seconds": 11.4},
-                "uptime": {"started_at": "2026-04-24T04:48:00+00:00", "seconds": 18720},
+                "uptime": {"started_at": "2020-01-01T00:00:00+00:00", "seconds": 1},
             }, ensure_ascii=False),
         )
 
@@ -259,6 +269,54 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(body["energy"], 68.2)
         self.assertEqual(body["emotions"]["satisfied"], 0.46)
         self.assertEqual(body["cycle"]["current"], 1641)
+        self.assertEqual(body["uptime"]["started_at"], "2020-01-01T00:00:00Z")
+        self.assertGreater(body["uptime"]["seconds"], 1)
+
+    def test_state_fallback_uses_boot_marker_and_completed_cycles(self) -> None:
+        self.redis.set(LATEST_CYCLE_KEY, "120")
+        self.redis.set(
+            BOOT_MARKER_KEY,
+            json.dumps({
+                "boot_id": "boot_test",
+                "started_at": "2020-01-01T00:00:00Z",
+                "baseline_cycle": 100,
+            }),
+        )
+        self.redis.set(COMPLETED_CYCLES_KEY, "7")
+
+        payload = load_or_build_state_snapshot(self.redis, {})
+
+        self.assertEqual(payload["uptime"]["started_at"], "2020-01-01T00:00:00Z")
+        self.assertGreater(payload["uptime"]["seconds"], 0)
+        self.assertEqual(payload["cycle"]["current"], 120)
+        self.assertEqual(payload["cycle"]["since_boot"], 7)
+
+    def test_state_fallback_uses_boot_marker_when_completed_cycles_missing(self) -> None:
+        self.redis.set(LATEST_CYCLE_KEY, "120")
+        self.redis.set(
+            BOOT_MARKER_KEY,
+            json.dumps({
+                "boot_id": "boot_test",
+                "started_at": "2020-01-01T00:00:00Z",
+                "baseline_cycle": 100,
+            }),
+        )
+
+        payload = load_or_build_state_snapshot(self.redis, {})
+
+        self.assertEqual(payload["uptime"]["started_at"], "2020-01-01T00:00:00Z")
+        self.assertGreater(payload["uptime"]["seconds"], 0)
+        self.assertEqual(payload["cycle"]["current"], 120)
+        self.assertEqual(payload["cycle"]["since_boot"], 20)
+
+    def test_state_fallback_uses_cold_empty_defaults_without_boot_marker(self) -> None:
+        self.redis.set(LATEST_CYCLE_KEY, "120")
+
+        payload = load_or_build_state_snapshot(self.redis, {})
+
+        self.assertLessEqual(payload["uptime"]["seconds"], 1)
+        self.assertEqual(payload["cycle"]["current"], 120)
+        self.assertEqual(payload["cycle"]["since_boot"], 0)
 
     def test_state_query_builds_snapshot_from_component_state_when_runtime_state_missing(self) -> None:
         self.redis.set(LATEST_CYCLE_KEY, "99")
