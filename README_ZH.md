@@ -9,6 +9,8 @@
   <a href="./ISSUE_ZH.md">⚠️ 已知问题</a>
 </p>
 
+https://github.com/user-attachments/assets/2035149c-829c-4323-99d2-6e2602044f73
+
 ---
 
 ## 这是什么
