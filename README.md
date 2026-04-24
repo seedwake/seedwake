@@ -3,10 +3,10 @@
 > A continuously running AI thought-stream engine, organized around the Buddhist concept of *santāna* — continuity of mind.
 
 <p align="center">
-  <a href="./README_ZH.md">Chinese</a> |
-  <a href="./docs/concepts.md">Concepts</a> |
-  <a href="./docs/deployment.md">Deployment</a> |
-  <a href="./ISSUE.md">Open Issues</a>
+  <a href="./README_ZH.md">🌐 中文文档</a> |
+  <a href="./docs/concepts.md">📖 Concepts</a> |
+  <a href="./docs/deployment.md">🚀 Deployment</a> |
+  <a href="./ISSUE.md">⚠️ Open Issues</a>
 </p>
 
 ---
