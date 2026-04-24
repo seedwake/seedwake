@@ -13,14 +13,8 @@ const store = useSeedwakeState();
 // they arrive paired with the first thought of their cycle.
 const rawItems = computed<StreamItem[]>(() => store.streamItems.value);
 const visibleItems = ref<StreamItem[]>([]);
-// Thoughts whose sw-enter animation is temporarily paused while the viewport
-// smooth-scrolls to the new bottom. The space for the card is already in the
-// layout (so scrollHeight reflects the new bottom), but the card itself stays
-// invisible until the scroll settles — so the reveal reads as "first the view
-// glides to the bottom, then the thought floats up".
-const deferredEntryKeys = ref<Set<string>>(new Set());
 const THOUGHT_INTERVAL_MS = 3000;
-const ENTRY_DEFER_MS = 600;
+const PRUNE_DELAY_MS = 600;
 
 const streamRef = ref<HTMLElement | null>(null);
 // smooth:true so each release glides the viewport to the new bottom rather than
@@ -74,7 +68,7 @@ function schedulePruneVisible(): void {
   pruneTimer = setTimeout(() => {
     pruneTimer = null;
     syncVisible(true);
-  }, ENTRY_DEFER_MS);
+  }, PRUNE_DELAY_MS);
 }
 
 function nextReleaseBatch(pending: StreamItem[]): StreamItem[] {
@@ -87,39 +81,14 @@ function nextReleaseBatch(pending: StreamItem[]): StreamItem[] {
   return [first];
 }
 
-function deferThoughtEntries(items: StreamItem[]): void {
-  const keys = items
-    .filter((item) => item.kind === "thought")
-    .map((item) => item.key);
-  if (keys.length === 0) return;
-  const next = new Set(deferredEntryKeys.value);
-  for (const key of keys) next.add(key);
-  deferredEntryKeys.value = next;
-}
-
-function scheduleThoughtEntryReveal(items: StreamItem[]): void {
-  for (const item of items) {
-    if (item.kind !== "thought") continue;
-    setTimeout(() => {
-      const next = new Set(deferredEntryKeys.value);
-      next.delete(item.key);
-      deferredEntryKeys.value = next;
-    }, ENTRY_DEFER_MS);
-  }
-}
-
 function releaseOne(): void {
   releaseTimer = null;
   const pending = pendingFromRaw();
   if (pending.length === 0) return;
   const items = nextReleaseBatch(pending);
-  // For thoughts, mark the key deferred BEFORE the reactive append, so Vue's
-  // very first render of the card already has the paused animation class in
-  // place — no frame where the card is visible at its final state. Separators
-  // pass through in the same DOM update as the first thought of their cycle.
-  deferThoughtEntries(items);
+  // Insert immediately; the smooth scroll-to-bottom reveals the new thought
+  // from below the viewport without a separate card entrance animation.
   visibleItems.value = [...visibleItems.value, ...items];
-  scheduleThoughtEntryReveal(items);
   if (pendingFromRaw().length > 0) {
     // separators are just cycle dividers — no dwell time before the next thought
     const delay = items.some((item) => item.kind === "thought") ? THOUGHT_INTERVAL_MS : 0;
@@ -233,7 +202,6 @@ const resumeHint = computed(() => {
             v-else-if="item.thought"
             :thought="item.thought"
             :attended="!!item.attended"
-            :deferred="deferredEntryKeys.has(item.key)"
             :visual-index="viForItem(i)"
             :action-status="actionForThought(store.actions.value, item.thought.thought_id)"
           />

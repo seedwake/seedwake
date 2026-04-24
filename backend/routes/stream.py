@@ -1,8 +1,12 @@
 """SSE stream route."""
 
+import asyncio
 import json
 import logging
-from typing import Annotated
+import time
+from collections.abc import AsyncIterator, Awaitable
+from inspect import isawaitable
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -15,6 +19,8 @@ from core.common_types import EventEnvelope, JsonObject, JsonValue, StatusEventP
 
 router = APIRouter(prefix="/api")
 EVENT_CHANNEL = "seedwake:events"
+PUBSUB_POLL_TIMEOUT_SECONDS = 1.0
+SSE_KEEPALIVE_SECONDS = 15.0
 logger = logging.getLogger(__name__)
 ApiClient = Annotated[str, Depends(resolve_api_client)]
 
@@ -27,27 +33,42 @@ def stream_events(
     redis_client = request.app.state.redis
     if redis_client is None:
         return StreamingResponse(
-            iter([_format_sse("status", _stream_status_payload("status.redis_unavailable"))]),
+            _single_stream_chunk(_format_sse("status", _stream_status_payload("status.redis_unavailable"))),
             media_type="text/event-stream",
         )
     pubsub = redis_client.pubsub(ignore_subscribe_messages=True)
     pubsub.subscribe(THOUGHT_CHANNEL, EVENT_CHANNEL)
 
-    def generate():
+    async def generate():
         try:
-            yield from _initial_stream_chunks(request, api_client)
-            while True:
+            initial_chunks = await asyncio.to_thread(_initial_stream_chunks, request, api_client)
+            for chunk in initial_chunks:
+                if await _request_disconnected(request):
+                    return
+                yield chunk
+            last_keepalive = time.monotonic()
+            while not await _request_disconnected(request):
                 try:
-                    yield _stream_next_chunk(pubsub)
+                    chunk = await _stream_next_chunk(pubsub)
                 except (json.JSONDecodeError, TypeError, KeyError):
                     logger.exception("malformed SSE event payload")
                     continue
+                if chunk is not None:
+                    last_keepalive = time.monotonic()
+                    yield chunk
+                    continue
+                if time.monotonic() - last_keepalive >= SSE_KEEPALIVE_SECONDS:
+                    last_keepalive = time.monotonic()
+                    yield ": keepalive\n\n"
+        except asyncio.CancelledError:
+            logger.debug("SSE stream cancelled")
+            raise
         # noinspection PyBroadException
         except Exception as exc:
             logger.exception("unexpected SSE stream failure: %s", exc)
             yield _format_sse("status", _stream_status_payload("status.stream_error"))
         finally:
-            pubsub.close()
+            await _close_pubsub(pubsub)
 
     return StreamingResponse(
         generate(),
@@ -57,6 +78,10 @@ def stream_events(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+async def _single_stream_chunk(chunk: str) -> AsyncIterator[str]:
+    yield chunk
 
 
 def _decode_channel(value) -> str:
@@ -75,10 +100,13 @@ def _parse_event_envelope(raw: str) -> EventEnvelope:
     return json.loads(raw)
 
 
-def _stream_next_chunk(pubsub) -> str:
-    message = pubsub.get_message(timeout=15.0)
+async def _stream_next_chunk(pubsub) -> str | None:
+    message = await asyncio.to_thread(
+        pubsub.get_message,
+        timeout=PUBSUB_POLL_TIMEOUT_SECONDS,
+    )
     if message is None:
-        return ": keepalive\n\n"
+        return None
     channel = _decode_channel(message.get("channel"))
     data = _decode_data(message.get("data"))
     if channel == THOUGHT_CHANNEL:
@@ -86,7 +114,25 @@ def _stream_next_chunk(pubsub) -> str:
     if channel == EVENT_CHANNEL:
         envelope = _parse_event_envelope(data)
         return _format_sse(envelope["type"], envelope["payload"])
-    return ": keepalive\n\n"
+    return None
+
+
+async def _request_disconnected(request: Request) -> bool:
+    checker = getattr(request, "is_disconnected", None)
+    if checker is None:
+        return False
+    result = checker()
+    if isawaitable(result):
+        return bool(await cast(Awaitable[bool], result))
+    return bool(result)
+
+
+async def _close_pubsub(pubsub) -> None:
+    try:
+        await asyncio.to_thread(pubsub.close)
+    # noinspection PyBroadException
+    except Exception:
+        logger.warning("failed to close SSE Redis pubsub", exc_info=True)
 
 
 def _raw_sse(event_name: str, raw_json: str) -> str:

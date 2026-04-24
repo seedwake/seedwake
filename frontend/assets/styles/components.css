@@ -66,6 +66,21 @@ body.drowsy .mode-bloom {
 .col.left { overflow-y: auto; scrollbar-width: none; }
 .col.left::-webkit-scrollbar { display: none; }
 
+/* On first paint each column resolves from a soft blur into clarity, with a
+   small stagger so the field reads as "self / stream / other" coming into
+   focus in sequence. Single-shot animation; deep-sleep / drowsy transitions
+   below override transform & opacity independently. */
+@keyframes sw-clarify {
+  from { opacity: 0; filter: blur(8px); }
+  to   { opacity: 1; filter: blur(0); }
+}
+.app > .col {
+  animation: sw-clarify 900ms cubic-bezier(0.22, 0.8, 0.24, 1) both;
+}
+.app > .col.left       { animation-delay:   0ms; }
+.app > .col.stream-col { animation-delay: 150ms; }
+.app > .col.right      { animation-delay: 300ms; }
+
 /* deep-sleep scroll close */
 body.deep .app > .col.left,
 body.deep .app > .col.right {
@@ -198,27 +213,18 @@ body.drowsy .thoughts {
   -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 14%, black 68%, transparent 100%);
 }
 
-/* thought card */
+/* thought card — no entrance animation; the smooth scroll-to-bottom in
+   useAutoScroll naturally reveals the new card from below the viewport. */
 .thought {
   display: grid; grid-template-columns: 64px 1fr;
   gap: 20px; align-items: baseline;
   position: relative;
-  /* Per-card enter delay (set inline via --enter-delay in StreamPanel) staggers
-     a batch of thoughts that arrive together so they cascade in instead of
-     popping in all at once. */
-  animation: sw-enter 0.8s ease-out var(--enter-delay, 0ms) both;
-  transition: opacity 900ms ease, transform 900ms cubic-bezier(.3,.02,.2,1);
-  will-change: opacity, transform;
 }
 @keyframes sw-enter {
   from { opacity: 0; transform: translateY(30px); }
   to   { opacity: var(--op, 1); transform: translateY(0); }
 }
 .thought.exiting { opacity: 0 !important; transform: translateY(-10px); }
-/* deferred-entry: hold the sw-enter animation at its `from` frame while the
-   stream viewport is still gliding to the new bottom, then let it resume once
-   StreamPanel clears the flag. The reveal reads as scroll-first, card-after. */
-.thought.deferred-entry { animation-play-state: paused; }
 
 .thought .gutter { text-align: right; position: relative; }
 .thought .cid { font-family: var(--mono); font-size: 10px; color: var(--ink-faint); letter-spacing: 0.06em; line-height: 1.4; }

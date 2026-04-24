@@ -11,7 +11,7 @@ from fastapi import Request
 from fastapi.testclient import TestClient
 
 from backend.main import create_app
-from backend.routes.stream import stream_events
+from backend.routes.stream import PUBSUB_POLL_TIMEOUT_SECONDS, _stream_next_chunk, stream_events
 from core.action import ACTION_CONTROL_KEY
 from core.emotion import EMOTION_STATE_KEY
 from core.memory.short_term import LATEST_CYCLE_KEY
@@ -151,6 +151,8 @@ def _action_result_queue_record(
 class FakePubSub:
     def __init__(self, messages):
         self._messages = messages
+        self.closed = False
+        self.timeouts = []
 
     @staticmethod
     def subscribe(*channels):
@@ -158,13 +160,13 @@ class FakePubSub:
         return None
 
     def get_message(self, timeout=0):
-        _ = timeout
+        self.timeouts.append(timeout)
         if not self._messages:
             return None
         return self._messages.pop(0)
 
-    @staticmethod
-    def close():
+    def close(self):
+        self.closed = True
         return None
 
 
@@ -849,6 +851,60 @@ class BackendTests(unittest.TestCase):
         self.assertIn("event: actions", chunks[3])
         self.assertIn("event: conversation", chunks[4])
         self.assertIn("event: stimuli", chunks[5])
+
+    def test_stream_stops_and_closes_pubsub_after_disconnect(self) -> None:
+        pubsub = FakePubSub([])
+
+        class ClosingRedis(FakeRedis):
+            @staticmethod
+            def pubsub(ignore_subscribe_messages=True):
+                _ = ignore_subscribe_messages
+                return pubsub
+
+        class DisconnectAfterInitialChunks:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def is_disconnected(self) -> bool:
+                self.calls += 1
+                return self.calls > 6
+
+        disconnect = DisconnectAfterInitialChunks()
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(
+                    config={"admins": [{"username": "alice", "token": "token_alice"}]},
+                    backend_api_token="token_backend",
+                    redis=ClosingRedis(),
+                ),
+            ),
+            is_disconnected=disconnect.is_disconnected,
+        )
+
+        response = stream_events(request=_as_request(request), api_client="backend_api")
+
+        async def collect_until_disconnect() -> list[str]:
+            chunks: list[str] = []
+            iterator = aiter(response.body_iterator)
+            for _ in range(6):
+                chunks.append(str(await anext(iterator)))
+            with self.assertRaises(StopAsyncIteration):
+                await anext(iterator)
+            return chunks
+
+        chunks = asyncio.run(collect_until_disconnect())
+
+        self.assertIn("event: status", chunks[0])
+        self.assertTrue(pubsub.closed)
+        self.assertEqual(pubsub.timeouts, [])
+
+    def test_stream_pubsub_poll_uses_short_timeout(self) -> None:
+        pubsub = FakePubSub([])
+
+        chunk = asyncio.run(_stream_next_chunk(pubsub))
+
+        self.assertIsNone(chunk)
+        self.assertEqual(pubsub.timeouts, [PUBSUB_POLL_TIMEOUT_SECONDS])
 
     def test_recent_thoughts_query(self) -> None:
         self.redis.sorted_sets["seedwake:thoughts"] = [

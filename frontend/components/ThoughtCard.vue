@@ -6,7 +6,6 @@ const props = defineProps<{
   attended: boolean;
   visualIndex: number;
   actionStatus?: { state: string; summary: string };
-  deferred?: boolean;
 }>();
 
 const { t } = useI18n();
@@ -70,7 +69,7 @@ const displayContent = computed(() => {
 <template>
   <article
     class="thought"
-    :class="{ attended, 'deferred-entry': deferred }"
+    :class="{ attended }"
     :data-type="canonicalType"
     :data-vi="vi"
   >
