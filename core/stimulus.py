@@ -21,6 +21,9 @@ from core.common_types import (
     RecentActionEchoRecord,
     RecentConversationMessage,
     RecentConversationPrompt,
+    StimulusBucket,
+    StimulusEventPayload,
+    StimulusQueueItem,
     StimulusRecord,
     elapsed_ms,
 )
@@ -39,6 +42,7 @@ RECENT_CONVERSATION_RAW_LIMIT = 10
 RECENT_CONVERSATION_WINDOW_HOURS = 24
 RECENT_CONVERSATION_SUMMARY_VERSION = 2
 RECENT_CONVERSATION_SUMMARY_MAX_CHARS = 500
+STIMULUS_SUMMARY_MAX_CHARS = 240
 ACTION_ECHO_ORIGIN = "action"
 RECENT_ACTION_ECHO_ACTION_TYPES = {
     "news",
@@ -74,7 +78,7 @@ STIMULUS_REDIS_EXCEPTIONS = (
 )
 SLOW_REDIS_OPERATION_THRESHOLD_MS = 10.0
 logger = logging.getLogger(__name__)
-type ConversationEntryEventCallback = Callable[[str, ConversationEntryEventPayload], None]
+type StimulusEventCallback = Callable[[str, ConversationEntryEventPayload | StimulusEventPayload], None]
 
 
 class ConversationRedisLike(Protocol):
@@ -106,7 +110,7 @@ class StimulusQueue:
         self,
         redis_client: ConversationRedisLike | None,
         *,
-        event_callback: ConversationEntryEventCallback | None = None,
+        event_callback: StimulusEventCallback | None = None,
     ) -> None:
         self._redis = redis_client
         self._deque: deque[Stimulus] = deque()
@@ -151,6 +155,8 @@ class StimulusQueue:
                         timestamp=stimulus.timestamp,
                         event_callback=self._event_callback,
                     )
+                else:
+                    _publish_stimulus_event(self._event_callback, stimulus)
             except STIMULUS_REDIS_EXCEPTIONS:
                 with self._lock:
                     self._redis = None
@@ -296,7 +302,7 @@ def append_conversation_history(
     stimulus_id: str | None = None,
     metadata: JsonObject | None = None,
     timestamp: datetime | None = None,
-    event_callback: ConversationEntryEventCallback | None = None,
+    event_callback: StimulusEventCallback | None = None,
 ) -> ConversationEntry:
     entry: ConversationEntryEventPayload = {
         "entry_id": f"conv_{uuid4().hex}",
@@ -318,12 +324,53 @@ def append_conversation_history(
             trim_started_at,
             f"key={CONVERSATION_HISTORY_KEY}, limit={CONVERSATION_HISTORY_LIMIT}",
         )
-        _publish_conversation_entry_event(event_callback, entry)
+        _publish_conversation_entry_event(event_callback, enrich_conversation_entry(entry))
     return entry
 
 
+def enrich_conversation_entry(entry: ConversationEntry) -> ConversationEntry:
+    metadata = entry.get("metadata")
+    safe_metadata = metadata if isinstance(metadata, dict) else {}
+    enriched: ConversationEntry = dict(entry)
+    role = str(enriched.get("role") or "")
+    source = str(enriched.get("source") or "")
+    enriched["direction"] = "outbound" if role == "assistant" else "inbound"
+    enriched["speaker_name"] = _conversation_entry_speaker_name(role, source, safe_metadata)
+    chat_id = _conversation_entry_chat_id(source, safe_metadata)
+    if chat_id:
+        enriched["chat_id"] = chat_id
+    username = str(safe_metadata.get("telegram_username") or "").strip()
+    if username:
+        enriched["username"] = username
+    full_name = str(safe_metadata.get("telegram_full_name") or "").strip()
+    if full_name:
+        enriched["full_name"] = full_name
+    message_id = str(safe_metadata.get("telegram_message_id") or "").strip()
+    if message_id:
+        enriched["message_id"] = message_id
+    return enriched
+
+
+def _conversation_entry_speaker_name(role: str, source: str, metadata: JsonObject) -> str:
+    if role == "assistant":
+        return "Seedwake"
+    full_name = str(metadata.get("telegram_full_name") or "").strip()
+    username = str(metadata.get("telegram_username") or "").strip()
+    return full_name or username or source
+
+
+def _conversation_entry_chat_id(source: str, metadata: JsonObject) -> str:
+    raw_chat_id = str(metadata.get("telegram_chat_id") or "").strip()
+    if raw_chat_id:
+        return raw_chat_id
+    prefix = "telegram:"
+    if source.startswith(prefix):
+        return source.removeprefix(prefix)
+    return ""
+
+
 def _publish_conversation_entry_event(
-    event_callback: ConversationEntryEventCallback | None,
+    event_callback: StimulusEventCallback | None,
     entry: ConversationEntryEventPayload,
 ) -> None:
     if event_callback is None:
@@ -332,6 +379,51 @@ def _publish_conversation_entry_event(
         event_callback("conversation_entry", entry)
     except Exception as exc:
         logger.exception("unexpected conversation entry event failure for %s: %s", entry["entry_id"], exc)
+
+
+def pending_stimulus_bucket(stimulus: Stimulus) -> StimulusBucket | None:
+    if stimulus.type == "conversation":
+        return None
+    if is_action_echo(stimulus):
+        return "echo_current"
+    return "noticed"
+
+
+def stimulus_queue_item(
+    stimulus: Stimulus,
+    bucket: StimulusBucket,
+) -> StimulusQueueItem:
+    return {
+        "stimulus_id": stimulus.stimulus_id,
+        "type": stimulus.type,
+        "bucket": bucket,
+        "priority": stimulus.priority,
+        "source": stimulus.source or None,
+        "summary": _compact_stimulus_summary(stimulus.content),
+        "timestamp": stimulus.timestamp.isoformat(),
+    }
+
+
+def _publish_stimulus_event(
+    event_callback: StimulusEventCallback | None,
+    stimulus: Stimulus,
+) -> None:
+    if event_callback is None:
+        return
+    bucket = pending_stimulus_bucket(stimulus)
+    if bucket is None:
+        return
+    try:
+        event_callback("stimulus", stimulus_queue_item(stimulus, bucket))
+    except Exception as exc:
+        logger.exception("unexpected stimulus event failure for %s: %s", stimulus.stimulus_id, exc)
+
+
+def _compact_stimulus_summary(content: str) -> str:
+    compact = " ".join(content.split())
+    if len(compact) <= STIMULUS_SUMMARY_MAX_CHARS:
+        return compact
+    return compact[:STIMULUS_SUMMARY_MAX_CHARS - 1].rstrip() + "…"
 
 
 def append_action_result_history(
@@ -443,7 +535,7 @@ def _sync_conversation_history(
     redis_client: ConversationRedisLike,
     stimulus: Stimulus,
     existing_history_ids: set[str],
-    event_callback: ConversationEntryEventCallback | None,
+    event_callback: StimulusEventCallback | None,
 ) -> None:
     merged_messages = stimulus.metadata.get("merged_messages")
     merged_ids = stimulus.metadata.get("merged_stimulus_ids")
@@ -478,7 +570,7 @@ def _sync_merged_conversation_history(
     existing_history_ids: set[str],
     merged_messages: list[JsonValue],
     merged_ids: list[JsonValue],
-    event_callback: ConversationEntryEventCallback | None,
+    event_callback: StimulusEventCallback | None,
 ) -> None:
     for index, message in enumerate(merged_messages):
         history_stimulus_id = str(merged_ids[index] or "").strip()
@@ -499,7 +591,7 @@ def _sync_single_conversation_history(
     redis_client: ConversationRedisLike,
     stimulus: Stimulus,
     existing_history_ids: set[str],
-    event_callback: ConversationEntryEventCallback | None,
+    event_callback: StimulusEventCallback | None,
 ) -> None:
     history_stimulus_id = str(stimulus.stimulus_id or "").strip()
     if history_stimulus_id and history_stimulus_id in existing_history_ids:
@@ -523,7 +615,7 @@ def _append_merged_conversation_history_entry(
     stimulus: Stimulus,
     message: JsonValue,
     stimulus_id: str | None,
-    event_callback: ConversationEntryEventCallback | None,
+    event_callback: StimulusEventCallback | None,
 ) -> None:
     if not isinstance(message, dict):
         append_conversation_history(

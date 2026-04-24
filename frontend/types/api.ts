@@ -98,6 +98,8 @@ export interface StimulusQueueItem {
   timestamp: string;
 }
 
+export type StimulusEventPayload = StimulusQueueItem;
+
 export interface ConversationEntry {
   entry_id: string;
   role: string;
@@ -160,7 +162,14 @@ export interface StimuliResponse {
   requested_by: string;
 }
 
-export type SseEventName = "thought" | "state" | "action" | "reply" | "status";
+export type SseEventName =
+  | "thought"
+  | "state"
+  | "action"
+  | "reply"
+  | "status"
+  | "conversation_entry"
+  | "stimulus";
 
 export type SseEvent =
   | { type: "thought"; payload: ThoughtEventPayload }
@@ -168,6 +177,8 @@ export type SseEvent =
   | { type: "action"; payload: ActionEventPayload }
   | { type: "reply"; payload: ReplyEventPayload }
   | { type: "status"; payload: StatusEventPayload }
+  | { type: "conversation_entry"; payload: ConversationEntry }
+  | { type: "stimulus"; payload: StimulusEventPayload }
   // Initial snapshot events — reuse the response shapes.
   | { type: "actions"; payload: ActionsResponse }
   | { type: "conversation"; payload: ConversationHistoryResponse }

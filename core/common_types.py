@@ -314,16 +314,21 @@ class SerializedThought(TypedDict):
 
 
 type ThoughtEventPayload = list[SerializedThought]
+type StimulusBucket = Literal["noticed", "echo_current", "echo_recent"]
 
 
 class StimulusQueueItem(TypedDict):
     stimulus_id: str
     type: str
-    bucket: Literal["noticed", "echo_current", "echo_recent"]
+    bucket: StimulusBucket
     priority: int
     source: str | None
     summary: str
     timestamp: str
+
+
+class StimulusEventPayload(StimulusQueueItem):
+    pass
 
 
 class StimuliResponse(TypedDict):
@@ -339,6 +344,7 @@ type EventPayload = (
     | ReplyEventPayload
     | StateEventPayload
     | StatusEventPayload
+    | StimulusEventPayload
     | ThoughtEventPayload
 )
 

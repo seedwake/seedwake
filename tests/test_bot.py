@@ -373,6 +373,12 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(envelope["payload"]["role"], "user")
         self.assertEqual(envelope["payload"]["source"], "telegram:1")
         self.assertEqual(envelope["payload"]["content"], "你好")
+        self.assertEqual(envelope["payload"]["direction"], "inbound")
+        self.assertEqual(envelope["payload"]["speaker_name"], "alice")
+        self.assertEqual(envelope["payload"]["username"], "alice")
+        self.assertEqual(envelope["payload"]["full_name"], "alice")
+        self.assertEqual(envelope["payload"]["chat_id"], "1")
+        self.assertEqual(envelope["payload"]["message_id"], "1001")
         _reply_text_mock(update).assert_not_awaited()
 
     async def test_handle_text_message_stores_reply_context_metadata(self) -> None:

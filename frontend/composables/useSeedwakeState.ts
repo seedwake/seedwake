@@ -30,6 +30,12 @@ export interface StreamItem {
 // is purged whole-cycle-at-a-time. This bounds memory regardless of uptime and
 // enforces that observers can only see recent context (no scrollback history leak).
 const MAX_CYCLES = 4;
+const MAX_STIMULI = 50;
+const STIMULUS_BUCKET_RANK: Record<string, number> = {
+  noticed: 0,
+  echo_current: 0,
+  echo_recent: 1,
+};
 
 function attendedByCycle(thoughts: SerializedThought[]): Map<number, string> {
   const best = new Map<number, { id: string; weight: number }>();
@@ -74,6 +80,23 @@ function rebuildStream(thoughts: SerializedThought[]): StreamItem[] {
     });
   }
   return items;
+}
+
+function normalizeStimuli(items: StimulusQueueItem[]): StimulusQueueItem[] {
+  const rank = (it: StimulusQueueItem) => STIMULUS_BUCKET_RANK[it.bucket] ?? 99;
+  const groupKey = (it: StimulusQueueItem): string => {
+    const src = (it.source || "").trim();
+    return src.startsWith("action:") ? src : `stim:${it.stimulus_id}`;
+  };
+  const byGroup = new Map<string, StimulusQueueItem>();
+  for (const item of items) {
+    const key = groupKey(item);
+    const existing = byGroup.get(key);
+    if (!existing || rank(item) < rank(existing)) byGroup.set(key, item);
+  }
+  return [...byGroup.values()].sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+  );
 }
 
 export function useSeedwakeState() {
@@ -179,34 +202,11 @@ export function useSeedwakeState() {
       }
       conversation.value = [...conversation.value, entry].slice(-30);
     },
+    upsertStimulus(item: StimulusQueueItem) {
+      stimuli.value = normalizeStimuli([...stimuli.value, item]).slice(-MAX_STIMULI);
+    },
     setStimuli(items: StimulusQueueItem[]) {
-      // Same action can surface twice in the merged payload: once in pending
-      // (`echo_current`) and once in the consumed cache (`echo_recent`), each
-      // with a different stimulus_id. Dedupe first by stimulus_id, then by
-      // action group key (source like "action:act_Cxxx-y"), preferring the
-      // freshest bucket (noticed/echo_current > echo_recent).
-      const BUCKET_RANK: Record<string, number> = {
-        noticed: 0,
-        echo_current: 0,
-        echo_recent: 1,
-      };
-      const rank = (it: StimulusQueueItem) => BUCKET_RANK[it.bucket] ?? 99;
-      const groupKey = (it: StimulusQueueItem): string => {
-        // action-origin stimuli share a stable "action:act_..." source — use it
-        // as the dedupe key across buckets. Fall back to stimulus_id for anything
-        // without a stable action link.
-        const src = (it.source || "").trim();
-        return src.startsWith("action:") ? src : `stim:${it.stimulus_id}`;
-      };
-      const byGroup = new Map<string, StimulusQueueItem>();
-      for (const item of items) {
-        const key = groupKey(item);
-        const existing = byGroup.get(key);
-        if (!existing || rank(item) < rank(existing)) byGroup.set(key, item);
-      }
-      stimuli.value = [...byGroup.values()].sort(
-        (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
-      );
+      stimuli.value = normalizeStimuli(items);
     },
     setActions(items: ActionItem[]) {
       // Backend returns newest-first (sorted by submitted_at DESC). Reverse to

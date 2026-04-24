@@ -31,6 +31,7 @@ useAutoScroll(streamRef, () => visibleItems.value.length, {
 });
 
 let releaseTimer: ReturnType<typeof setTimeout> | null = null;
+let pruneTimer: ReturnType<typeof setTimeout> | null = null;
 let initialReleaseDone = false;
 
 function pendingFromRaw(): StreamItem[] {
@@ -38,50 +39,103 @@ function pendingFromRaw(): StreamItem[] {
   return rawItems.value.filter((v) => !have.has(v.key));
 }
 
-function syncVisible(): void {
-  // Drop items no longer in raw AND refresh surviving ones to the freshest ref
-  // from rawItems. The second step matters because `attended` flips false for
-  // historical cycles once a new cycle becomes latest — without rewriting the
-  // ref, Vue keeps rendering the thought with its stale attended class.
+function syncVisible(pruneStale: boolean): void {
+  // Refresh surviving items to the freshest ref from rawItems. The second step
+  // matters because `attended` flips false for historical cycles once a new
+  // cycle becomes latest — without rewriting the ref, Vue keeps rendering the
+  // thought with its stale attended class.
+  //
+  // Stale visible items are pruned only after the drip queue finishes. Removing
+  // an old cycle before the new one has been released collapses scrollHeight and
+  // can race browser scroll anchoring against our smooth-scroll-to-bottom.
   const rawByKey = new Map<string, StreamItem>();
   for (const item of rawItems.value) rawByKey.set(item.key, item);
-  visibleItems.value = visibleItems.value
-    .filter((v) => rawByKey.has(v.key))
-    .map((v) => rawByKey.get(v.key)!);
+  const next: StreamItem[] = [];
+  for (const item of visibleItems.value) {
+    const fresh = rawByKey.get(item.key);
+    if (fresh) {
+      next.push(fresh);
+    } else if (!pruneStale) {
+      next.push(item);
+    }
+  }
+  visibleItems.value = next;
 }
 
-function releaseOne(): void {
-  releaseTimer = null;
-  const pending = pendingFromRaw();
-  if (pending.length === 0) return;
-  const item = pending[0]!;
-  // For thoughts, mark the key deferred BEFORE the reactive append, so Vue's
-  // very first render of the card already has the paused animation class in
-  // place — no frame where the card is visible at its final state. Separators
-  // pass through immediately (they're just hairlines).
-  if (item.kind === "thought") {
-    const next = new Set(deferredEntryKeys.value);
-    next.add(item.key);
-    deferredEntryKeys.value = next;
+function clearPruneTimer(): void {
+  if (pruneTimer !== null) {
+    clearTimeout(pruneTimer);
+    pruneTimer = null;
   }
-  visibleItems.value = [...visibleItems.value, item];
-  if (item.kind === "thought") {
+}
+
+function schedulePruneVisible(): void {
+  clearPruneTimer();
+  pruneTimer = setTimeout(() => {
+    pruneTimer = null;
+    syncVisible(true);
+  }, ENTRY_DEFER_MS);
+}
+
+function nextReleaseBatch(pending: StreamItem[]): StreamItem[] {
+  const first = pending[0];
+  if (!first) return [];
+  const second = pending[1];
+  if (first.kind === "separator" && second?.kind === "thought") {
+    return [first, second];
+  }
+  return [first];
+}
+
+function deferThoughtEntries(items: StreamItem[]): void {
+  const keys = items
+    .filter((item) => item.kind === "thought")
+    .map((item) => item.key);
+  if (keys.length === 0) return;
+  const next = new Set(deferredEntryKeys.value);
+  for (const key of keys) next.add(key);
+  deferredEntryKeys.value = next;
+}
+
+function scheduleThoughtEntryReveal(items: StreamItem[]): void {
+  for (const item of items) {
+    if (item.kind !== "thought") continue;
     setTimeout(() => {
       const next = new Set(deferredEntryKeys.value);
       next.delete(item.key);
       deferredEntryKeys.value = next;
     }, ENTRY_DEFER_MS);
   }
+}
+
+function releaseOne(): void {
+  releaseTimer = null;
+  const pending = pendingFromRaw();
+  if (pending.length === 0) return;
+  const items = nextReleaseBatch(pending);
+  // For thoughts, mark the key deferred BEFORE the reactive append, so Vue's
+  // very first render of the card already has the paused animation class in
+  // place — no frame where the card is visible at its final state. Separators
+  // pass through in the same DOM update as the first thought of their cycle.
+  deferThoughtEntries(items);
+  visibleItems.value = [...visibleItems.value, ...items];
+  scheduleThoughtEntryReveal(items);
   if (pendingFromRaw().length > 0) {
     // separators are just cycle dividers — no dwell time before the next thought
-    const delay = item.kind === "separator" ? 0 : THOUGHT_INTERVAL_MS;
+    const delay = items.some((item) => item.kind === "thought") ? THOUGHT_INTERVAL_MS : 0;
     releaseTimer = setTimeout(releaseOne, delay);
+  } else {
+    schedulePruneVisible();
   }
 }
 
 watch(rawItems, () => {
-  syncVisible();
-  if (pendingFromRaw().length === 0) return;
+  clearPruneTimer();
+  syncVisible(false);
+  if (pendingFromRaw().length === 0) {
+    if (releaseTimer === null) syncVisible(true);
+    return;
+  }
   if (!initialReleaseDone) {
     // first populate (SSR hydrate / SSE initial snapshot) — release the whole
     // rolling window at once so history doesn't drip-feed on page load
@@ -95,6 +149,7 @@ watch(rawItems, () => {
 
 onBeforeUnmount(() => {
   if (releaseTimer !== null) clearTimeout(releaseTimer);
+  clearPruneTimer();
 });
 
 // data-vi drives the per-card opacity ramp — newest = 5 (full), cascading back to 0.

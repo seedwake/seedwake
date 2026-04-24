@@ -10,6 +10,7 @@ import type {
   ReplyEventPayload,
   StateEventPayload,
   StatusEventPayload,
+  StimulusEventPayload,
   StimuliResponse,
   ThoughtEventPayload,
   ThoughtsResponse,
@@ -29,6 +30,27 @@ export function useStream() {
   const store = useSeedwakeState();
   const source = ref<EventSource | null>(null);
   const retryMs = ref(2_000);
+  let conversationRefreshInFlight: Promise<void> | null = null;
+  let lastConversationRefreshAt = 0;
+
+  async function refreshConversationSnapshot(force = false): Promise<void> {
+    const now = Date.now();
+    if (!force && now - lastConversationRefreshAt < 1_500) return;
+    if (conversationRefreshInFlight) return conversationRefreshInFlight;
+    lastConversationRefreshAt = now;
+    conversationRefreshInFlight = api
+      .get<ConversationHistoryResponse>("/conversation", { limit: 100 })
+      .then((payload) => {
+        if (payload?.items) store.setConversation(payload.items);
+      })
+      .catch((err) => {
+        console.error("[seedwake] conversation snapshot refresh failed:", err);
+      })
+      .finally(() => {
+        conversationRefreshInFlight = null;
+      });
+    return conversationRefreshInFlight;
+  }
 
   function connect() {
     if (import.meta.server) return;
@@ -56,12 +78,16 @@ export function useStream() {
       const payload = parseJson<ThoughtEventPayload>(e.data, "thought");
       if (payload && Array.isArray(payload)) {
         store.ingestThoughts(payload);
+        void refreshConversationSnapshot();
       }
     });
 
     es.addEventListener("state", (e: MessageEvent<string>) => {
       const payload = parseJson<StateEventPayload>(e.data, "state");
-      if (payload) store.applyState(payload);
+      if (payload) {
+        store.applyState(payload);
+        void refreshConversationSnapshot();
+      }
     });
 
     es.addEventListener("action", (e: MessageEvent<string>) => {
@@ -83,18 +109,13 @@ export function useStream() {
         };
         if (payload.request !== undefined) update.request = payload.request;
         store.upsertAction(update as ActionItem);
+        void refreshConversationSnapshot();
       }
     });
 
     es.addEventListener("reply", (e: MessageEvent<string>) => {
       const payload = parseJson<ReplyEventPayload>(e.data, "reply");
-      if (payload) {
-        store.appendConversationReply(
-          payload.target_name || "",
-          payload.message,
-          new Date().toISOString(),
-        );
-      }
+      if (payload) void refreshConversationSnapshot(true);
     });
 
     es.addEventListener("status", (e: MessageEvent<string>) => {
@@ -127,6 +148,11 @@ export function useStream() {
     es.addEventListener("conversation_entry", (e: MessageEvent<string>) => {
       const payload = parseJson<ConversationEntry>(e.data, "conversation_entry");
       if (payload?.entry_id) store.appendConversationEntry(payload);
+    });
+
+    es.addEventListener("stimulus", (e: MessageEvent<string>) => {
+      const payload = parseJson<StimulusEventPayload>(e.data, "stimulus");
+      if (payload?.stimulus_id) store.upsertStimulus(payload);
     });
 
     es.addEventListener("stimuli", (e: MessageEvent<string>) => {

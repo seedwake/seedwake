@@ -893,13 +893,55 @@ class StimulusQueueTests(unittest.TestCase):
             event_callback=lambda event_type, payload: events.append((event_type, payload)),
         )
 
-        queue.push("conversation", 1, "telegram:1", "你好")
+        queue.push(
+            "conversation",
+            1,
+            "telegram:1",
+            "你好",
+            metadata={
+                "telegram_chat_id": 1,
+                "telegram_message_id": 294,
+                "telegram_username": "alice",
+                "telegram_full_name": "Alice",
+            },
+        )
 
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0][0], "conversation_entry")
         self.assertEqual(events[0][1]["role"], "user")
         self.assertEqual(events[0][1]["source"], "telegram:1")
         self.assertEqual(events[0][1]["content"], "你好")
+        self.assertEqual(events[0][1]["direction"], "inbound")
+        self.assertEqual(events[0][1]["speaker_name"], "Alice")
+        self.assertEqual(events[0][1]["username"], "alice")
+        self.assertEqual(events[0][1]["full_name"], "Alice")
+        self.assertEqual(events[0][1]["chat_id"], "1")
+        self.assertEqual(events[0][1]["message_id"], "294")
+
+    def test_action_result_push_publishes_stimulus_event(self) -> None:
+        redis_stub = ListRedisStub()
+        events = []
+        queue = StimulusQueue(
+            redis_client=_as_conversation_redis(redis_stub),
+            event_callback=lambda event_type, payload: events.append((event_type, payload)),
+        )
+
+        queue.push(
+            "action_result",
+            4,
+            "action:act_C1-3",
+            "reading completed",
+            action_id="act_C1-3",
+            metadata={"origin": "action", "action_type": "reading", "status": "succeeded"},
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], "stimulus")
+        self.assertEqual(events[0][1]["type"], "action_result")
+        self.assertEqual(events[0][1]["bucket"], "echo_current")
+        self.assertEqual(events[0][1]["priority"], 4)
+        self.assertEqual(events[0][1]["source"], "action:act_C1-3")
+        self.assertEqual(events[0][1]["summary"], "reading completed")
 
     def test_pop_many_prefers_higher_priority(self) -> None:
         queue = StimulusQueue(redis_client=None)

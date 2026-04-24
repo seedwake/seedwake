@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import Annotated, Literal
+from typing import Annotated
 
 import redis as redis_lib
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -11,11 +11,18 @@ from backend.deps import require_redis, resolve_api_client
 from core.action import load_action_items
 from core.memory.short_term import REDIS_KEY as THOUGHT_REDIS_KEY
 from core.state import load_or_build_state_snapshot
-from core.stimulus import Stimulus, is_action_echo, load_recent_action_echoes, load_stimulus_queue
+from core.stimulus import (
+    Stimulus,
+    load_recent_action_echoes,
+    load_stimulus_queue,
+    pending_stimulus_bucket,
+    stimulus_queue_item,
+)
 from core.common_types import (
     ActionsResponse,
     JsonObject,
     StateEventPayload,
+    StimulusBucket,
     StimuliResponse,
     StimulusQueueItem,
     ThoughtsResponse,
@@ -38,9 +45,7 @@ ActionStatusFilter = Annotated[str | None, Query()]
 REDIS_UNAVAILABLE_RESPONSE = {
     503: {"description": "Redis unavailable"},
 }
-STIMULUS_SUMMARY_MAX_CHARS = 240
 PENDING_STIMULUS_SCAN_LIMIT = 100
-type StimulusBucket = Literal["noticed", "echo_current", "echo_recent"]
 type BucketedStimulus = tuple[StimulusBucket, Stimulus]
 
 
@@ -200,7 +205,7 @@ def _merged_stimulus_items(
     bucketed_stimuli = _dedup_bucketed_stimuli(bucketed_stimuli)
     bucketed_stimuli.sort(key=lambda item: item[1].timestamp, reverse=True)
     return [
-        _stimulus_queue_item(stimulus, bucket)
+        stimulus_queue_item(stimulus, bucket)
         for bucket, stimulus in bucketed_stimuli[:limit]
     ]
 
@@ -246,32 +251,7 @@ def _bucketed_pending_stimuli(
 ) -> list[BucketedStimulus]:
     bucketed: list[BucketedStimulus] = []
     for stimulus in stimuli:
-        if stimulus.type == "conversation":
-            continue
-        if is_action_echo(stimulus):
-            bucketed.append(("echo_current", stimulus))
-        else:
-            bucketed.append(("noticed", stimulus))
+        bucket = pending_stimulus_bucket(stimulus)
+        if bucket is not None:
+            bucketed.append((bucket, stimulus))
     return bucketed
-
-
-def _stimulus_queue_item(
-    stimulus: Stimulus,
-    bucket: StimulusBucket,
-) -> StimulusQueueItem:
-    return {
-        "stimulus_id": stimulus.stimulus_id,
-        "type": stimulus.type,
-        "bucket": bucket,
-        "priority": stimulus.priority,
-        "source": stimulus.source or None,
-        "summary": _compact_summary(stimulus.content),
-        "timestamp": stimulus.timestamp.isoformat(),
-    }
-
-
-def _compact_summary(content: str) -> str:
-    compact = " ".join(content.split())
-    if len(compact) <= STIMULUS_SUMMARY_MAX_CHARS:
-        return compact
-    return compact[:STIMULUS_SUMMARY_MAX_CHARS - 1].rstrip() + "…"

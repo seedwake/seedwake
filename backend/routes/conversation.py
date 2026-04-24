@@ -9,8 +9,8 @@ from pydantic import BaseModel
 
 from backend.deps import require_redis, resolve_admin, resolve_api_client
 from core.action import push_action_control
-from core.stimulus import load_conversation_history
-from core.common_types import ActionConfirmResponse, ConversationEntry, ConversationHistoryResponse, JsonObject
+from core.stimulus import enrich_conversation_entry, load_conversation_history
+from core.common_types import ActionConfirmResponse, ConversationHistoryResponse
 
 router = APIRouter(prefix="/api")
 REDIS_ROUTE_EXCEPTIONS = (
@@ -41,7 +41,7 @@ def get_conversation_history(
 ) -> ConversationHistoryResponse:
     redis_client = require_redis(request)
     try:
-        items = [_enriched_conversation_entry(item) for item in load_conversation_history(redis_client, limit)]
+        items = [enrich_conversation_entry(item) for item in load_conversation_history(redis_client, limit)]
     except REDIS_ROUTE_EXCEPTIONS as exc:
         raise HTTPException(status_code=503, detail=f"redis read failed: {exc}") from exc
     return {
@@ -71,44 +71,3 @@ def confirm_action(
     if not pushed:
         raise HTTPException(status_code=503, detail="action control unavailable")
     return {"ok": True, "action_id": body.action_id, "approved": body.approved}
-
-
-def _enriched_conversation_entry(entry: ConversationEntry) -> ConversationEntry:
-    metadata = entry.get("metadata")
-    safe_metadata = metadata if isinstance(metadata, dict) else {}
-    enriched: ConversationEntry = dict(entry)
-    role = str(enriched.get("role") or "")
-    source = str(enriched.get("source") or "")
-    enriched["direction"] = "outbound" if role == "assistant" else "inbound"
-    enriched["speaker_name"] = _speaker_name(role, source, safe_metadata)
-    chat_id = _chat_id(source, safe_metadata)
-    if chat_id:
-        enriched["chat_id"] = chat_id
-    username = str(safe_metadata.get("telegram_username") or "").strip()
-    if username:
-        enriched["username"] = username
-    full_name = str(safe_metadata.get("telegram_full_name") or "").strip()
-    if full_name:
-        enriched["full_name"] = full_name
-    message_id = str(safe_metadata.get("telegram_message_id") or "").strip()
-    if message_id:
-        enriched["message_id"] = message_id
-    return enriched
-
-
-def _speaker_name(role: str, source: str, metadata: JsonObject) -> str:
-    if role == "assistant":
-        return "Seedwake"
-    full_name = str(metadata.get("telegram_full_name") or "").strip()
-    username = str(metadata.get("telegram_username") or "").strip()
-    return full_name or username or source
-
-
-def _chat_id(source: str, metadata: JsonObject) -> str:
-    raw_chat_id = str(metadata.get("telegram_chat_id") or "").strip()
-    if raw_chat_id:
-        return raw_chat_id
-    prefix = "telegram:"
-    if source.startswith(prefix):
-        return source.removeprefix(prefix)
-    return ""
