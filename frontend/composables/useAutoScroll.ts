@@ -9,6 +9,7 @@ import type { Ref } from "vue";
 export function useAutoScroll(
   elRef: Ref<HTMLElement | null>,
   getCount: () => number,
+  opts?: { smooth?: boolean },
 ): { isOverflowing: Ref<boolean> } {
   const THRESHOLD = 48;
   const isOverflowing = ref(false);
@@ -31,7 +32,14 @@ export function useAutoScroll(
     const stick = isAtBottom(node);
     await nextTick();
     if (firstPopulation || stick) {
-      node.scrollTop = node.scrollHeight;
+      // First population uses instant jump so a freshly loaded page lands at the
+      // bottom without animating; incremental updates can opt into smooth via
+      // `opts.smooth` so each new item glides into view.
+      if (firstPopulation || !opts?.smooth) {
+        node.scrollTop = node.scrollHeight;
+      } else {
+        node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+      }
       if (firstPopulation) initialScrollDone = true;
     }
     updateOverflow();

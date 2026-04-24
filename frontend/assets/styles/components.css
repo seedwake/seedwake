@@ -153,7 +153,7 @@ html[lang="en"] .meter .head .zh { display: none; }
 .meter .sub { margin-top: 5px; font-family: var(--mono); font-size: 9.5px; color: var(--ink-faint); letter-spacing: 0.04em; }
 
 /* stream column */
-.stream-col { padding: 0; }
+.stream-col { padding: 0; position: relative; }
 .stream-head {
   padding: 28px 44px 16px;
   display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
@@ -422,7 +422,8 @@ body.drowsy .stream-foot .live .beat { animation-duration: 4s; }
 }
 
 .drowsy-banner {
-  position: absolute; left: 44px; right: 44px; bottom: 52px;
+  /* anchored to .stream-col (not .stream) so scroll position cannot move it */
+  position: absolute; left: 44px; right: 44px; bottom: 88px;
   display: flex; align-items: center; gap: 16px;
   font-family: var(--serif); font-size: 16px; font-weight: 600;
   color: oklch(0.3 0.04 50); letter-spacing: 0.14em;
@@ -469,7 +470,6 @@ body.deep .deep-center { opacity: 1; transform: translateY(0); }
   position: relative;
   display: flex; align-items: center; justify-content: center;
   filter: url(#seal-bite);
-  transform: rotate(-2deg);
 }
 .seal::before {
   content: ""; position: absolute; inset: 2px; border-radius: 3px;

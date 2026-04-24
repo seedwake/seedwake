@@ -1,16 +1,68 @@
 <script setup lang="ts">
 import type { ActionItem } from "~/types/api";
+import type { StreamItem } from "~/composables/useSeedwakeState";
 
 const { t } = useI18n();
 const resolveI18nText = useI18nText();
 const store = useSeedwakeState();
 
-// Render every thought in the rolling window so the user can scroll up to see history;
-// auto-scroll keeps the view pinned to the latest when they're already at the bottom.
-const visibleItems = computed(() => store.streamItems.value);
+// Drip-feed reveal: raw items (from the store) are the source of truth, but we
+// release them into the rendered list one at a time so a multi-thought cycle
+// doesn't pop in as a pre-allocated block. Each thought waits THOUGHT_INTERVAL_MS
+// after the previous one; separators (cycle dividers) release immediately so
+// they arrive paired with the first thought of their cycle.
+const rawItems = computed<StreamItem[]>(() => store.streamItems.value);
+const visibleItems = ref<StreamItem[]>([]);
+const THOUGHT_INTERVAL_MS = 3000;
 
 const streamRef = ref<HTMLElement | null>(null);
-useAutoScroll(streamRef, () => visibleItems.value.length);
+// smooth:true so each release glides the viewport to the new bottom rather than
+// jump-cutting. First population still uses instant scroll inside useAutoScroll.
+useAutoScroll(streamRef, () => visibleItems.value.length, { smooth: true });
+
+let releaseTimer: ReturnType<typeof setTimeout> | null = null;
+let initialReleaseDone = false;
+
+function pendingFromRaw(): StreamItem[] {
+  const have = new Set(visibleItems.value.map((v) => v.key));
+  return rawItems.value.filter((v) => !have.has(v.key));
+}
+
+function syncRemovals(): void {
+  const rawKeys = new Set(rawItems.value.map((v) => v.key));
+  visibleItems.value = visibleItems.value.filter((v) => rawKeys.has(v.key));
+}
+
+function releaseOne(): void {
+  releaseTimer = null;
+  const pending = pendingFromRaw();
+  if (pending.length === 0) return;
+  const item = pending[0]!;
+  visibleItems.value = [...visibleItems.value, item];
+  if (pendingFromRaw().length > 0) {
+    // separators are just cycle dividers — no dwell time before the next thought
+    const delay = item.kind === "separator" ? 0 : THOUGHT_INTERVAL_MS;
+    releaseTimer = setTimeout(releaseOne, delay);
+  }
+}
+
+watch(rawItems, () => {
+  syncRemovals();
+  if (pendingFromRaw().length === 0) return;
+  if (!initialReleaseDone) {
+    // first populate (SSR hydrate / SSE initial snapshot) — release the whole
+    // rolling window at once so history doesn't drip-feed on page load
+    visibleItems.value = [...rawItems.value];
+    initialReleaseDone = true;
+    return;
+  }
+  if (releaseTimer !== null) return; // drip loop already running
+  releaseOne();
+}, { immediate: true });
+
+onBeforeUnmount(() => {
+  if (releaseTimer !== null) clearTimeout(releaseTimer);
+});
 
 // data-vi drives the per-card opacity ramp — newest = 5 (full), cascading back to 0.
 // Items further than 5 back stay at 0, which combined with the top mask reads as
@@ -42,8 +94,10 @@ const counter = computed(() => {
   if (mode === "deep_sleep") {
     return t("stream_foot.counter_deep");
   }
-  // waking — show attended-thought counter if available
-  const items = store.streamItems.value;
+  // waking — show attended-thought counter if available.
+  // Use visibleItems (not raw) so the counter tracks what the viewer actually
+  // sees, not what's been queued for drip-release.
+  const items = visibleItems.value;
   for (let i = items.length - 1; i >= 0; i -= 1) {
     const it = items[i];
     if (it && it.kind === "thought" && it.attended && it.thought) {
@@ -93,14 +147,15 @@ const resumeHint = computed(() => {
             :attended="!!item.attended"
             :visual-index="viForItem(i)"
             :action-status="actionForThought(store.actions.value, item.thought.thought_id)"
-            :style="`--enter-delay: ${(item.thought.index - 1) * 240}ms`"
           />
         </template>
       </div>
-      <div v-if="drowsyBanner" class="drowsy-banner">
-        <span>{{ drowsyBanner }}</span>
-        <small>{{ resumeHint }}</small>
-      </div>
+    </div>
+    <!-- Banner lives outside the scroll container so it stays pinned to the
+         column bottom regardless of scrollTop. -->
+    <div v-if="drowsyBanner" class="drowsy-banner">
+      <span>{{ drowsyBanner }}</span>
+      <small>{{ resumeHint }}</small>
     </div>
     <div class="stream-foot">
       <span class="live">
