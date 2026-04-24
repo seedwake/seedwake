@@ -52,7 +52,7 @@ body.drowsy .mode-bloom {
 
 .app {
   position: relative; z-index: 2;
-  display: grid; grid-template-columns: 25% 60% 15%;
+  display: grid; grid-template-columns: minmax(300px, 360px) 1fr minmax(320px, 420px);
   width: 100vw; height: 100vh;
   transition: opacity 800ms ease, filter 800ms ease;
 }
