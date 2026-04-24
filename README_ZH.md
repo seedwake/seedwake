@@ -74,6 +74,15 @@ pnpm exec nuxt dev --host 127.0.0.1 --port 3000
 
 打开 `http://127.0.0.1:3000`。
 
+静态前端 demo（不需要 backend）：
+
+```bash
+cd frontend
+pnpm install
+pnpm run generate:demo:zh   # 或 generate:demo:en
+pnpm run preview
+```
+
 ## 文档
 
 - [docs/concepts_zh.md](./docs/concepts_zh.md) — 项目理念、佛学对应、长期运行观察。

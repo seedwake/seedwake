@@ -85,8 +85,10 @@ export default {
 
   stream_foot: {
     streaming: "stream · streaming from /api/stream",
+    demo_streaming: "stream · static demo timeline",
     paused: "stream · paused · heartbeat still there",
-    sse_types: "SSE · thought / reply / action / status",
+    sse_types: "SSE · thought / conversation / action / status",
+    demo_types: "DEMO · mock thought / action / conversation / stimulus",
     counter_streaming: "C{cycle} · streaming · ▲ scroll to recall",
     counter_attended: "{thought_id} · attended · ▲ scroll to recall",
     counter_paused: "paused at C{cycle} · integrating",

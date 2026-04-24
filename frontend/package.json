@@ -5,6 +5,9 @@
   "scripts": {
     "dev": "nuxt dev",
     "build": "nuxt build",
+    "generate": "nuxt generate",
+    "generate:demo:zh": "NUXT_PUBLIC_DEMO=true NUXT_PUBLIC_LANGUAGE=zh nuxt generate",
+    "generate:demo:en": "NUXT_PUBLIC_DEMO=true NUXT_PUBLIC_LANGUAGE=en nuxt generate",
     "preview": "nuxt preview",
     "typecheck": "nuxt typecheck"
   },

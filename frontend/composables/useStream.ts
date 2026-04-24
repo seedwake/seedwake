@@ -25,6 +25,10 @@ function parseJson<T>(data: string, kind: string): T | null {
 }
 
 export function useStream() {
+  const config = useRuntimeConfig();
+  const demoFlag = config.public.demo as boolean | string | undefined;
+  if (demoFlag === true || demoFlag === "true") return useDemoStream();
+
   const api = useApi();
   const store = useSeedwakeState();
   const source = ref<EventSource | null>(null);

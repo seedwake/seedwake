@@ -11,6 +11,7 @@ export default defineNuxtConfig({
     backendApiToken: "",
     public: {
       language: "zh",
+      demo: false,
     },
   },
 

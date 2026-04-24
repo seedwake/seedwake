@@ -5,6 +5,11 @@ import type { StreamItem } from "~/composables/useSeedwakeState";
 const { t } = useI18n();
 const resolveI18nText = useI18nText();
 const store = useSeedwakeState();
+const config = useRuntimeConfig();
+const demoFlag = computed(() => {
+  const value = config.public.demo as boolean | string | undefined;
+  return value === true || value === "true";
+});
 
 // Drip-feed reveal: raw items (from the store) are the source of truth, but we
 // release them into the rendered list one at a time so a multi-thought cycle
@@ -169,8 +174,13 @@ const counter = computed(() => {
 
 const streamLabel = computed(() => {
   if (store.mode.value === "light_sleep") return t("stream_foot.paused");
+  if (demoFlag.value) return t("stream_foot.demo_streaming");
   return t("stream_foot.streaming");
 });
+
+const streamTypesLabel = computed(() =>
+  demoFlag.value ? t("stream_foot.demo_types") : t("stream_foot.sse_types"),
+);
 
 const drowsyBanner = computed(() => {
   if (store.mode.value !== "light_sleep") return null;
@@ -219,7 +229,7 @@ const resumeHint = computed(() => {
         <span class="beat" />
         <span>{{ streamLabel }}</span>
       </span>
-      <span>{{ t("stream_foot.sse_types") }}</span>
+      <span>{{ streamTypesLabel }}</span>
     </div>
   </section>
 </template>

@@ -43,14 +43,6 @@ export interface ActionEventPayload {
   request?: Record<string, unknown>;
 }
 
-export interface ReplyEventPayload {
-  source: string;
-  message: string;
-  stimulus_id: string | null;
-  target_name?: string;
-  target_source?: string;
-}
-
 export interface StatusEventPayload {
   message: I18nTextPayload;
   username?: string;
@@ -166,7 +158,6 @@ export type SseEventName =
   | "thought"
   | "state"
   | "action"
-  | "reply"
   | "status"
   | "conversation_entry"
   | "stimulus";
@@ -175,7 +166,6 @@ export type SseEvent =
   | { type: "thought"; payload: ThoughtEventPayload }
   | { type: "state"; payload: StateEventPayload }
   | { type: "action"; payload: ActionEventPayload }
-  | { type: "reply"; payload: ReplyEventPayload }
   | { type: "status"; payload: StatusEventPayload }
   | { type: "conversation_entry"; payload: ConversationEntry }
   | { type: "stimulus"; payload: StimulusEventPayload }
