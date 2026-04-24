@@ -1,4 +1,4 @@
-"""Read/query routes for recent thoughts and action state."""
+"""Read/query routes for runtime state, thoughts, stimuli, and actions."""
 
 import json
 import logging
@@ -7,10 +7,20 @@ from typing import Annotated
 import redis as redis_lib
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from backend.deps import require_redis, resolve_admin, resolve_api_client
+from backend.deps import require_redis, resolve_api_client
 from core.action import load_action_items
 from core.memory.short_term import REDIS_KEY as THOUGHT_REDIS_KEY
-from core.common_types import ActionsResponse, JsonObject, ThoughtsResponse
+from core.state import load_or_build_state_snapshot
+from core.stimulus import Stimulus, load_stimulus_queue
+from core.common_types import (
+    ActionsResponse,
+    JsonObject,
+    StateEventPayload,
+    StimuliResponse,
+    StimulusQueueItem,
+    ThoughtsResponse,
+    coerce_json_object,
+)
 
 router = APIRouter(prefix="/api")
 logger = logging.getLogger(__name__)
@@ -20,14 +30,26 @@ REDIS_ROUTE_EXCEPTIONS = (
     TypeError,
     ValueError,
 )
-AdminUsername = Annotated[str, Depends(resolve_admin)]
 ApiClient = Annotated[str, Depends(resolve_api_client)]
 ThoughtLimit = Annotated[int, Query(ge=1, le=300)]
 ActionLimit = Annotated[int, Query(ge=1, le=300)]
+StimulusLimit = Annotated[int, Query(ge=1, le=100)]
 ActionStatusFilter = Annotated[str | None, Query()]
 REDIS_UNAVAILABLE_RESPONSE = {
     503: {"description": "Redis unavailable"},
 }
+STIMULUS_SUMMARY_MAX_CHARS = 240
+
+
+@router.get("/state", responses=REDIS_UNAVAILABLE_RESPONSE)
+def get_state(
+    request: Request,
+    api_client: ApiClient,
+) -> StateEventPayload:
+    _ = api_client
+    redis_client = require_redis(request)
+    config = coerce_json_object(request.app.state.config) or {}
+    return load_or_build_state_snapshot(redis_client, config)
 
 
 @router.get("/thoughts", responses=REDIS_UNAVAILABLE_RESPONSE)
@@ -50,13 +72,11 @@ def list_recent_thoughts(
 def list_actions(
     request: Request,
     api_client: ApiClient,
-    admin_username: AdminUsername,
     limit: ActionLimit = 100,
     status: ActionStatusFilter = None,
 ) -> ActionsResponse:
-    _ = api_client
     redis_client = require_redis(request)
-    items = _load_action_items(redis_client)
+    items = [_action_response_item(item) for item in _load_action_items(redis_client)]
     if status:
         allowed = {part.strip() for part in status.split(",") if part.strip()}
         items = [item for item in items if str(item.get("status") or "") in allowed]
@@ -66,7 +86,27 @@ def list_actions(
         "ok": True,
         "items": items,
         "count": len(items),
-        "requested_by": admin_username,
+        "requested_by": api_client,
+    }
+
+
+@router.get("/stimuli", responses=REDIS_UNAVAILABLE_RESPONSE)
+def list_stimuli(
+    request: Request,
+    api_client: ApiClient,
+    limit: StimulusLimit = 20,
+) -> StimuliResponse:
+    redis_client = require_redis(request)
+    try:
+        stimuli = load_stimulus_queue(redis_client, limit)
+    except REDIS_ROUTE_EXCEPTIONS as exc:
+        raise HTTPException(status_code=503, detail=f"redis read failed: {exc}") from exc
+    items = [_stimulus_queue_item(stimulus) for stimulus in stimuli]
+    return {
+        "ok": True,
+        "items": items,
+        "count": len(items),
+        "requested_by": api_client,
     }
 
 
@@ -94,3 +134,63 @@ def _load_recent_thoughts(redis_client, limit: int) -> list[JsonObject]:
             continue
         items.append(item)
     return items
+
+
+def _action_response_item(item: JsonObject) -> JsonObject:
+    response_item = dict(item)
+    response_item["summary"] = _action_response_summary(item)
+    result = response_item.get("result")
+    if isinstance(result, dict):
+        response_item["result"] = _public_action_result(result)
+    return response_item
+
+
+def _public_action_result(result: JsonObject) -> JsonObject:
+    public_result = dict(result)
+    public_result.pop("summary_key", None)
+    public_result.pop("summary_params", None)
+    return public_result
+
+
+def _action_response_summary(item: JsonObject) -> JsonObject:
+    result = item.get("result")
+    if isinstance(result, dict):
+        key = str(result.get("summary_key") or "").strip()
+        params = result.get("summary_params")
+        if key:
+            return {
+                "key": key,
+                "params": coerce_json_object(params) or {},
+            }
+        summary = str(result.get("summary") or "").strip()
+        if summary:
+            return {
+                "key": "action.completed_with_summary",
+                "params": {"summary": summary},
+            }
+    if bool(item.get("awaiting_confirmation")):
+        return {"key": "action.awaiting_status", "params": {}}
+    status = str(item.get("status") or "").strip()
+    if status == "running":
+        return {"key": "action.running_status", "params": {}}
+    if status == "pending":
+        return {"key": "action.submitted_status", "params": {}}
+    return {"key": "action.completed_default", "params": {}}
+
+
+def _stimulus_queue_item(stimulus: Stimulus) -> StimulusQueueItem:
+    return {
+        "stimulus_id": stimulus.stimulus_id,
+        "type": stimulus.type,
+        "priority": stimulus.priority,
+        "source": stimulus.source or None,
+        "summary": _compact_summary(stimulus.content),
+        "timestamp": stimulus.timestamp.isoformat(),
+    }
+
+
+def _compact_summary(content: str) -> str:
+    compact = " ".join(content.split())
+    if len(compact) <= STIMULUS_SUMMARY_MAX_CHARS:
+        return compact
+    return compact[:STIMULUS_SUMMARY_MAX_CHARS - 1].rstrip() + "…"

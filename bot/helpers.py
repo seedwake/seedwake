@@ -1,8 +1,15 @@
 import json
 import re
 
-from core.common_types import ActionEventPayload, StatusEventPayload, ThoughtEventPayload
-from core.i18n import t
+from core.common_types import (
+    ActionEventPayload,
+    I18nTextPayload,
+    JsonObject,
+    SerializedThought,
+    StatusEventPayload,
+    ThoughtEventPayload,
+)
+from core.i18n import localized_thought_type, t
 
 TELEGRAM_MESSAGE_MAX_CHARS = 4096
 
@@ -40,7 +47,7 @@ def format_action_event(payload: ActionEventPayload) -> str:
     action_type = str(payload.get("type") or "").strip()
     executor = str(payload.get("executor") or "").strip()
     status = str(payload.get("status") or "").strip()
-    summary = _event_summary_text(str(payload.get("summary") or ""))
+    summary = _format_i18n_text(payload.get("summary"))
     if not action_id:
         return ""
     prefix = (
@@ -56,33 +63,27 @@ def format_action_event(payload: ActionEventPayload) -> str:
 
 
 def format_status_event(payload: StatusEventPayload) -> str:
-    message = str(payload.get("message") or "").strip()
+    message = _format_i18n_text(payload.get("message"))
     if not message:
         return ""
     return t("bot.system_status_prefix", message=message)
 
 
 def format_thought_event(payload: ThoughtEventPayload) -> str:
-    cycle_id = payload.get("cycle_id")
-    lines = payload.get("lines")
-    if not isinstance(cycle_id, int):
+    cycle_id = _thought_event_cycle_id(payload)
+    if cycle_id is None:
         return ""
-    if not isinstance(lines, list):
-        return ""
-    normalized_lines = [str(line).strip() for line in lines if str(line).strip()]
+    normalized_lines = _thought_event_lines(payload)
     if not normalized_lines:
         return ""
     return "\n".join([f"── C{cycle_id} ──", *normalized_lines]).strip()
 
 
 def format_thought_event_chunks(payload: ThoughtEventPayload) -> list[str]:
-    cycle_id = payload.get("cycle_id")
-    lines = payload.get("lines")
-    if not isinstance(cycle_id, int):
+    cycle_id = _thought_event_cycle_id(payload)
+    if cycle_id is None:
         return []
-    if not isinstance(lines, list):
-        return []
-    normalized_lines = [str(line).strip() for line in lines if str(line).strip()]
+    normalized_lines = _thought_event_lines(payload)
     if not normalized_lines:
         return []
     header = f"── C{cycle_id} ──"
@@ -92,6 +93,31 @@ def format_thought_event_chunks(payload: ThoughtEventPayload) -> list[str]:
     body = "\n".join(normalized_lines)
     body_chunks = _split_telegram_body(body, available_chars)
     return [f"{header}\n{chunk}".strip() for chunk in body_chunks if chunk.strip()]
+
+
+def _thought_event_cycle_id(payload: ThoughtEventPayload) -> int | None:
+    if not payload:
+        return None
+    cycle_id = payload[0].get("cycle_id")
+    return cycle_id if isinstance(cycle_id, int) else None
+
+
+def _thought_event_lines(payload: ThoughtEventPayload) -> list[str]:
+    return [
+        line
+        for line in (_thought_event_line(thought) for thought in payload)
+        if line
+    ]
+
+
+def _thought_event_line(thought: SerializedThought) -> str:
+    content = str(thought.get("content") or "").strip()
+    if not content:
+        return ""
+    display_type = localized_thought_type(str(thought.get("type") or ""))
+    trigger_ref = str(thought.get("trigger_ref") or "").strip()
+    suffix = f" (← {trigger_ref})" if trigger_ref else ""
+    return f"[{display_type}] {content}{suffix}"
 
 
 def _load_numeric_user_ids(config: dict, key: str) -> list[int]:
@@ -130,6 +156,32 @@ def _extract_embedded_summary(summary: str) -> str | None:
         return None
     extracted = str(payload.get("summary") or "").strip()
     return extracted or None
+
+
+def _format_i18n_text(payload: I18nTextPayload | object) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    key = str(payload.get("key") or "").strip()
+    if not key:
+        return ""
+    params = _i18n_text_params(payload.get("params"))
+    try:
+        return t(key, **params)
+    except KeyError:
+        return key
+
+
+def _i18n_text_params(value: object) -> JsonObject:
+    if not isinstance(value, dict):
+        return {}
+    params: JsonObject = {
+        str(key): item
+        for key, item in value.items()
+    }
+    summary = params.get("summary")
+    if isinstance(summary, str):
+        params["summary"] = _event_summary_text(summary)
+    return params
 
 
 def _split_telegram_body(text: str, max_chars: int) -> list[str]:

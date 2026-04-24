@@ -39,6 +39,7 @@ def read_news_result(feed_urls: list[str], timeout_seconds: int = 30) -> ActionR
             summary=t("rss.feed_not_configured"),
             data={},
             error_detail="news_feed_urls_not_configured",
+            summary_key="rss.feed_not_configured",
         )
 
     items: list[tuple[NewsItem, float | None, int]] = []
@@ -75,6 +76,8 @@ def read_news_result(feed_urls: list[str], timeout_seconds: int = 30) -> ActionR
             summary=summarize_news_items(ordered_items),
             data=data,
             error_detail=None,
+            summary_key="rss.entries_read",
+            summary_params={"count": len(ordered_items)},
         )
     if failures:
         return _build_result(
@@ -82,12 +85,14 @@ def read_news_result(feed_urls: list[str], timeout_seconds: int = 30) -> ActionR
             summary=t("rss.read_failed"),
             data=data,
             error_detail="; ".join(failures),
+            summary_key="rss.read_failed",
         )
     return _build_result(
         ok=True,
         summary=t("rss.no_new_entries"),
         data=data,
         error_detail=None,
+        summary_key="rss.no_new_entries",
     )
 
 
@@ -97,8 +102,10 @@ def _build_result(
     summary: str,
     data: JsonObject,
     error_detail: JsonValue,
+    summary_key: str = "",
+    summary_params: JsonObject | None = None,
 ) -> ActionResultEnvelope:
-    return {
+    result: ActionResultEnvelope = {
         "ok": ok,
         "summary": summary,
         "data": data,
@@ -107,6 +114,10 @@ def _build_result(
         "session_key": None,
         "transport": "native",
     }
+    if summary_key:
+        result["summary_key"] = summary_key
+        result["summary_params"] = summary_params or {}
+    return result
 
 
 def _fetch_feed_text(feed_url: str, *, timeout_seconds: float) -> str:

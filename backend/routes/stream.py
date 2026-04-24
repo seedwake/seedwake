@@ -4,12 +4,14 @@ import json
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from backend.deps import resolve_api_client
+from backend.routes.conversation import get_conversation_history
+from backend.routes.query import get_state, list_actions, list_stimuli
 from core.memory.short_term import REDIS_CHANNEL as THOUGHT_CHANNEL
-from core.common_types import EventEnvelope, EventPayload, StatusEventPayload
+from core.common_types import EventEnvelope, JsonObject, JsonValue, StatusEventPayload, coerce_json_value
 
 router = APIRouter(prefix="/api")
 EVENT_CHANNEL = "seedwake:events"
@@ -25,7 +27,7 @@ def stream_events(
     redis_client = request.app.state.redis
     if redis_client is None:
         return StreamingResponse(
-            iter(["event: status\ndata: {\"message\": \"redis unavailable\"}\n\n"]),
+            iter([_format_sse("status", _stream_status_payload("status.redis_unavailable"))]),
             media_type="text/event-stream",
         )
     pubsub = redis_client.pubsub(ignore_subscribe_messages=True)
@@ -33,7 +35,7 @@ def stream_events(
 
     def generate():
         try:
-            yield _format_sse("status", _stream_status_payload("stream_connected", api_client))
+            yield from _initial_stream_chunks(request, api_client)
             while True:
                 try:
                     yield _stream_next_chunk(pubsub)
@@ -43,7 +45,7 @@ def stream_events(
         # noinspection PyBroadException
         except Exception as exc:
             logger.exception("unexpected SSE stream failure: %s", exc)
-            yield _format_sse("status", _stream_status_payload("stream_error"))
+            yield _format_sse("status", _stream_status_payload("status.stream_error"))
         finally:
             pubsub.close()
 
@@ -91,12 +93,37 @@ def _raw_sse(event_name: str, raw_json: str) -> str:
     return f"event: {event_name}\ndata: {raw_json}\n\n"
 
 
-def _format_sse(event_name: str, payload: EventPayload) -> str:
+def _format_sse(event_name: str, payload: JsonValue) -> str:
     return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def _stream_status_payload(message: str, username: str | None = None) -> StatusEventPayload:
-    payload: StatusEventPayload = {"message": message}
+def _stream_status_payload(key: str, username: str | None = None) -> StatusEventPayload:
+    params: JsonObject = {}
+    payload: StatusEventPayload = {"message": {"key": key, "params": params}}
     if username:
         payload["username"] = username
+        params["username"] = username
     return payload
+
+
+def _initial_stream_chunks(request: Request, api_client: str) -> list[str]:
+    chunks = [_format_sse("status", _stream_status_payload("status.stream_connected", api_client))]
+    for event_name, payload in _initial_snapshot_events(request, api_client):
+        chunks.append(_format_sse(event_name, payload))
+    return chunks
+
+
+def _initial_snapshot_events(request: Request, api_client: str) -> list[tuple[str, JsonValue]]:
+    events: list[tuple[str, JsonValue]] = []
+    snapshots = (
+        ("state", lambda: get_state(request, api_client)),
+        ("actions", lambda: list_actions(request, api_client, limit=100)),
+        ("conversation", lambda: get_conversation_history(request, api_client, limit=100)),
+        ("stimuli", lambda: list_stimuli(request, api_client, limit=20)),
+    )
+    for event_name, loader in snapshots:
+        try:
+            events.append((event_name, coerce_json_value(loader())))
+        except HTTPException as exc:
+            logger.warning("skipping initial %s snapshot: %s", event_name, exc.detail)
+    return events

@@ -417,6 +417,7 @@ STRINGS: dict[str, str] = {
     'rss.feed_not_configured': '固定 RSS feed 列表未配置',
     'rss.read_failed': 'RSS 读取失败',
     'rss.no_new_entries': 'RSS 没有新的条目',
+    'rss.entries_read': '已读取 {count} 条 RSS 条目',
     'rss.new_entries': 'RSS 新条目 {count} 条',
     'rss.new_entries_with_labels': 'RSS 新条目 {count} 条：{labels}',
 
@@ -447,6 +448,9 @@ STRINGS: dict[str, str] = {
     'action.send_persist_failed': '消息发送前无法持久化状态',
     'action.telegram_send_failed': 'Telegram 发送失败：{error}',
     'action.completed_default': '行动完成',
+    'action.completed_with_summary': '{summary}',
+    'action.result_time': '{local_time}',
+    'action.result_system_status': '{summary}',
     'action.completed_log': '行动结束 {action_id} [{status}] {summary}',
     'action.awaiting_confirmation': '行动等待确认 {action_id}',
     'action.awaiting_status': '等待确认',
@@ -569,6 +573,16 @@ STRINGS: dict[str, str] = {
 
     # -- Backend --
     'backend.token_not_configured': 'BACKEND_API_TOKEN 未配置',
+
+    # -- Status events --
+    'status.core_started': '核心已启动',
+    'status.deep_sleep': '进入深睡',
+    'status.light_sleep': '进入浅睡',
+    'status.redis_recovered': 'Redis 已恢复',
+    'status.postgres_recovered': 'PostgreSQL 已恢复',
+    'status.redis_unavailable': 'Redis 不可用',
+    'status.stream_connected': '事件流已连接：{username}',
+    'status.stream_error': '事件流错误',
 
     # -- Bot --
     'bot.token_not_configured': 'TELEGRAM_BOT_TOKEN 未配置',

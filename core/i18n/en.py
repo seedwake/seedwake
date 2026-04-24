@@ -424,6 +424,7 @@ STRINGS: dict[str, str] = {
     'rss.feed_not_configured': 'Fixed RSS feed list is not configured',
     'rss.read_failed': 'RSS read failed',
     'rss.no_new_entries': 'RSS has no new entries',
+    'rss.entries_read': 'Read {count} RSS entries',
     'rss.new_entries': 'RSS new entries: {count}',
     'rss.new_entries_with_labels': 'RSS new entries: {count}: {labels}',
 
@@ -454,6 +455,9 @@ STRINGS: dict[str, str] = {
     'action.send_persist_failed': 'Unable to persist state before sending message',
     'action.telegram_send_failed': 'Telegram send failed: {error}',
     'action.completed_default': 'Action completed',
+    'action.completed_with_summary': '{summary}',
+    'action.result_time': '{local_time}',
+    'action.result_system_status': '{summary}',
     'action.completed_log': 'Action finished {action_id} [{status}] {summary}',
     'action.awaiting_confirmation': 'Action awaiting confirmation {action_id}',
     'action.awaiting_status': 'Awaiting confirmation',
@@ -576,6 +580,16 @@ STRINGS: dict[str, str] = {
 
     # -- Backend --
     'backend.token_not_configured': 'BACKEND_API_TOKEN not configured',
+
+    # -- Status events --
+    'status.core_started': 'Core started',
+    'status.deep_sleep': 'Entering deep sleep',
+    'status.light_sleep': 'Entering light sleep',
+    'status.redis_recovered': 'Redis recovered',
+    'status.postgres_recovered': 'PostgreSQL recovered',
+    'status.redis_unavailable': 'Redis unavailable',
+    'status.stream_connected': 'Event stream connected: {username}',
+    'status.stream_error': 'Event stream error',
 
     # -- Bot --
     'bot.token_not_configured': 'TELEGRAM_BOT_TOKEN not configured',

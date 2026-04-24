@@ -25,13 +25,16 @@ from core.stimulus import (
     StimulusQueue,
     append_action_result_history,
     append_conversation_history,
+    load_conversation_history,
     remember_recent_action_echoes,
 )
 from core.thought_parser import Thought, thought_action_requests
 from core.common_types import (
     ActionControl,
+    ActionEventPayload,
     ActionRequestPayload,
     ActionResultEnvelope,
+    I18nTextPayload,
     JsonObject,
     JsonValue,
     NewsItem,
@@ -366,7 +369,12 @@ class ActionManager:
             if approved:
                 self._emit(t("action.confirmed", action_id=action_id, actor=actor))
                 action = self._update_action(action_id, awaiting_confirmation=False)
-                self._publish_action_event(action, "pending", t("action.confirmed_status", actor=actor))
+                self._publish_action_event(
+                    action,
+                    "pending",
+                    "action.confirmed_status",
+                    {"actor": actor},
+                )
                 self._start_action(action_id)
                 continue
 
@@ -378,7 +386,13 @@ class ActionManager:
             self._finalize_action(
                 action_id,
                 status="failed",
-                result=_failure_result(summary, "rejected", transport=action.executor),
+                result=_failure_result(
+                    summary,
+                    "rejected",
+                    transport=action.executor,
+                    summary_key="action.rejected_summary",
+                    summary_params={"actor": actor},
+                ),
             )
 
     def running_actions(self) -> list[ActionRecord]:
@@ -508,7 +522,11 @@ class ActionManager:
     def _start_action(self, action_id: str) -> None:
         action = self._get_action(action_id)
         self._emit(t("action.submitted", action_id=action.action_id, type=action.type, executor=action.executor))
-        self._publish_action_event(action, "pending", t("action.submitted_status"))
+        self._publish_action_event(
+            action,
+            "pending",
+            "action.submitted_status",
+        )
         self._update_action(action_id, status="running", retry_after=None)
         future = self._pool.submit(self._run_action, action_id)
         with self._lock:
@@ -520,7 +538,11 @@ class ActionManager:
         started_at = time.perf_counter()
         terminal_status = "unknown"
         try:
-            self._publish_action_event(action, "running", t("action.running_status"))
+            self._publish_action_event(
+                action,
+                "running",
+                "action.running_status",
+            )
 
             if action.executor == "native":
                 result = self._run_native_action(action_id)
@@ -540,7 +562,12 @@ class ActionManager:
             self._safe_finalize_action(
                 action_id,
                 status="timeout",
-                result=_failure_result(t("action.timeout"), "timeout", transport=action.executor),
+                result=_failure_result(
+                    t("action.timeout"),
+                    "timeout",
+                    transport=action.executor,
+                    summary_key="action.timeout",
+                ),
             )
             return
         except ACTION_EXECUTION_EXCEPTIONS as exc:
@@ -548,7 +575,13 @@ class ActionManager:
             self._safe_finalize_action(
                 action_id,
                 status="failed",
-                result=_failure_result(t("action.failed", error=exc), str(exc), transport=action.executor),
+                result=_failure_result(
+                    t("action.failed", error=exc),
+                    str(exc),
+                    transport=action.executor,
+                    summary_key="action.failed",
+                    summary_params={"error": str(exc)},
+                ),
             )
             return
         # noinspection PyBroadException
@@ -587,6 +620,8 @@ class ActionManager:
                 message_text=message_text,
                 summary=str(failure.get("summary") or t("action.send_failed")),
                 error_detail=failure.get("error"),
+                summary_key=str(failure.get("summary_key") or ""),
+                summary_params=_json_object_or_none(failure.get("summary_params")),
             )
         reply_to = str(action.request.get("reply_to_message_id") or "").strip()
         if self._is_duplicate_message(target_source, message_text, reply_to):
@@ -596,6 +631,7 @@ class ActionManager:
                 message_text=message_text,
                 summary=t("action.send_duplicate"),
                 error_detail="duplicate_message",
+                summary_key="action.send_duplicate",
             )
         if not self._mark_dispatch_started(action_id):
             return _send_message_failure_result(
@@ -604,6 +640,7 @@ class ActionManager:
                 message_text=message_text,
                 summary=t("action.send_persist_failed"),
                 error_detail="delivery_state_unavailable",
+                summary_key="action.send_persist_failed",
             )
         send_error, delivered_reply_to = _send_telegram_message(
             target_source,
@@ -619,6 +656,8 @@ class ActionManager:
                 message_text=message_text,
                 summary=t("action.telegram_send_failed", error=send_error),
                 error_detail=send_error,
+                summary_key="action.telegram_send_failed",
+                summary_params={"error": send_error},
             )
         self._record_sent_message(target_source, message_text, delivered_reply_to)
         self._refresh_reply_focus(target_source)
@@ -634,6 +673,8 @@ class ActionManager:
             run_id=None,
             session_key=None,
             transport="native",
+            summary_key=_send_message_success_summary_key(message_text),
+            summary_params=_send_message_success_summary_params(target_source, message_text),
         )
 
     def _finalize_action(self, action_id: str, *, status: str, result: ActionResultEnvelope) -> None:
@@ -655,7 +696,12 @@ class ActionManager:
         summary = str(result.get("summary") or t(ACTION_COMPLETED_DEFAULT_KEY))
         self._maybe_update_note_shadow(action, status, result)
         self._emit(t("action.completed_log", action_id=action.action_id, status=status, summary=summary))
-        self._publish_action_event(action, status, summary)
+        self._publish_action_event(
+            action,
+            status,
+            _result_summary_key(result, summary),
+            _result_summary_params(result, summary),
+        )
         self._publish_native_message(action, status, result)
         self._record_perception_observation(action, status, result)
         stimulus_payload = _build_result_stimulus(action, status, result)
@@ -685,21 +731,35 @@ class ActionManager:
         if policy == "confirmation":
             action = self._update_action(action.action_id, awaiting_confirmation=True)
             self._emit(t("action.awaiting_confirmation", action_id=action.action_id))
-            self._publish_action_event(action, "pending", t("action.awaiting_status"))
+            self._publish_action_event(
+                action,
+                "pending",
+                "action.awaiting_status",
+            )
             return
         if policy == "forbidden":
             self._emit(t("action.forbidden", action_id=action.action_id))
             self._finalize_action(
                 action.action_id,
                 status="failed",
-                result=_failure_result(t("action.forbidden_summary"), "forbidden", transport=action.executor),
+                result=_failure_result(
+                    t("action.forbidden_summary"),
+                    "forbidden",
+                    transport=action.executor,
+                    summary_key="action.forbidden_summary",
+                ),
             )
             return
         self._emit(t("action.not_auto", action_id=action.action_id))
         self._finalize_action(
             action.action_id,
             status="failed",
-            result=_failure_result(t("action.not_auto_summary"), "not_auto_execute", transport=action.executor),
+            result=_failure_result(
+                t("action.not_auto_summary"),
+                "not_auto_execute",
+                transport=action.executor,
+                summary_key="action.not_auto_summary",
+            ),
         )
 
     def _classify_policy(self, action: ActionRecord) -> str:
@@ -763,7 +823,11 @@ class ActionManager:
             retry_after=retry_after,
         )
         self._emit(t("action.openclaw_queued", action_id=action.action_id, reason=reason))
-        self._publish_action_event(action, "pending", t("action.openclaw_queued_status"))
+        self._publish_action_event(
+            action,
+            "pending",
+            "action.openclaw_queued_status",
+        )
 
     def _emit(self, text: str) -> None:
         if self._log_callback:
@@ -806,20 +870,27 @@ class ActionManager:
             metadata=metadata,
         )
 
-    def _publish_action_event(self, action: ActionRecord, status: str, summary: str) -> None:
+    def _publish_action_event(
+        self,
+        action: ActionRecord,
+        status: str,
+        summary_key: str,
+        summary_params: JsonObject | None = None,
+    ) -> None:
         if not self._event_callback:
             return
-        self._event_callback("action", {
+        payload: ActionEventPayload = {
             "action_id": action.action_id,
             "type": action.type,
             "executor": action.executor,
             "status": status,
             "source_thought_id": action.source_thought_id,
-            "summary": summary,
+            "summary": _i18n_text(summary_key, summary_params),
             "run_id": action.run_id,
             "session_key": action.session_key,
             "awaiting_confirmation": action.awaiting_confirmation,
-        })
+        }
+        self._event_callback("action", payload)
 
     def _publish_native_message(
         self,
@@ -836,6 +907,7 @@ class ActionManager:
         message = str(data.get("message") or "").strip()
         if not source or not message:
             return
+        target_name = _conversation_target_name(self._redis, source)
         try:
             # ActionRedisLike covers rpush/ltrim used by append_conversation_history
             append_conversation_history(
@@ -843,7 +915,7 @@ class ActionManager:
                 role="assistant",
                 source=source,
                 content=message,
-                metadata={"action_id": action.action_id},
+                metadata={"action_id": action.action_id, "target_name": target_name},
             )
         except ACTION_REDIS_EXCEPTIONS as exc:
             logger.warning("failed to persist native message history for %s: %s", action.action_id, exc)
@@ -857,6 +929,8 @@ class ActionManager:
                 "source": source,
                 "message": message,
                 "stimulus_id": None,
+                "target_source": source,
+                "target_name": target_name,
             })
         except Exception as exc:
             logger.exception("unexpected native message event failure for %s: %s", action.action_id, exc)
@@ -1895,6 +1969,8 @@ def _run_native_action(
             run_id=None,
             session_key=None,
             transport="native",
+            summary_key="action.result_time",
+            summary_params={"local_time": now.strftime("%Y-%m-%d %H:%M:%S %Z")},
         )
     if action.type == "news":
         feed_urls = _coerce_news_feed_urls(action.request.get("news_feed_urls"))
@@ -1918,6 +1994,8 @@ def _run_native_action(
             run_id=None,
             session_key=None,
             transport="native",
+            summary_key="action.send_summary",
+            summary_params={"target": target_source},
         )
     if action.type == "note_rewrite":
         note_text = _normalize_note_content(action.request.get("message_text"))
@@ -1932,6 +2010,7 @@ def _run_native_action(
             run_id=None,
             session_key=None,
             transport="native",
+            summary_key="action.note_rewrite_summary",
         )
     if action.type == "get_system_status":
         snapshot = collect_system_status_snapshot()
@@ -1943,6 +2022,8 @@ def _run_native_action(
             run_id=None,
             session_key=None,
             transport="native",
+            summary_key="action.result_system_status",
+            summary_params={"summary": str(snapshot.get("summary") or t("perception.system_status_default"))},
         )
     raise RuntimeError(t("action.unsupported_native", action_type=action.type))
 
@@ -2139,6 +2220,35 @@ def _resolve_worker_agent_id(action_type: str, worker_agent_id: str, ops_worker_
     return worker_agent_id
 
 
+def _i18n_text(key: str, params: JsonObject | None = None) -> I18nTextPayload:
+    return {
+        "key": key,
+        "params": params or {},
+    }
+
+
+def _result_summary_key(result: ActionResultEnvelope, summary: str) -> str:
+    key = str(result.get("summary_key") or "").strip()
+    if key:
+        return key
+    if summary.strip():
+        return "action.completed_with_summary"
+    return ACTION_COMPLETED_DEFAULT_KEY
+
+
+def _result_summary_params(result: ActionResultEnvelope, summary: str) -> JsonObject:
+    params = _json_object_or_none(result.get("summary_params"))
+    if params is not None:
+        return params
+    if summary.strip():
+        return {"summary": summary}
+    return {}
+
+
+def _json_object_or_none(value: JsonValue) -> JsonObject | None:
+    return value if isinstance(value, dict) else None
+
+
 def _build_action_result(
     *,
     ok: bool,
@@ -2149,6 +2259,8 @@ def _build_action_result(
     session_key: str | None,
     transport: str,
     raw_text: str | None = None,
+    summary_key: str = "",
+    summary_params: JsonObject | None = None,
 ) -> ActionResultEnvelope:
     result: ActionResultEnvelope = {
         "ok": ok,
@@ -2159,6 +2271,9 @@ def _build_action_result(
         "session_key": session_key,
         "transport": transport,
     }
+    if summary_key:
+        result["summary_key"] = summary_key
+        result["summary_params"] = summary_params or {}
     if raw_text is not None:
         result["raw_text"] = raw_text
     return result
@@ -2169,6 +2284,8 @@ def _failure_result(
     error_detail: JsonValue,
     *,
     transport: str,
+    summary_key: str = "",
+    summary_params: JsonObject | None = None,
 ) -> ActionResultEnvelope:
     return _build_action_result(
         ok=False,
@@ -2178,6 +2295,8 @@ def _failure_result(
         run_id=None,
         session_key=None,
         transport=transport,
+        summary_key=summary_key,
+        summary_params=summary_params,
     )
 
 
@@ -2199,6 +2318,8 @@ def _copy_action_result(
         session_key=result.get("session_key") if isinstance(result.get("session_key"), str) else None,
         transport=str(result.get("transport") or ""),
         raw_text=result.get("raw_text") if isinstance(result.get("raw_text"), str) else None,
+        summary_key=str(result.get("summary_key") or ""),
+        summary_params=_json_object_or_none(result.get("summary_params")),
     )
     if data is not None:
         copied["data"] = data
@@ -2243,6 +2364,8 @@ def _normalize_action_result(result: ActionResultEnvelope, action: ActionRecord)
         ),
         transport=str(result.get("transport") or action.executor),
         raw_text=raw_text if isinstance(raw_text, str) else None,
+        summary_key=str(result.get("summary_key") or ""),
+        summary_params=_json_object_or_none(result.get("summary_params")),
     )
 
 
@@ -2832,23 +2955,28 @@ def _prepare_send_message(
                 t("action.unresolved_entity", entity=target_entity),
                 "unresolved_target_entity",
                 transport="native",
+                summary_key="action.unresolved_entity",
+                summary_params={"entity": target_entity},
             )
         return "", target_entity, message_text, _failure_result(
             t("action.missing_target"),
             "missing_target",
             transport="native",
+            summary_key="action.missing_target",
         )
     if not target_source.startswith(TELEGRAM_SOURCE_PREFIX):
         return target_source, target_entity, message_text, _failure_result(
             t("action.unsupported_target"),
             "unsupported_target",
             transport="native",
+            summary_key="action.unsupported_target",
         )
     if not message_text:
         return target_source, target_entity, message_text, _failure_result(
             t("action.missing_content"),
             "missing_message",
             transport="native",
+            summary_key="action.missing_content",
         )
     return target_source, target_entity, message_text, None
 
@@ -3018,6 +3146,21 @@ def _send_message_success_summary(target_source: str, message_text: str) -> str:
     return t("action.send_success", target=target_source)
 
 
+def _send_message_success_summary_key(message_text: str) -> str:
+    excerpt, _ = _clip_prompt_text(message_text.strip(), SEND_MESSAGE_SUMMARY_MAX_CHARS)
+    if excerpt:
+        return "action.send_success_with_excerpt"
+    return "action.send_success"
+
+
+def _send_message_success_summary_params(target_source: str, message_text: str) -> JsonObject:
+    excerpt, _ = _clip_prompt_text(message_text.strip(), SEND_MESSAGE_SUMMARY_MAX_CHARS)
+    params: JsonObject = {"target": target_source}
+    if excerpt:
+        params["excerpt"] = excerpt
+    return params
+
+
 def _send_message_result_data(
     *,
     target_source: str,
@@ -3034,6 +3177,38 @@ def _send_message_result_data(
     return data
 
 
+def _conversation_target_name(
+    redis_client: ActionRedisLike | None,
+    target_source: str,
+) -> str:
+    source = target_source.strip()
+    if not source:
+        return ""
+    try:
+        history = load_conversation_history(redis_client, limit=200)
+    except ACTION_REDIS_EXCEPTIONS as exc:
+        logger.warning("failed to load conversation history for reply target name: %s", exc)
+        return _target_name_from_source(source)
+    for entry in reversed(history):
+        if str(entry.get("source") or "").strip() != source:
+            continue
+        metadata = entry.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        full_name = str(metadata.get("telegram_full_name") or "").strip()
+        username = str(metadata.get("telegram_username") or "").strip()
+        target_name = full_name or username
+        if target_name:
+            return target_name
+    return _target_name_from_source(source)
+
+
+def _target_name_from_source(source: str) -> str:
+    if source.startswith(TELEGRAM_SOURCE_PREFIX):
+        return source.removeprefix(TELEGRAM_SOURCE_PREFIX)
+    return source
+
+
 def _send_message_failure_result(
     *,
     target_source: str,
@@ -3041,6 +3216,8 @@ def _send_message_failure_result(
     message_text: str,
     summary: str,
     error_detail: JsonValue,
+    summary_key: str = "",
+    summary_params: JsonObject | None = None,
 ) -> ActionResultEnvelope:
     return _build_action_result(
         ok=False,
@@ -3054,6 +3231,8 @@ def _send_message_failure_result(
         run_id=None,
         session_key=None,
         transport="native",
+        summary_key=summary_key,
+        summary_params=summary_params,
     )
 
 
@@ -3443,6 +3622,7 @@ def _restore_action_state(
                 t("action.send_status_unknown"),
                 "delivery_status_unknown",
                 transport=executor,
+                summary_key="action.send_status_unknown",
             ),
             dispatch_started_at,
         )
@@ -3547,6 +3727,10 @@ def _coerce_restored_action_result(value: JsonValue) -> ActionResultEnvelope | N
     raw_text = value.get("raw_text")
     if isinstance(raw_text, str):
         restored["raw_text"] = raw_text
+    summary_key = _stringify_json_field(value.get("summary_key"))
+    if summary_key:
+        restored["summary_key"] = summary_key
+        restored["summary_params"] = _coerce_json_object(value.get("summary_params"))
     return restored
 
 

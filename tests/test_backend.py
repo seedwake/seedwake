@@ -13,13 +13,31 @@ from fastapi.testclient import TestClient
 from backend.main import create_app
 from backend.routes.stream import stream_events
 from core.action import ACTION_CONTROL_KEY
-from core.stimulus import CONVERSATION_HISTORY_KEY
+from core.emotion import EMOTION_STATE_KEY
+from core.memory.short_term import LATEST_CYCLE_KEY
+from core.sleep import SLEEP_STATE_KEY
+from core.state import RUNTIME_STATE_KEY
+from core.stimulus import CONVERSATION_HISTORY_KEY, REDIS_KEY as STIMULUS_REDIS_KEY
 from test_support import slice_window
 
 
 async def _read_first_stream_chunk(iterator: AsyncIterable[str | bytes | memoryview]) -> str | bytes | memoryview:
     first_chunk = await anext(aiter(iterator))
     return first_chunk
+
+
+async def _read_stream_chunks(
+    iterator: AsyncIterable[str | bytes | memoryview],
+    count: int,
+) -> list[str]:
+    chunks: list[str] = []
+    async_iterator = aiter(iterator)
+    for _ in range(count):
+        chunk = await anext(async_iterator)
+        if isinstance(chunk, bytes):
+            chunk = chunk.decode("utf-8")
+        chunks.append(str(chunk))
+    return chunks
 
 
 def _as_request(value: Request | SimpleNamespace) -> Request:
@@ -72,6 +90,7 @@ class FakeRedis:
         self.messages = []
         self.sorted_sets = {}
         self.hashes = {}
+        self.strings = {}
 
     @staticmethod
     def ping():
@@ -95,6 +114,13 @@ class FakeRedis:
     def publish(self, channel, payload):
         self.messages.append((channel, payload))
 
+    def set(self, key, value):
+        self.strings[key] = value
+        return True
+
+    def get(self, key):
+        return self.strings.get(key)
+
     def zrange(self, key, start, end):
         return slice_window(self.sorted_sets.get(key, []), start, end)
 
@@ -110,7 +136,10 @@ class FakeRedis:
         return FakePubSub([
             {
                 "channel": "seedwake:events",
-                "data": json.dumps({"type": "status", "payload": {"message": "ready"}}),
+                "data": json.dumps({
+                    "type": "status",
+                    "payload": {"message": {"key": "status.core_started", "params": {}}},
+                }),
             }
         ])
 
@@ -155,7 +184,20 @@ class BackendTests(unittest.TestCase):
     def test_conversation_history_query(self) -> None:
         self.redis.rpush(
             CONVERSATION_HISTORY_KEY,
-            _conversation_history_entry(entry_id="conv_1", role="user", content="你好"),
+            json.dumps({
+                "entry_id": "conv_1",
+                "role": "user",
+                "source": "telegram:1",
+                "content": "你好",
+                "timestamp": "2026-03-27T12:00:00+00:00",
+                "stimulus_id": "stim_1",
+                "metadata": {
+                    "telegram_chat_id": "1",
+                    "telegram_username": "alice",
+                    "telegram_full_name": "Alice",
+                    "telegram_message_id": "294",
+                },
+            }, ensure_ascii=False),
         )
         self.redis.rpush(
             CONVERSATION_HISTORY_KEY,
@@ -177,6 +219,126 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(body["count"], 2)
         self.assertEqual(body["items"][0]["role"], "user")
         self.assertEqual(body["items"][1]["role"], "assistant")
+        self.assertEqual(body["items"][0]["direction"], "inbound")
+        self.assertEqual(body["items"][0]["speaker_name"], "Alice")
+        self.assertEqual(body["items"][0]["chat_id"], "1")
+        self.assertEqual(body["items"][0]["username"], "alice")
+        self.assertEqual(body["items"][0]["full_name"], "Alice")
+        self.assertEqual(body["items"][0]["message_id"], "294")
+        self.assertEqual(body["items"][1]["direction"], "outbound")
+        self.assertEqual(body["items"][1]["speaker_name"], "Seedwake")
+
+    def test_state_query_returns_stored_runtime_state(self) -> None:
+        self.redis.set(
+            RUNTIME_STATE_KEY,
+            json.dumps({
+                "mode": "waking",
+                "energy": 68.2,
+                "energy_per_cycle": 0.2,
+                "next_drowsy_cycle": 1832,
+                "emotions": {
+                    "curiosity": 0.72,
+                    "calm": 0.58,
+                    "satisfied": 0.46,
+                    "concern": 0.28,
+                    "frustration": 0.11,
+                },
+                "cycle": {"current": 1641, "since_boot": 12, "avg_seconds": 11.4},
+                "uptime": {"started_at": "2026-04-24T04:48:00+00:00", "seconds": 18720},
+            }, ensure_ascii=False),
+        )
+
+        response = self.client.get(
+            "/api/state",
+            headers={"X-API-Token": "token_backend"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["mode"], "waking")
+        self.assertEqual(body["energy"], 68.2)
+        self.assertEqual(body["emotions"]["satisfied"], 0.46)
+        self.assertEqual(body["cycle"]["current"], 1641)
+
+    def test_state_query_builds_snapshot_from_component_state_when_runtime_state_missing(self) -> None:
+        self.redis.set(LATEST_CYCLE_KEY, "99")
+        self.redis.set(
+            SLEEP_STATE_KEY,
+            json.dumps({
+                "energy": 55.0,
+                "mode": "drowsy",
+                "last_light_sleep_cycle": 0,
+                "last_deep_sleep_cycle": 0,
+                "last_deep_sleep_at": "2026-04-24T00:00:00+00:00",
+                "summary": "drowsy",
+            }),
+        )
+        self.redis.set(
+            EMOTION_STATE_KEY,
+            json.dumps({
+                "dimensions": {
+                    "curiosity": 0.7,
+                    "calm": 0.2,
+                    "satisfaction": 0.4,
+                    "concern": 0.1,
+                    "frustration": 0.3,
+                },
+                "dominant": "curiosity",
+                "summary": "curious",
+                "updated_at": "2026-04-24T00:00:00+00:00",
+            }),
+        )
+
+        response = self.client.get(
+            "/api/state",
+            headers={"X-API-Token": "token_backend"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["mode"], "waking")
+        self.assertEqual(body["energy"], 55.0)
+        self.assertEqual(body["cycle"]["current"], 99)
+        self.assertEqual(body["emotions"]["satisfied"], 0.4)
+
+    def test_stimuli_query_reads_ranked_queue(self) -> None:
+        self.redis.rpush(
+            STIMULUS_REDIS_KEY,
+            json.dumps({
+                "stimulus_id": "stim_late",
+                "type": "time",
+                "priority": 4,
+                "source": "system:time",
+                "content": "later",
+                "timestamp": "2026-03-27T12:00:02+00:00",
+                "action_id": None,
+                "metadata": {},
+            }, ensure_ascii=False),
+        )
+        self.redis.rpush(
+            STIMULUS_REDIS_KEY,
+            json.dumps({
+                "stimulus_id": "stim_urgent",
+                "type": "conversation",
+                "priority": 1,
+                "source": "telegram:1",
+                "content": "hello",
+                "timestamp": "2026-03-27T12:00:01+00:00",
+                "action_id": None,
+                "metadata": {},
+            }, ensure_ascii=False),
+        )
+
+        response = self.client.get(
+            "/api/stimuli?limit=20",
+            headers={"X-API-Token": "token_backend"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["count"], 2)
+        self.assertEqual(body["items"][0]["stimulus_id"], "stim_urgent")
+        self.assertEqual(body["items"][0]["summary"], "hello")
 
     def test_conversation_history_skips_malformed_items(self) -> None:
         self.redis.rpush(CONVERSATION_HISTORY_KEY, "{bad json")
@@ -259,6 +421,45 @@ class BackendTests(unittest.TestCase):
 
         self.assertIn("event: status", first_chunk)
 
+    def test_stream_yields_initial_snapshots(self) -> None:
+        self.redis.set(
+            RUNTIME_STATE_KEY,
+            json.dumps({
+                "mode": "waking",
+                "energy": 80.0,
+                "energy_per_cycle": 0.2,
+                "next_drowsy_cycle": 300,
+                "emotions": {
+                    "curiosity": 0.1,
+                    "calm": 0.2,
+                    "satisfied": 0.3,
+                    "concern": 0.4,
+                    "frustration": 0.5,
+                },
+                "cycle": {"current": 10, "since_boot": 10, "avg_seconds": 1.5},
+                "uptime": {"started_at": "2026-04-24T04:48:00+00:00", "seconds": 60},
+            }, ensure_ascii=False),
+        )
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(
+                    config={"admins": [{"username": "alice", "token": "token_alice"}]},
+                    backend_api_token="token_backend",
+                    redis=self.redis,
+                ),
+            ),
+        )
+
+        response = stream_events(request=_as_request(request), api_client="backend_api")
+        chunks = asyncio.run(_read_stream_chunks(response.body_iterator, 5))
+
+        self.assertIn("event: status", chunks[0])
+        self.assertIn("event: state", chunks[1])
+        self.assertIn('"mode": "waking"', chunks[1])
+        self.assertIn("event: actions", chunks[2])
+        self.assertIn("event: conversation", chunks[3])
+        self.assertIn("event: stimuli", chunks[4])
+
     def test_recent_thoughts_query(self) -> None:
         self.redis.sorted_sets["seedwake:thoughts"] = [
             json.dumps({"thought_id": "C1-1", "content": "a"}, ensure_ascii=False),
@@ -313,16 +514,14 @@ class BackendTests(unittest.TestCase):
 
         response = self.client.get(
             "/api/actions?status=running",
-            headers={
-                "X-API-Token": "token_backend",
-                "Authorization": "Bearer token_alice",
-            },
+            headers={"X-API-Token": "token_backend"},
         )
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["count"], 1)
         self.assertEqual(body["items"][0]["action_id"], "act_1")
+        self.assertEqual(body["items"][0]["summary"]["key"], "action.running_status")
 
     def test_actions_query_skips_malformed_action_record(self) -> None:
         self.redis.hset("seedwake:actions", "bad", "{bad json")
@@ -338,13 +537,45 @@ class BackendTests(unittest.TestCase):
 
         response = self.client.get(
             "/api/actions",
-            headers={
-                "X-API-Token": "token_backend",
-                "Authorization": "Bearer token_alice",
-            },
+            headers={"X-API-Token": "token_backend"},
         )
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["count"], 1)
         self.assertEqual(body["items"][0]["action_id"], "act_1")
+        self.assertEqual(body["items"][0]["summary"]["key"], "action.running_status")
+
+    def test_actions_query_exposes_public_summary_only(self) -> None:
+        self.redis.hset(
+            "seedwake:actions",
+            "act_1",
+            json.dumps({
+                "action_id": "act_1",
+                "status": "succeeded",
+                "submitted_at": "2026-03-27T12:00:00+00:00",
+                "result": {
+                    "ok": True,
+                    "summary": "done",
+                    "summary_key": "action.completed_with_summary",
+                    "summary_params": {"summary": "done"},
+                    "data": {},
+                    "error": None,
+                    "run_id": None,
+                    "session_key": None,
+                    "transport": "native",
+                },
+            }, ensure_ascii=False),
+        )
+
+        response = self.client.get(
+            "/api/actions",
+            headers={"X-API-Token": "token_backend"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        item = response.json()["items"][0]
+        self.assertEqual(item["summary"]["key"], "action.completed_with_summary")
+        self.assertEqual(item["summary"]["params"], {"summary": "done"})
+        self.assertNotIn("summary_key", item["result"])
+        self.assertNotIn("summary_params", item["result"])

@@ -5265,8 +5265,13 @@ class ActionManagerTests(unittest.TestCase):
         )
 
         self.assertEqual(created[0].status, "succeeded")
+        action_events = [payload for event_type, payload in events if event_type == "action"]
+        self.assertEqual(action_events[0]["summary"]["key"], "action.submitted_status")
+        self.assertEqual(action_events[1]["summary"]["key"], "action.running_status")
         self.assertEqual(events[-1][0], "reply")
         self.assertEqual(events[-1][1]["source"], "telegram:1")
+        self.assertEqual(events[-1][1]["target_source"], "telegram:1")
+        self.assertEqual(events[-1][1]["target_name"], "1")
         self.assertEqual(events[-1][1]["message"], "我在。")
         self.assertIn(CONVERSATION_HISTORY_KEY, redis_stub.lists)
         self.assertIn('"role": "assistant"', redis_stub.lists[CONVERSATION_HISTORY_KEY][0])

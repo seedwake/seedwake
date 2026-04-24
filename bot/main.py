@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 from contextlib import suppress
-from typing import Protocol, cast
+from typing import Protocol, TypeGuard, cast
 
 import redis as redis_lib
 from dotenv import load_dotenv
@@ -36,8 +36,12 @@ from core.common_types import (
     ActionEventPayload,
     AuthorizedTelegramUser,
     EventEnvelope,
+    I18nTextPayload,
     JsonObject,
     JsonValue,
+    RawActionRequest,
+    RuntimeMode,
+    SerializedThought,
     StatusEventPayload,
     ThoughtEventPayload,
 )
@@ -290,6 +294,9 @@ async def _forward_events(application: Application) -> None:
 async def _dispatch_event(application: Application, envelope: EventEnvelope) -> None:
     event_type = str(envelope.get("type") or "")
     payload = envelope.get("payload")
+    if event_type == "thoughts" and isinstance(payload, list):
+        await _dispatch_thought_update(application, payload)
+        return
     if not isinstance(payload, dict):
         return
     if event_type == "action":
@@ -298,8 +305,6 @@ async def _dispatch_event(application: Application, envelope: EventEnvelope) -> 
     if event_type == "status":
         await _dispatch_status_update(application, payload)
         return
-    if event_type == "thoughts":
-        await _dispatch_thought_update(application, payload)
 
 
 async def _start_event_forwarder(application: Application) -> None:
@@ -355,7 +360,7 @@ async def _dispatch_status_update(application: Application, payload: JsonObject)
     await _broadcast_text(application, text)
 
 
-async def _dispatch_thought_update(application: Application, payload: JsonObject) -> None:
+async def _dispatch_thought_update(application: Application, payload: JsonValue) -> None:
     thought_payload = _coerce_thought_payload(payload)
     if thought_payload is None:
         return
@@ -608,7 +613,8 @@ def _coerce_action_payload(payload: JsonObject) -> ActionEventPayload | None:
         return None
     if not isinstance(status, str):
         return None
-    if not isinstance(summary, str):
+    summary_payload = _coerce_i18n_text(summary)
+    if summary_payload is None:
         return None
     run_id = payload.get("run_id")
     session_key = payload.get("session_key")
@@ -618,7 +624,7 @@ def _coerce_action_payload(payload: JsonObject) -> ActionEventPayload | None:
         "type": action_type,
         "executor": executor,
         "status": status,
-        "summary": summary,
+        "summary": summary_payload,
         "run_id": run_id if isinstance(run_id, str) else None,
         "session_key": session_key if isinstance(session_key, str) else None,
         "awaiting_confirmation": bool(awaiting_confirmation),
@@ -631,30 +637,102 @@ def _coerce_action_payload(payload: JsonObject) -> ActionEventPayload | None:
 
 def _coerce_status_payload(payload: JsonObject) -> StatusEventPayload | None:
     message = payload.get("message")
-    if not isinstance(message, str):
+    message_payload = _coerce_i18n_text(message)
+    if message_payload is None:
         return None
-    status_payload: StatusEventPayload = {"message": message}
+    status_payload: StatusEventPayload = {"message": message_payload}
     username = payload.get("username")
     if isinstance(username, str):
         status_payload["username"] = username
+    mode = payload.get("mode")
+    if isinstance(mode, str) and mode in {"waking", "light_sleep", "deep_sleep"}:
+        status_payload["mode"] = cast(RuntimeMode, mode)
     return status_payload
 
 
-def _coerce_thought_payload(payload: JsonObject) -> ThoughtEventPayload | None:
+def _coerce_i18n_text(value: JsonValue) -> I18nTextPayload | None:
+    if not isinstance(value, dict):
+        return None
+    key = value.get("key")
+    params = value.get("params")
+    if not isinstance(key, str):
+        return None
+    normalized_params: JsonObject = {}
+    if isinstance(params, dict):
+        normalized_params = {
+            str(param_key): param_value
+            for param_key, param_value in params.items()
+        }
+    return {"key": key, "params": normalized_params}
+
+
+def _coerce_thought_payload(payload: JsonValue) -> ThoughtEventPayload | None:
+    if not isinstance(payload, list):
+        return None
+    thoughts: ThoughtEventPayload = []
+    for item in payload:
+        if not isinstance(item, dict):
+            return None
+        thought = _coerce_serialized_thought(item)
+        if thought is None:
+            return None
+        thoughts.append(thought)
+    return thoughts
+
+
+def _coerce_serialized_thought(payload: JsonObject) -> SerializedThought | None:
+    thought_id = payload.get("thought_id")
     cycle_id = payload.get("cycle_id")
-    lines = payload.get("lines")
+    index = payload.get("index")
+    thought_type = payload.get("type")
+    content = payload.get("content")
+    additional_action_requests = payload.get("additional_action_requests")
+    attention_weight = payload.get("attention_weight")
+    timestamp = payload.get("timestamp")
+    if not isinstance(thought_id, str):
+        return None
     if not isinstance(cycle_id, int):
         return None
-    if not isinstance(lines, list):
+    if not isinstance(index, int):
         return None
-    normalized_lines = [str(line) for line in lines if isinstance(line, str)]
-    if len(normalized_lines) != len(lines):
+    if not isinstance(thought_type, str):
         return None
-    thought_payload: ThoughtEventPayload = {
+    if not isinstance(content, str):
+        return None
+    if not isinstance(additional_action_requests, list):
+        return None
+    if not isinstance(attention_weight, (int, float)) or isinstance(attention_weight, bool):
+        return None
+    if not isinstance(timestamp, str):
+        return None
+    thought: SerializedThought = {
+        "thought_id": thought_id,
         "cycle_id": cycle_id,
-        "lines": normalized_lines,
+        "index": index,
+        "type": thought_type,
+        "content": content,
+        "additional_action_requests": [
+            request for request in additional_action_requests
+            if _is_raw_action_request(request)
+        ],
+        "attention_weight": float(attention_weight),
+        "timestamp": timestamp,
     }
-    return thought_payload
+    trigger_ref = payload.get("trigger_ref")
+    if isinstance(trigger_ref, str):
+        thought["trigger_ref"] = trigger_ref
+    action_request = payload.get("action_request")
+    if _is_raw_action_request(action_request):
+        thought["action_request"] = action_request
+    return thought
+
+
+def _is_raw_action_request(value: JsonValue) -> TypeGuard[RawActionRequest]:
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("type"), str)
+        and isinstance(value.get("params"), str)
+    )
 
 
 if __name__ == "__main__":

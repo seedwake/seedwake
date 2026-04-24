@@ -346,6 +346,33 @@ def load_action_result_history(
     return stimuli
 
 
+def load_stimulus_queue(
+    redis_client: ConversationRedisLike | None,
+    limit: int,
+) -> list[Stimulus]:
+    if redis_client is None or limit <= 0:
+        return []
+    started_at = time.perf_counter()
+    raw_items = redis_client.lrange(REDIS_KEY, 0, -1)
+    _log_redis_operation("lrange", started_at, f"key={REDIS_KEY}, count={len(raw_items)}")
+    stimuli: list[Stimulus] = []
+    for raw_item in raw_items:
+        try:
+            payload = json.loads(raw_item)
+        except (TypeError, ValueError) as exc:
+            logger.warning("skipping malformed stimulus queue record: %s", exc)
+            continue
+        if not isinstance(payload, dict):
+            logger.warning("skipping non-object stimulus queue record")
+            continue
+        try:
+            stimuli.append(_stimulus_from_dict(payload))  # type: ignore[arg-type]
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning("skipping invalid stimulus queue record: %s", exc)
+    ranked = _select_ranked(stimuli, limit)
+    return [stimulus for _, stimulus in ranked]
+
+
 def forget_action_result_history_ids(
     redis_client: ConversationRedisLike | None,
     stimulus_ids: list[str],

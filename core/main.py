@@ -48,6 +48,7 @@ from core.prefrontal import PrefrontalManager, build_goal_stack
 from core.prompt_builder import PromptBuildContext
 from core.runtime import connect_redis_from_env, load_yaml_config
 from core.sleep import SleepManager, SleepRedisLike
+from core.state import build_state_payload, store_state_snapshot
 from core.stimulus import (
     ConversationRedisLike,
     Stimulus,
@@ -74,7 +75,10 @@ from core.common_types import (
     PrefrontalPromptState,
     RecentConversationPrompt,
     RawActionRequest,
+    RuntimeMode,
+    SerializedThought,
     SleepStateSnapshot,
+    StateEventPayload,
     StatusEventPayload,
     person_entity_tags_from_telegram_identity,
     rewritten_pair_match_counts,
@@ -211,9 +215,15 @@ class EngineRuntime:
     retry_delay: float
     max_retry_delay: float
     reconnect_interval: float
+    energy_per_cycle: float
+    drowsy_threshold: float
     camera_stream_url: str
     bootstrap_identity: dict[str, str]
     bootstrap_habits: list[JsonObject]
+    started_at: datetime
+    boot_cycle_baseline: int = 0
+    completed_cycle_count: int = 0
+    total_cycle_seconds: float = 0.0
     degeneration_intervention: DegenerationIntervention | None = None
 
 
@@ -322,10 +332,12 @@ def _build_runtime_components(
         redis_client,
         reflection_interval=int(config.get("metacognition", {}).get("reflection_interval", 50)),
     )
+    energy_per_cycle = float(config.get("sleep", {}).get("energy_per_cycle", 0.2))
+    drowsy_threshold = float(config.get("sleep", {}).get("drowsy_threshold", 30))
     sleep = SleepManager(
         _as_sleep_redis(redis_client),
-        energy_per_cycle=float(config.get("sleep", {}).get("energy_per_cycle", 0.2)),
-        drowsy_threshold=float(config.get("sleep", {}).get("drowsy_threshold", 30)),
+        energy_per_cycle=energy_per_cycle,
+        drowsy_threshold=drowsy_threshold,
         light_sleep_recovery=float(config.get("sleep", {}).get("light_sleep_recovery", 70)),
         deep_sleep_trigger_hours=float(config.get("sleep", {}).get("deep_sleep_trigger_hours", 24)),
         archive_importance_threshold=float(config.get("long_term_memory", {}).get("importance_threshold", 0.1)),
@@ -374,6 +386,8 @@ def _build_runtime_components(
         retry_delay=retry_delay,
         max_retry_delay=max_retry_delay,
         reconnect_interval=reconnect_interval,
+        energy_per_cycle=energy_per_cycle,
+        drowsy_threshold=drowsy_threshold,
         camera_stream_url=str(
             config.get("perception", {}).get("camera_stream_url", "")
         ).strip(),
@@ -382,6 +396,7 @@ def _build_runtime_components(
             item for item in (config.get("bootstrap", {}).get("habits", []) or [])
             if isinstance(item, dict)
         ],
+        started_at=datetime.now(timezone.utc),
     )
     return runtime, identity
 
@@ -417,7 +432,7 @@ def _emit_startup(
     _output(log_file, t("log.redis_connected") if redis_client else t("log.redis_disconnected"))
     _output(log_file, t("log.pg_connected") if pg_conn else t("log.pg_disconnected"))
     _output(log_file, "─" * 60)
-    _publish_event(redis_client, "status", _status_payload("core_started"))
+    _publish_event(redis_client, "status", _status_payload("status.core_started"))
 
 
 def _run_engine_loop(
@@ -431,6 +446,9 @@ def _run_engine_loop(
     current_retry_delay = runtime.retry_delay
     last_redis_reconnect = 0.0
     last_pg_reconnect = 0.0
+    _ensure_runtime_state_tracking(runtime, last_completed_cycle_id)
+    runtime.boot_cycle_baseline = _safe_latest_cycle_id(runtime.stm, last_completed_cycle_id)
+    _publish_runtime_state(runtime, runtime.boot_cycle_baseline)
 
     while True:
         loop_started_at = time.perf_counter()
@@ -512,7 +530,10 @@ def _run_engine_loop(
             continue
 
         _publish_event(runtime.stm.redis_client, "thoughts", _thought_event_payload(cycle_id, new_thoughts))
-        if _safe_post_cycle_phase4(runtime, cycle_id, stimuli):
+        restart_requested = _safe_post_cycle_phase4(runtime, cycle_id, stimuli)
+        _record_completed_cycle_time(runtime, time.perf_counter() - loop_started_at)
+        _publish_runtime_state(runtime, cycle_id)
+        if restart_requested:
             _graceful_restart_core(log_file, prompt_log_file, runtime.action_manager)
         last_completed_cycle_id = cycle_id
         pending_cycle_id = None
@@ -547,6 +568,12 @@ def _log_cycle_loop_finished(
     )
 
 
+def _record_completed_cycle_time(runtime: EngineRuntime, elapsed_seconds: float) -> None:
+    _ensure_runtime_state_tracking(runtime, 0)
+    runtime.completed_cycle_count += 1
+    runtime.total_cycle_seconds += max(0.0, elapsed_seconds)
+
+
 def _post_cycle_phase4(
     runtime: EngineRuntime,
     cycle_id: int,
@@ -576,6 +603,8 @@ def _post_cycle_phase4(
             "cycle C%s entering deep sleep (buffer=%d, active_ltm=%d)",
             cycle_id, len(buffer_thoughts), active_memory_count,
         )
+        _publish_event(runtime.stm.redis_client, "status", _status_payload("status.deep_sleep", mode="deep_sleep"))
+        _publish_runtime_state(runtime, cycle_id, mode_override="deep_sleep")
         sleep_started_at = time.perf_counter()
         result = runtime.sleep.run_deep_sleep(
             cycle_id=cycle_id,
@@ -612,6 +641,8 @@ def _post_cycle_phase4(
         return result.restart_requested
     if runtime.sleep.should_light_sleep(buffer_thoughts=buffer_thoughts):
         logger.info("cycle C%s entering light sleep (buffer=%d)", cycle_id, len(buffer_thoughts))
+        _publish_event(runtime.stm.redis_client, "status", _status_payload("status.light_sleep", mode="light_sleep"))
+        _publish_runtime_state(runtime, cycle_id, mode_override="light_sleep")
         sleep_started_at = time.perf_counter()
         result = runtime.sleep.run_light_sleep(
             cycle_id=cycle_id,
@@ -947,7 +978,7 @@ def _recover_runtime_services(
         had_redis,
     )
     if redis_recovered:
-        _publish_event(runtime.stm.redis_client, "status", _status_payload("redis_recovered"))
+        _publish_event(runtime.stm.redis_client, "status", _status_payload("status.redis_recovered"))
     identity, last_pg_reconnect = _maybe_reconnect_pg(
         log_file, runtime.ltm, identity, bootstrap_identity,
         now, last_pg_reconnect, reconnect_interval,
@@ -958,7 +989,7 @@ def _recover_runtime_services(
     )
     pg_recovered = not had_pg and runtime.ltm.available
     if pg_recovered:
-        _publish_event(runtime.stm.redis_client, "status", _status_payload("postgres_recovered"))
+        _publish_event(runtime.stm.redis_client, "status", _status_payload("status.postgres_recovered"))
     if redis_recovered or pg_recovered:
         runtime.manas.note_restart_restoration(
             redis_restored=redis_recovered,
@@ -2739,21 +2770,181 @@ def _publish_event(
         return
 
 
-def _status_payload(message: str) -> StatusEventPayload:
-    return {"message": message}
+def _publish_runtime_state(
+    runtime: EngineRuntime,
+    cycle_id: int,
+    *,
+    mode_override: str | None = None,
+) -> StateEventPayload:
+    _ensure_runtime_state_tracking(runtime, cycle_id)
+    mode: RuntimeMode | None = None
+    if mode_override in {"waking", "light_sleep", "deep_sleep"}:
+        mode = cast(RuntimeMode, mode_override)
+    payload = build_state_payload(
+        sleep_state=_current_sleep_snapshot(runtime),
+        emotion=_current_emotion_snapshot(runtime),
+        current_cycle=cycle_id,
+        started_at=runtime.started_at,
+        boot_cycle_baseline=runtime.boot_cycle_baseline,
+        completed_cycle_count=runtime.completed_cycle_count,
+        total_cycle_seconds=runtime.total_cycle_seconds,
+        energy_per_cycle=runtime.energy_per_cycle,
+        drowsy_threshold=runtime.drowsy_threshold,
+        mode_override=mode,
+    )
+    store_state_snapshot(runtime.stm.redis_client, payload)
+    _publish_event(runtime.stm.redis_client, "state", payload)
+    return payload
 
 
-def _thought_event_payload(cycle_id: int, thoughts: list[Thought]) -> ThoughtEventPayload:
+def _ensure_runtime_state_tracking(runtime: EngineRuntime, last_completed_cycle_id: int) -> None:
+    if not isinstance(getattr(runtime, "started_at", None), datetime):
+        runtime.started_at = datetime.now(timezone.utc)
+    if not isinstance(getattr(runtime, "boot_cycle_baseline", None), int):
+        runtime.boot_cycle_baseline = _safe_latest_cycle_id(runtime.stm, last_completed_cycle_id)
+    if not isinstance(getattr(runtime, "completed_cycle_count", None), int):
+        runtime.completed_cycle_count = 0
+    if not isinstance(getattr(runtime, "total_cycle_seconds", None), (int, float)):
+        runtime.total_cycle_seconds = 0.0
+    if not isinstance(getattr(runtime, "energy_per_cycle", None), (int, float)):
+        runtime.energy_per_cycle = 0.2
+    if not isinstance(getattr(runtime, "drowsy_threshold", None), (int, float)):
+        runtime.drowsy_threshold = 30.0
+
+
+def _safe_latest_cycle_id(stm: ShortTermMemory, fallback: int) -> int:
+    try:
+        latest_cycle_id = stm.latest_cycle_id()
+    except (AttributeError, TypeError, ValueError, RuntimeError):
+        return fallback
+    if isinstance(latest_cycle_id, bool) or not isinstance(latest_cycle_id, int):
+        return fallback
+    return max(fallback, latest_cycle_id)
+
+
+def _current_sleep_snapshot(runtime: EngineRuntime) -> SleepStateSnapshot:
+    try:
+        snapshot = runtime.sleep.current()
+    except (AttributeError, TypeError, ValueError, RuntimeError):
+        snapshot = None
+    if isinstance(snapshot, dict):
+        return {
+            "energy": _float_from_json(snapshot.get("energy"), 100.0),
+            "mode": str(snapshot.get("mode") or "awake"),
+            "last_light_sleep_cycle": _int_from_json(snapshot.get("last_light_sleep_cycle"), 0),
+            "last_deep_sleep_cycle": _int_from_json(snapshot.get("last_deep_sleep_cycle"), 0),
+            "last_deep_sleep_at": str(snapshot.get("last_deep_sleep_at") or ""),
+            "summary": str(snapshot.get("summary") or ""),
+        }
     return {
-        "cycle_id": cycle_id,
-        "lines": [_thought_event_line(thought) for thought in thoughts],
+        "energy": 100.0,
+        "mode": "awake",
+        "last_light_sleep_cycle": 0,
+        "last_deep_sleep_cycle": 0,
+        "last_deep_sleep_at": "",
+        "summary": "",
     }
 
 
-def _thought_event_line(thought: Thought) -> str:
-    display_type = localized_thought_type(thought.type)
-    plain_trigger = f" (← {thought.trigger_ref})" if thought.trigger_ref else ""
-    return f"[{display_type}] {thought.content}{plain_trigger}"
+def _current_emotion_snapshot(runtime: EngineRuntime) -> EmotionSnapshot:
+    try:
+        snapshot = runtime.emotion.current()
+    except (AttributeError, TypeError, ValueError, RuntimeError):
+        snapshot = None
+    if isinstance(snapshot, dict) and isinstance(snapshot.get("dimensions"), dict):
+        dimensions = snapshot["dimensions"]
+        return {
+            "dimensions": {
+                "curiosity": _float_from_json(dimensions.get("curiosity"), 0.0),
+                "calm": _float_from_json(dimensions.get("calm"), 0.0),
+                "frustration": _float_from_json(dimensions.get("frustration"), 0.0),
+                "satisfaction": _float_from_json(dimensions.get("satisfaction"), 0.0),
+                "concern": _float_from_json(dimensions.get("concern"), 0.0),
+            },
+            "dominant": str(snapshot.get("dominant") or "curiosity"),
+            "summary": str(snapshot.get("summary") or ""),
+            "updated_at": str(snapshot.get("updated_at") or ""),
+        }
+    return {
+        "dimensions": {
+            "curiosity": 0.0,
+            "calm": 0.0,
+            "frustration": 0.0,
+            "satisfaction": 0.0,
+            "concern": 0.0,
+        },
+        "dominant": "curiosity",
+        "summary": "",
+        "updated_at": "",
+    }
+
+
+def _float_from_json(value: JsonValue, default: float) -> float:
+    if isinstance(value, bool) or value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _int_from_json(value: JsonValue, default: int) -> int:
+    if isinstance(value, bool) or value is None:
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _status_payload(
+    key: str,
+    *,
+    mode: str | None = None,
+    params: JsonObject | None = None,
+) -> StatusEventPayload:
+    payload: StatusEventPayload = {
+        "message": {
+            "key": key,
+            "params": params or {},
+        },
+    }
+    if mode in {"waking", "light_sleep", "deep_sleep"}:
+        payload["mode"] = cast(RuntimeMode, mode)
+    return payload
+
+
+def _thought_event_payload(cycle_id: int, thoughts: list[Thought]) -> ThoughtEventPayload:
+    _ = cycle_id
+    return [_serialized_thought(thought) for thought in thoughts]
+
+
+def _serialized_thought(thought: Thought) -> SerializedThought:
+    payload: SerializedThought = {
+        "thought_id": thought.thought_id,
+        "cycle_id": thought.cycle_id,
+        "index": thought.index,
+        "type": thought.type,
+        "content": thought.content,
+        "additional_action_requests": list(thought.additional_action_requests),
+        "attention_weight": thought.attention_weight,
+        "timestamp": thought.timestamp.isoformat(),
+    }
+    if thought.trigger_ref:
+        payload["trigger_ref"] = thought.trigger_ref
+    if thought.action_request:
+        payload["action_request"] = thought.action_request
+    return payload
 
 
 # -- Utilities -------------------------------------------------------------

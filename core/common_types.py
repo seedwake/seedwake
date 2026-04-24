@@ -3,7 +3,7 @@
 import itertools
 import re
 import time
-from typing import NotRequired, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 
 type JsonScalar = str | int | float | bool | None
@@ -58,6 +58,8 @@ class NewsDedupedMeta(TypedDict):
 class ActionResultEnvelope(TypedDict):
     ok: bool
     summary: str
+    summary_key: NotRequired[str]
+    summary_params: NotRequired[JsonObject]
     data: JsonObject
     error: JsonValue
     run_id: str | None
@@ -94,6 +96,12 @@ class ConversationEntry(TypedDict):
     timestamp: str
     stimulus_id: str | None
     metadata: JsonObject
+    direction: NotRequired[str]
+    speaker_name: NotRequired[str]
+    chat_id: NotRequired[str]
+    username: NotRequired[str]
+    full_name: NotRequired[str]
+    message_id: NotRequired[str]
 
 
 class RecentConversationMessage(TypedDict):
@@ -224,13 +232,18 @@ class MemorySnapshot(TypedDict):
     used_ratio: float
 
 
+class I18nTextPayload(TypedDict):
+    key: str
+    params: JsonObject
+
+
 class ActionEventPayload(TypedDict):
     action_id: str
     type: str
     executor: str
     status: str
     source_thought_id: NotRequired[str]
-    summary: str
+    summary: I18nTextPayload
     run_id: str | None
     session_key: str | None
     awaiting_confirmation: bool
@@ -240,19 +253,81 @@ class ReplyEventPayload(TypedDict):
     source: str
     message: str
     stimulus_id: str | None
+    target_name: NotRequired[str]
+    target_source: NotRequired[str]
+
+
+type RuntimeMode = Literal["waking", "light_sleep", "deep_sleep"]
 
 
 class StatusEventPayload(TypedDict):
-    message: str
+    message: I18nTextPayload
     username: NotRequired[str]
+    mode: NotRequired[RuntimeMode]
 
 
-class ThoughtEventPayload(TypedDict):
+class StateEmotionsPayload(TypedDict):
+    curiosity: float
+    calm: float
+    satisfied: float
+    concern: float
+    frustration: float
+
+
+class StateCyclePayload(TypedDict):
+    current: int
+    since_boot: int
+    avg_seconds: float
+
+
+class StateUptimePayload(TypedDict):
+    started_at: str
+    seconds: int
+
+
+class StateEventPayload(TypedDict):
+    mode: RuntimeMode
+    energy: float
+    energy_per_cycle: float
+    next_drowsy_cycle: int
+    emotions: StateEmotionsPayload
+    cycle: StateCyclePayload
+    uptime: StateUptimePayload
+
+
+class SerializedThought(TypedDict):
+    thought_id: str
     cycle_id: int
-    lines: list[str]
+    index: int
+    type: str
+    content: str
+    trigger_ref: NotRequired[str]
+    action_request: NotRequired[RawActionRequest]
+    additional_action_requests: list[RawActionRequest]
+    attention_weight: float
+    timestamp: str
 
 
-type EventPayload = ActionEventPayload | ReplyEventPayload | StatusEventPayload | ThoughtEventPayload
+type ThoughtEventPayload = list[SerializedThought]
+
+
+class StimulusQueueItem(TypedDict):
+    stimulus_id: str
+    type: str
+    priority: int
+    source: str | None
+    summary: str
+    timestamp: str
+
+
+class StimuliResponse(TypedDict):
+    ok: bool
+    items: list[StimulusQueueItem]
+    count: int
+    requested_by: str
+
+
+type EventPayload = ActionEventPayload | ReplyEventPayload | StateEventPayload | StatusEventPayload | ThoughtEventPayload
 
 
 class EventEnvelope(TypedDict):

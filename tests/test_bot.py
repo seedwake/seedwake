@@ -163,7 +163,7 @@ def _action_envelope() -> EventEnvelope:
         "type": "system_change",
         "executor": "openclaw",
         "status": "pending",
-        "summary": "需要管理员确认",
+        "summary": {"key": "action.awaiting_status", "params": {}},
         "run_id": None,
         "session_key": None,
         "awaiting_confirmation": True,
@@ -172,15 +172,28 @@ def _action_envelope() -> EventEnvelope:
 
 
 def _thought_envelope() -> EventEnvelope:
-    payload: ThoughtEventPayload = {
-        "cycle_id": 42,
-        "lines": [
-            "[思考] 我先想一下。",
-            "[意图] 我想回一句。",
-            "[反应] 刚才那句确实接住了。",
-        ],
-    }
+    payload = _thought_payload([
+        ("thinking", "我先想一下。"),
+        ("intention", "我想回一句。"),
+        ("reaction", "刚才那句确实接住了。"),
+    ])
     return {"type": "thoughts", "payload": payload}
+
+
+def _thought_payload(lines: list[tuple[str, str]]) -> ThoughtEventPayload:
+    return [
+        {
+            "thought_id": f"C42-{index}",
+            "cycle_id": 42,
+            "index": index,
+            "type": thought_type,
+            "content": content,
+            "additional_action_requests": [],
+            "attention_weight": 0.0,
+            "timestamp": "2026-03-27T12:00:00+00:00",
+        }
+        for index, (thought_type, content) in enumerate(lines, start=1)
+    ]
 
 
 def _store_running_action(redis_client: FakeRedis, action_id: str = "act_1") -> None:
@@ -228,7 +241,10 @@ class TelegramBotHelpersTests(unittest.TestCase):
                 redis_client=cast(redis_lib.Redis, cast(object, FakeRedis())),
             )
         try:
-            self.assertEqual(format_status_event({"message": "ok"}), "System status: ok")
+            self.assertEqual(
+                format_status_event({"message": {"key": "status.redis_unavailable", "params": {}}}),
+                "System status: Redis unavailable",
+            )
         finally:
             _init_i18n("zh")
 
@@ -258,7 +274,7 @@ class TelegramBotHelpersTests(unittest.TestCase):
             "type": "system_change",
             "executor": "openclaw",
             "status": "pending",
-            "summary": "需要管理员确认",
+            "summary": {"key": "action.awaiting_status", "params": {}},
             "run_id": None,
             "session_key": None,
             "awaiting_confirmation": True,
@@ -273,10 +289,15 @@ class TelegramBotHelpersTests(unittest.TestCase):
             "type": "reading",
             "executor": "openclaw",
             "status": "succeeded",
-            "summary": (
-                '{"ok":true,"summary":"选了 Virginia Woolf《The Waves》的开篇，和目标意象很贴近。",'
-                '"data":{"source":{"title":"The waves","url":"https://example.com"},"excerpt_original":"x"}}'
-            ),
+            "summary": {
+                "key": "action.completed_with_summary",
+                "params": {
+                    "summary": (
+                        '{"ok":true,"summary":"选了 Virginia Woolf《The Waves》的开篇，和目标意象很贴近。",'
+                        '"data":{"source":{"title":"The waves","url":"https://example.com"},"excerpt_original":"x"}}'
+                    ),
+                },
+            },
             "run_id": None,
             "session_key": None,
             "awaiting_confirmation": False,
@@ -290,13 +311,10 @@ class TelegramBotHelpersTests(unittest.TestCase):
         self.assertNotIn('{"ok":true', text)
 
     def test_format_thought_event(self) -> None:
-        payload: ThoughtEventPayload = {
-            "cycle_id": 42,
-            "lines": [
-                "[思考] 我先想一下。",
-                "[意图] 我想回一句。",
-            ],
-        }
+        payload = _thought_payload([
+            ("thinking", "我先想一下。"),
+            ("intention", "我想回一句。"),
+        ])
 
         text = format_thought_event(payload)
 
@@ -305,11 +323,8 @@ class TelegramBotHelpersTests(unittest.TestCase):
         self.assertIn("[意图] 我想回一句。", text)
 
     def test_format_thought_event_chunks_splits_long_body(self) -> None:
-        long_line = "[思考] " + ("很长的念头" * 900)
-        payload: ThoughtEventPayload = {
-            "cycle_id": 42,
-            "lines": [long_line],
-        }
+        long_content = "很长的念头" * 900
+        payload = _thought_payload([("thinking", long_content)])
 
         chunks = format_thought_event_chunks(payload)
 
@@ -479,7 +494,7 @@ class TelegramBotAsyncTests(unittest.IsolatedAsyncioTestCase):
         long_line = "[思考] " + ("很长的念头" * 900)
         envelope: EventEnvelope = {
             "type": "thoughts",
-            "payload": {"cycle_id": 42, "lines": [long_line]},
+            "payload": _thought_payload([("thinking", long_line.removeprefix("[思考] "))]),
         }
 
         await _dispatch_event(context.application, envelope)

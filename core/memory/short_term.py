@@ -15,7 +15,7 @@ from datetime import datetime
 import redis as redis_lib
 
 from core.thought_parser import Thought
-from core.common_types import JsonValue, elapsed_ms
+from core.common_types import JsonValue, SerializedThought, elapsed_ms
 
 REDIS_KEY = "seedwake:thoughts"
 REDIS_CHANNEL = "seedwake:stream"
@@ -248,19 +248,22 @@ class ShortTermMemory:
         _log_redis_operation("eval", started_at, f"cycle_id={cycle_id}")
 
 
-def _thought_to_dict(t: Thought) -> dict:
-    return {
+def _thought_to_dict(t: Thought) -> SerializedThought:
+    payload: SerializedThought = {
         "thought_id": t.thought_id,
         "cycle_id": t.cycle_id,
         "index": t.index,
         "type": t.type,
         "content": t.content,
-        "trigger_ref": t.trigger_ref,
-        "action_request": t.action_request,
         "additional_action_requests": t.additional_action_requests,
         "attention_weight": t.attention_weight,
         "timestamp": t.timestamp.isoformat(),
     }
+    if t.trigger_ref:
+        payload["trigger_ref"] = t.trigger_ref
+    if t.action_request:
+        payload["action_request"] = t.action_request
+    return payload
 
 
 def _dict_to_thought(d: dict) -> Thought:

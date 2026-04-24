@@ -1074,11 +1074,24 @@ class Phase4RuntimeTests(unittest.TestCase):
             "updated_at": "2026-01-01T00:00:00+00:00",
         }
 
-        _post_cycle_phase4(_as_runtime(runtime), 12, [])
+        with patch("core.main._publish_event") as publish_event:
+            _post_cycle_phase4(_as_runtime(runtime), 12, [])
 
         sleep.consume_cycle.assert_called_once()
         sleep.run_light_sleep.assert_called_once()
         runtime.manas.note_sleep_transition.assert_called_once()
+        status_calls = [
+            call
+            for call in publish_event.call_args_list
+            if call.args[1] == "status"
+        ]
+        state_calls = [
+            call
+            for call in publish_event.call_args_list
+            if call.args[1] == "state"
+        ]
+        self.assertEqual(status_calls[0].args[2]["mode"], "light_sleep")
+        self.assertEqual(state_calls[0].args[2]["mode"], "light_sleep")
 
     @patch("core.main._publish_event")
     @patch("core.main._maybe_reconnect_pg")
@@ -1704,11 +1717,71 @@ class CycleCounterTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 _run_engine_loop(log_file=None, prompt_log_file=None, runtime=_as_runtime(runtime), identity={})
 
-        publish_event.assert_any_call(
-            redis_client,
-            "thoughts",
-            {"cycle_id": 301, "lines": ["[思考] 这轮已经成形了。"]},
+        thought_calls = [
+            call
+            for call in publish_event.call_args_list
+            if call.args[1] == "thoughts"
+        ]
+        self.assertEqual(len(thought_calls), 1)
+        thought_payload = thought_calls[0].args[2]
+        self.assertEqual(thought_payload[0]["cycle_id"], 301)
+        self.assertEqual(thought_payload[0]["type"], "thinking")
+        self.assertEqual(thought_payload[0]["content"], "这轮已经成形了。")
+
+    def test_run_engine_loop_publishes_state_event_after_successful_cycle(self) -> None:
+        redis_client = MagicMock()
+        runtime = SimpleNamespace(
+            retry_delay=1.0,
+            max_retry_delay=8.0,
+            reconnect_interval=30.0,
+            bootstrap_identity={},
+            stimulus_queue=MagicMock(),
+            stm=SimpleNamespace(redis_client=redis_client),
         )
+        generated = [_make_thought(302, 1, "这轮已经成形了。")]
+
+        def prepare_cycle(
+            log_file,
+            cycle_id,
+            runtime_obj,
+            identity,
+            bootstrap_identity,
+            reconnect_interval,
+            last_redis_reconnect,
+            last_pg_reconnect,
+        ) -> tuple[dict[str, str], float, float, list[MagicMock], list, list]:
+            _ = (
+                log_file,
+                cycle_id,
+                runtime_obj,
+                bootstrap_identity,
+                reconnect_interval,
+                last_redis_reconnect,
+                last_pg_reconnect,
+            )
+            return identity, 0.0, 0.0, [], [], []
+
+        with (
+            patch("core.main._next_cycle_id", return_value=302),
+            patch("core.main._prepare_cycle", side_effect=prepare_cycle),
+            patch("core.main._execute_cycle", return_value=(generated, False)),
+            patch("core.main._publish_event") as publish_event,
+            patch("core.main._safe_post_cycle_phase4", return_value=False),
+            patch("core.main._log_cycle_loop_finished", side_effect=KeyboardInterrupt),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                _run_engine_loop(log_file=None, prompt_log_file=None, runtime=_as_runtime(runtime), identity={})
+
+        state_calls = [
+            call
+            for call in publish_event.call_args_list
+            if call.args[1] == "state"
+        ]
+        self.assertGreaterEqual(len(state_calls), 2)
+        state_payload = state_calls[-1].args[2]
+        self.assertEqual(state_payload["mode"], "waking")
+        self.assertEqual(state_payload["cycle"]["current"], 302)
+        self.assertEqual(state_payload["cycle"]["since_boot"], 1)
 
 
 if __name__ == "__main__":
