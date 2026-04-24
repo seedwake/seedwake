@@ -350,7 +350,7 @@ The project uses three kinds of models, configured in the `models` section of `c
 models:
   primary:      # Primary model: generates the thought stream
     provider: "ollama"   # ollama | openclaw | openai_compatible
-    name: "qwen3.5:27b"
+    name: "qwen3.6:27b"
     num_predict: 4096
     num_ctx: 131072
     temperature: 0.8

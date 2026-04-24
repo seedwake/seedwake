@@ -350,7 +350,7 @@ docker compose up -d postgresql redis
 models:
   primary:      # 主模型：生成念头流
     provider: "ollama"   # ollama | openclaw | openai_compatible
-    name: "qwen3.5:27b"
+    name: "qwen3.6:27b"
     num_predict: 4096
     num_ctx: 131072
     temperature: 0.8

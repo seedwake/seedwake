@@ -843,14 +843,14 @@ CREATE INDEX idx_audit_time ON audit_log (timestamp);
 
 通过 `config.yml` 的 `models.primary` 配置，支持 Ollama、OpenClaw、OpenAI-compatible 三种 provider。
 - 用途：念头生成、行动规划（chat+tools 或 JSON 模式）
-- 当前推荐：Qwen3.5-27B（密集架构，262K 原生上下文，中文能力强）
+- 当前推荐：Qwen3.6-27B（密集架构，262K 原生上下文，中文能力强）
 - 对 chat-only provider（如 OpenClaw），prompt 放入 system message，user message 用零宽字符标记
 
 ### 13.2 辅助模型
 
 通过 `config.yml` 的 `models.auxiliary` 配置，同样支持多 provider。
 - 用途：情绪推断、对话摘要压缩、浅睡/深睡记忆整理、习气提炼、元认知反思、印象摘要生成
-- 当前推荐：Qwen3.5-27B 或更轻量的同系列模型
+- 当前推荐：Qwen3.6-27B 或更轻量的同系列模型
 
 ### 13.3 Embedding 模型
 
@@ -916,7 +916,7 @@ CREATE INDEX idx_audit_time ON audit_log (timestamp);
 # 模型配置
 models:
   primary:
-    name: "qwen3.5:27b"
+    name: "qwen3.6:27b"
     num_predict: 2048
     num_ctx: 32768
     temperature: 0.8
