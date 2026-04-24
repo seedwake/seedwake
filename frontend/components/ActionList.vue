@@ -24,6 +24,22 @@ function stateKey(a: ActionItem): string {
 function stateLabel(a: ActionItem): string {
   return t(`action_state.${stateKey(a)}`);
 }
+
+const DETAIL_MAX_CHARS = 120;
+
+// Prefer the planner's task statement (from request.task) so the panel reads
+// like "reading RUNNING — 阅读并总结文章：…" instead of the redundant
+// "reading RUNNING 执行中". Fall back to the i18n summary when task is absent.
+function actionDetail(a: ActionItem): string {
+  const task = (a.request?.task as string | undefined) || "";
+  const firstLine = task.split(/\r?\n/).find((line) => line.trim()) || "";
+  if (firstLine) {
+    return firstLine.length > DETAIL_MAX_CHARS
+      ? `${firstLine.slice(0, DETAIL_MAX_CHARS - 1).trimEnd()}…`
+      : firstLine.trim();
+  }
+  return resolve(a.summary);
+}
 </script>
 
 <template>
@@ -44,7 +60,7 @@ function stateLabel(a: ActionItem): string {
       >
         <div class="kind">{{ a.type }}</div>
         <div class="state"><span class="sd" /> {{ stateLabel(a) }}</div>
-        <div class="detail">{{ resolve(a.summary) }}</div>
+        <div class="detail">{{ actionDetail(a) }}</div>
       </div>
     </div>
   </div>

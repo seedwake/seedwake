@@ -46,14 +46,17 @@ interface Drop {
 const drops = computed<Drop[]>(() => {
   const vals = props.emotions;
   if (!vals) return [];
+  // orbit shrinks toward center on hover; drop radius (r) stays unchanged so
+  // the ink spots keep their pigment size, only their positions draw inward.
+  const effectiveOrbit = ORBIT * (1 - HOVER_SHRINK * hoverFactor.value);
   return DIMS.map((d) => {
     const v = Math.max(0, Math.min(1, vals[d.key] || 0));
     const rad = (d.angle * Math.PI) / 180;
     return {
       key: d.key,
       hue: d.hue,
-      cx: CENTER + ORBIT * Math.cos(rad),
-      cy: CENTER + ORBIT * Math.sin(rad),
+      cx: CENTER + effectiveOrbit * Math.cos(rad),
+      cy: CENTER + effectiveOrbit * Math.sin(rad),
       r: DROP_MIN + v * (DROP_MAX - DROP_MIN),
       val: v,
       seed: d.seed,
@@ -61,6 +64,8 @@ const drops = computed<Drop[]>(() => {
     };
   });
 });
+
+const effectiveRefOrbit = computed(() => ORBIT * (1 - HOVER_SHRINK * hoverFactor.value));
 
 function gradId(key: string): string { return `sw-drop-grad-${key}`; }
 function filterId(key: string): string { return `sw-drop-edge-${key}`; }
@@ -70,10 +75,19 @@ function filterId(key: string): string { return `sw-drop-edge-${key}`; }
 const rotation = ref(0);
 const boostPos = ref(0);
 const boostVel = ref(0);
-const BASE_SPEED = 2.6;  // deg/sec → ~140s per revolution
-const STIFFNESS = 0.15;  // slow, soft spring
-const DAMPING = 0.77;    // critical damping for k=0.15 (c = 2√k): no oscillation,
-                         // peak at ~2.6s, fully settled ~13s
+const BASE_SPEED = 4.0;  // deg/sec → ~90s per revolution (quicker idle)
+const STIFFNESS = 0.04;  // very soft spring
+const DAMPING = 0.4;     // critical damping for k=0.04 (c = 2√k ≈ 0.4): no
+                         // oscillation, peak at ~5s, fully settled ~25s
+
+// Hover interaction: cursor entering the halo eases rotation down to ~30% of
+// idle AND smoothly contracts the whole halo 20% toward its center — "your
+// gaze stills the stream, and the stream draws inward".
+const hoverFactor = ref(0);          // 0 = idle, 1 = fully hovered, lerped in tick()
+let hoverTarget = 0;                 // step target for hoverFactor
+const HOVER_SPEED_MIN = 0.5;         // rotation scales to 50% at full hover
+const HOVER_SHRINK = 0.2;            // halo shrinks by this fraction at full hover
+const HOVER_LERP = 4;                // how fast hoverFactor approaches target
 
 let rafId: number | null = null;
 let lastTime = 0;
@@ -81,6 +95,7 @@ let lastTime = 0;
 function tick(now: number): void {
   if (lastTime) {
     const dt = Math.min(0.05, (now - lastTime) / 1000);
+    // spring for disturbance boost
     const force = -STIFFNESS * boostPos.value - DAMPING * boostVel.value;
     boostVel.value += force * dt;
     boostPos.value += boostVel.value * dt;
@@ -88,7 +103,11 @@ function tick(now: number): void {
       boostPos.value = 0;
       boostVel.value = 0;
     }
-    const speed = BASE_SPEED + Math.max(0, boostPos.value);
+    // hover factor eases toward target
+    hoverFactor.value += (hoverTarget - hoverFactor.value) * Math.min(1, HOVER_LERP * dt);
+    // rotation speed: base scaled by hover, plus disturbance boost (never negative)
+    const speedFactor = 1 - (1 - HOVER_SPEED_MIN) * hoverFactor.value;
+    const speed = BASE_SPEED * speedFactor + Math.max(0, boostPos.value);
     rotation.value = (rotation.value + speed * dt) % 360;
   }
   lastTime = now;
@@ -102,11 +121,16 @@ watch(() => props.emotions, (next, prev) => {
     delta += Math.abs((next[d.key] || 0) - (prev[d.key] || 0));
   }
   if (delta > 0.015) {
-    // kick scaled for the slower spring: peak amplitude stays roughly the same
-    // as before (~24 deg/s for a delta of 0.5), but rise/fall is ~2x longer
-    boostVel.value += Math.min(delta * 50, 125);
+    // large kick so the burst is visibly dramatic (~73 deg/s peak for a delta
+    // of 0.5, about 18x the idle speed). Same soft spring → still ~25s total
+    // settle, and the bigger amplitude keeps the acceleration readable for
+    // much longer above any perceptual threshold.
+    boostVel.value += Math.min(delta * 80, 200);
   }
 }, { deep: true });
+
+function onMouseEnter(): void { hoverTarget = 1; }
+function onMouseLeave(): void { hoverTarget = 0; }
 
 onMounted(() => {
   lastTime = 0;
@@ -120,11 +144,18 @@ onBeforeUnmount(() => {
 const rotationTransform = computed(
   () => `rotate(${rotation.value.toFixed(2)} ${CENTER} ${CENTER})`
 );
+
 </script>
 
 <template>
   <div class="emotion">
-    <svg viewBox="0 0 260 260" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+    <svg
+      viewBox="0 0 260 260"
+      preserveAspectRatio="xMidYMid meet"
+      aria-hidden="true"
+      @mouseenter="onMouseEnter"
+      @mouseleave="onMouseLeave"
+    >
       <defs>
         <!-- Iterate over the static DIMS (not the value-bound `drops` computed) so
              these defs mount once and are never re-evaluated on emotion updates —
@@ -153,14 +184,15 @@ const rotationTransform = computed(
         </filter>
       </defs>
 
-      <!-- faint reference circle at the drop orbit (stationary) -->
-      <circle cx="130" cy="130" r="74"
+      <!-- faint reference circle at the drop orbit; shrinks with the halo on hover -->
+      <circle cx="130" cy="130" :r="effectiveRefOrbit"
               fill="none"
               stroke="oklch(0.55 0.015 60 / 0.18)"
               stroke-width="0.4"
               stroke-dasharray="2 3" />
 
-      <!-- rotating group so the whole halo drifts clockwise -->
+      <!-- rotating group around halo center; orbit radius itself contracts via
+           drops' cx/cy on hover, so drops keep their pigment size -->
       <g :transform="rotationTransform">
         <circle
           v-for="d in drops"

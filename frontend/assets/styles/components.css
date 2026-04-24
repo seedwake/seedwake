@@ -175,10 +175,10 @@ body.drowsy .stream-head h1 { color: var(--ink-mute); font-weight: 300; }
   overflow-y: auto;
   scrollbar-width: none;
   padding: 40px 44px 20px;
-  /* viewport-anchored fade: top half fades from transparent → solid, bottom half
+  /* viewport-anchored fade: top 20% fades from transparent → solid, bottom 80%
      stays fully solid so whatever the user scrolls up to is readable. */
-  mask-image: linear-gradient(to bottom, transparent 0%, black 50%, black 100%);
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 50%, black 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, black 20%, black 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 20%, black 100%);
 }
 .stream::-webkit-scrollbar { display: none; }
 
@@ -191,7 +191,7 @@ body.drowsy .thoughts { opacity: 0.5; }
 /* thought card */
 .thought {
   display: grid; grid-template-columns: 64px 1fr;
-  gap: 20px; align-items: start;
+  gap: 20px; align-items: baseline;
   position: relative;
   /* Per-card enter delay (set inline via --enter-delay in StreamPanel) staggers
      a batch of thoughts that arrive together so they cascade in instead of
@@ -206,7 +206,7 @@ body.drowsy .thoughts { opacity: 0.5; }
 }
 .thought.exiting { opacity: 0 !important; transform: translateY(-10px); }
 
-.thought .gutter { padding-top: 4px; text-align: right; position: relative; }
+.thought .gutter { text-align: right; position: relative; }
 .thought .cid { font-family: var(--mono); font-size: 10px; color: var(--ink-faint); letter-spacing: 0.06em; line-height: 1.4; }
 .thought .tag {
   display: inline-block; font-family: var(--sans); font-size: 9.5px;
@@ -273,23 +273,7 @@ html[lang="en"] .thought .body { letter-spacing: 0; font-size: 18px; line-height
    a clear reading zone at the bottom of the viewport. */
 .thought { --op: 1; }
 
-/* attended — cinnabar ember */
-.thought.attended .gutter::after {
-  content: ""; position: absolute; right: -10px; top: 6px; bottom: -6px;
-  width: 2px;
-  background: linear-gradient(to bottom,
-    var(--ember) 0%, var(--ember-deep) 55%, oklch(0.55 0.18 30 / 0) 100%);
-  box-shadow:
-    0 0 6px 1px oklch(0.58 0.18 30 / 0.6),
-    0 0 16px 3px oklch(0.58 0.18 30 / 0.22);
-  border-radius: 1px;
-  transform-origin: top;
-  animation: sw-bar-breathe 4s ease-in-out infinite;
-}
-@keyframes sw-bar-breathe {
-  0%,100% { transform: scaleY(1);    box-shadow: 0 0 6px 1px oklch(0.58 0.18 30 / 0.55), 0 0 16px 3px oklch(0.58 0.18 30 / 0.20); }
-  50%     { transform: scaleY(1.05); box-shadow: 0 0 8px 2px oklch(0.58 0.18 30 / 0.75), 0 0 22px 5px oklch(0.58 0.18 30 / 0.32); }
-}
+/* attended — cinnabar ember (vertical bar removed, ember dot + body halo remain) */
 .thought.attended .body { font-size: 22px; font-weight: 500; }
 html[lang="en"] .thought.attended .body { font-size: 20px; }
 .thought.attended .body::before {
@@ -320,10 +304,14 @@ html[lang="en"] .thought.attended .body { font-size: 20px; }
     opacity: 1;
   }
 }
+/* Background halo behind attended thoughts. The box extends past the thought's
+   own left edge so the radial gradient has room to fade to transparent before
+   hitting any container boundary — otherwise the gradient cuts off vertically
+   at the box's left edge and reads as a sharp ink line. */
 .thought.attended::before {
-  content: ""; position: absolute; left: 40px; right: -20px; top: 50%;
-  transform: translateY(-50%); width: calc(100% - 20px); height: 260px;
-  background: radial-gradient(ellipse 58% 55% at 28% 50%, oklch(0.85 0.14 40 / 0.14) 0%, transparent 72%);
+  content: ""; position: absolute; left: -30px; right: -20px; top: 50%;
+  transform: translateY(-50%); height: 260px;
+  background: radial-gradient(ellipse 58% 55% at 34% 50%, oklch(0.85 0.14 40 / 0.14) 0%, transparent 72%);
   z-index: -1; pointer-events: none;
   animation: sw-halo 4s ease-in-out infinite;
 }
