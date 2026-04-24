@@ -7,7 +7,6 @@ import type {
   ActionsResponse,
   ConversationEntry,
   ConversationHistoryResponse,
-  ReplyEventPayload,
   StateEventPayload,
   StatusEventPayload,
   StimulusEventPayload,
@@ -31,13 +30,9 @@ export function useStream() {
   const source = ref<EventSource | null>(null);
   const retryMs = ref(2_000);
   let conversationRefreshInFlight: Promise<void> | null = null;
-  let lastConversationRefreshAt = 0;
 
-  async function refreshConversationSnapshot(force = false): Promise<void> {
-    const now = Date.now();
-    if (!force && now - lastConversationRefreshAt < 1_500) return;
+  async function refreshConversationSnapshot(): Promise<void> {
     if (conversationRefreshInFlight) return conversationRefreshInFlight;
-    lastConversationRefreshAt = now;
     conversationRefreshInFlight = api
       .get<ConversationHistoryResponse>("/conversation", { limit: 100 })
       .then((payload) => {
@@ -62,6 +57,7 @@ export function useStream() {
     es.onopen = () => {
       store.connected.value = true;
       retryMs.value = 2_000;
+      void refreshConversationSnapshot();
     };
 
     es.onerror = () => {
@@ -78,7 +74,6 @@ export function useStream() {
       const payload = parseJson<ThoughtEventPayload>(e.data, "thought");
       if (payload && Array.isArray(payload)) {
         store.ingestThoughts(payload);
-        void refreshConversationSnapshot();
       }
     });
 
@@ -86,7 +81,6 @@ export function useStream() {
       const payload = parseJson<StateEventPayload>(e.data, "state");
       if (payload) {
         store.applyState(payload);
-        void refreshConversationSnapshot();
       }
     });
 
@@ -109,13 +103,7 @@ export function useStream() {
         };
         if (payload.request !== undefined) update.request = payload.request;
         store.upsertAction(update as ActionItem);
-        void refreshConversationSnapshot();
       }
-    });
-
-    es.addEventListener("reply", (e: MessageEvent<string>) => {
-      const payload = parseJson<ReplyEventPayload>(e.data, "reply");
-      if (payload) void refreshConversationSnapshot(true);
     });
 
     es.addEventListener("status", (e: MessageEvent<string>) => {

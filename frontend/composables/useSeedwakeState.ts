@@ -30,6 +30,7 @@ export interface StreamItem {
 // is purged whole-cycle-at-a-time. This bounds memory regardless of uptime and
 // enforces that observers can only see recent context (no scrollback history leak).
 const MAX_CYCLES = 4;
+const MAX_CONVERSATION = 30;
 const MAX_STIMULI = 50;
 const STIMULUS_BUCKET_RANK: Record<string, number> = {
   noticed: 0,
@@ -97,6 +98,26 @@ function normalizeStimuli(items: StimulusQueueItem[]): StimulusQueueItem[] {
   return [...byGroup.values()].sort(
     (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
   );
+}
+
+function conversationTimestampMs(entry: ConversationEntry): number {
+  const ms = new Date(entry.timestamp).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function mergeConversationEntries(
+  current: ConversationEntry[],
+  incoming: ConversationEntry[],
+): ConversationEntry[] {
+  const byId = new Map<string, ConversationEntry>();
+  for (const entry of current) byId.set(entry.entry_id, entry);
+  for (const entry of incoming) {
+    const existing = byId.get(entry.entry_id);
+    byId.set(entry.entry_id, existing ? { ...existing, ...entry } : entry);
+  }
+  return [...byId.values()]
+    .sort((a, b) => conversationTimestampMs(a) - conversationTimestampMs(b))
+    .slice(-MAX_CONVERSATION);
 }
 
 export function useSeedwakeState() {
@@ -173,34 +194,10 @@ export function useSeedwakeState() {
       mode.value = next;
     },
     setConversation(items: ConversationEntry[]) {
-      conversation.value = items.slice(-30);
-    },
-    appendConversationReply(speaker_name: string, content: string, timestamp: string) {
-      const entry: ConversationEntry = {
-        entry_id: `reply-${timestamp}`,
-        role: "assistant",
-        source: "telegram",
-        content,
-        timestamp,
-        stimulus_id: null,
-        metadata: {},
-        direction: "outbound",
-        speaker_name,
-      };
-      conversation.value = [...conversation.value, entry].slice(-30);
+      conversation.value = mergeConversationEntries(conversation.value, items);
     },
     appendConversationEntry(entry: ConversationEntry) {
-      // Dedupe by entry_id — backend may emit conversation_entry AND the
-      // pre-existing `reply` event for outbound messages while both code paths
-      // coexist. Prefer the richer of the two (last write wins by id).
-      const idx = conversation.value.findIndex((e) => e.entry_id === entry.entry_id);
-      if (idx >= 0) {
-        const next = [...conversation.value];
-        next[idx] = { ...next[idx], ...entry };
-        conversation.value = next;
-        return;
-      }
-      conversation.value = [...conversation.value, entry].slice(-30);
+      conversation.value = mergeConversationEntries(conversation.value, [entry]);
     },
     upsertStimulus(item: StimulusQueueItem) {
       stimuli.value = normalizeStimuli([...stimuli.value, item]).slice(-MAX_STIMULI);
