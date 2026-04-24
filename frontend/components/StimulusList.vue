@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import type { StimulusQueueItem } from "~/types/api";
 
-defineProps<{ stimuli: StimulusQueueItem[] }>();
+const props = defineProps<{ stimuli: StimulusQueueItem[] }>();
 const { t, te } = useI18n();
+
+const panelRef = ref<HTMLElement | null>(null);
+const { isOverflowing } = useAutoScroll(panelRef, () => props.stimuli.length);
 
 function typeLabel(type: string): string {
   const key = `stimulus_type.${type}`;
@@ -31,22 +34,24 @@ function relativeTime(ts: string): string {
       <span class="zh">{{ t("right.stimulus_label") }}</span>
       <span>{{ t("right.stimulus_label_en") }}</span>
     </div>
-    <p v-if="stimuli.length === 0" class="msg">
-      <span class="text" style="color: var(--ink-faint)">{{ t("right.empty_stimuli") }}</span>
-    </p>
-    <div
-      v-for="s in stimuli"
-      :key="s.stimulus_id"
-      class="action-row"
-      data-state="pending"
-    >
-      <div class="kind">
-        {{ typeLabel(s.type) }}<template v-if="s.source"> · {{ s.source }}</template>
+    <div class="scroll" ref="panelRef" :class="{ 'edge-fade': isOverflowing }">
+      <p v-if="stimuli.length === 0" class="msg">
+        <span class="text" style="color: var(--ink-faint)">{{ t("right.empty_stimuli") }}</span>
+      </p>
+      <div
+        v-for="s in stimuli"
+        :key="s.stimulus_id"
+        class="action-row"
+        data-state="pending"
+      >
+        <div class="kind">
+          {{ typeLabel(s.type) }}<template v-if="s.source"> · {{ s.source }}</template>
+        </div>
+        <div class="state">
+          <span class="sd" /> {{ t("right.priority", { n: s.priority }) }}
+        </div>
+        <div class="detail">"{{ s.summary }}" · {{ relativeTime(s.timestamp) }}</div>
       </div>
-      <div class="state">
-        <span class="sd" /> {{ t("right.priority", { n: s.priority }) }}
-      </div>
-      <div class="detail">"{{ s.summary }}" · {{ relativeTime(s.timestamp) }}</div>
     </div>
   </div>
 </template>

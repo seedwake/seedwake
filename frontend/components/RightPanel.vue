@@ -11,7 +11,9 @@ const store = useSeedwakeState();
     </div>
 
     <ConversationList :entries="store.conversation.value" />
+    <div class="section-divider" />
     <ActionList :actions="store.actions.value" />
+    <div class="section-divider" />
     <StimulusList :stimuli="store.stimuli.value" />
   </aside>
 </template>

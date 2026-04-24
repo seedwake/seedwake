@@ -10,6 +10,7 @@ import type {
   StatusEventPayload,
   StimuliResponse,
   ThoughtEventPayload,
+  ThoughtsResponse,
 } from "~/types/api";
 
 function parseJson<T>(data: string, kind: string): T | null {
@@ -99,6 +100,11 @@ export function useStream() {
     });
 
     // Initial snapshot events (emitted by backend on SSE connect)
+    es.addEventListener("thoughts", (e: MessageEvent<string>) => {
+      const payload = parseJson<ThoughtsResponse>(e.data, "thoughts");
+      if (payload?.items) store.ingestThoughts(payload.items);
+    });
+
     es.addEventListener("actions", (e: MessageEvent<string>) => {
       const payload = parseJson<ActionsResponse>(e.data, "actions");
       if (payload?.items) store.setActions(payload.items);

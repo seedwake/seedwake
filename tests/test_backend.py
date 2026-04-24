@@ -509,14 +509,15 @@ class BackendTests(unittest.TestCase):
         )
 
         response = stream_events(request=_as_request(request), api_client="backend_api")
-        chunks = asyncio.run(_read_stream_chunks(response.body_iterator, 5))
+        chunks = asyncio.run(_read_stream_chunks(response.body_iterator, 6))
 
         self.assertIn("event: status", chunks[0])
         self.assertIn("event: state", chunks[1])
         self.assertIn('"mode": "waking"', chunks[1])
-        self.assertIn("event: actions", chunks[2])
-        self.assertIn("event: conversation", chunks[3])
-        self.assertIn("event: stimuli", chunks[4])
+        self.assertIn("event: thoughts", chunks[2])
+        self.assertIn("event: actions", chunks[3])
+        self.assertIn("event: conversation", chunks[4])
+        self.assertIn("event: stimuli", chunks[5])
 
     def test_recent_thoughts_query(self) -> None:
         self.redis.sorted_sets["seedwake:thoughts"] = [

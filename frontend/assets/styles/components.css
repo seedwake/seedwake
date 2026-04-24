@@ -339,21 +339,24 @@ html[lang="en"] .thought.attended .body { font-size: 20px; }
 .col.right .panel {
   flex: 1 1 0;
   min-height: 0;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--rule-faint) transparent;
-  padding-right: 4px;
 }
-.col.right .panel::-webkit-scrollbar { width: 4px; }
-.col.right .panel::-webkit-scrollbar-thumb { background: var(--rule-faint); border-radius: 2px; }
-.col.right .panel::-webkit-scrollbar-track { background: transparent; }
-/* fade the bottom edge so overflow doesn't look cut off */
-.col.right .panel {
-  mask-image: linear-gradient(to bottom, black 0, black calc(100% - 14px), transparent 100%);
-  -webkit-mask-image: linear-gradient(to bottom, black 0, black calc(100% - 14px), transparent 100%);
+.col.right .panel .scroll {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+  padding-right: 4px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.col.right .panel .scroll::-webkit-scrollbar { display: none; }
+/* fade only the top of the message area when content actually overflows; the eyebrow sits above this container and always stays solid */
+.col.right .panel .scroll.edge-fade {
+  mask-image: linear-gradient(to bottom, transparent 0, black 14px, black 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, black 14px, black 100%);
 }
 
 .panel { display: flex; flex-direction: column; gap: 14px; }
+.col.right .section-divider { flex: 0 0 1px; height: 1px; background: var(--rule-faint); }
 .msg { display: flex; flex-direction: column; gap: 4px; padding-bottom: 14px; border-bottom: 1px solid var(--rule-faint); }
 .msg:last-child { border-bottom: none; padding-bottom: 0; }
 .msg .who { display: flex; justify-content: space-between; align-items: baseline; font-family: var(--sans); font-size: 9.5px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-faint); }

@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import type { ConversationEntry } from "~/types/api";
 
-defineProps<{ entries: ConversationEntry[] }>();
+const props = defineProps<{ entries: ConversationEntry[] }>();
 const { t } = useI18n();
+
+const panelRef = ref<HTMLElement | null>(null);
+const { isOverflowing } = useAutoScroll(panelRef, () => props.entries.length);
 
 function isSelf(entry: ConversationEntry): boolean {
   if (entry.direction === "outbound") return true;
@@ -31,20 +34,22 @@ function displayTime(ts: string): string {
       <span class="zh">{{ t("right.conversation_label") }}</span>
       <span>{{ t("right.conversation_label_en") }}</span>
     </div>
-    <template v-if="entries.length === 0">
-      <p class="msg"><span class="text" style="color: var(--ink-faint)">{{ t("right.empty_conversation") }}</span></p>
-    </template>
-    <div
-      v-for="entry in entries"
-      :key="entry.entry_id"
-      class="msg"
-      :class="{ inbound: !isSelf(entry) }"
-    >
-      <div class="who">
-        <span class="name" :class="{ self: isSelf(entry) }">{{ speakerName(entry) }}</span>
-        <span class="t">{{ displayTime(entry.timestamp) }}</span>
+    <div class="scroll" ref="panelRef" :class="{ 'edge-fade': isOverflowing }">
+      <template v-if="entries.length === 0">
+        <p class="msg"><span class="text" style="color: var(--ink-faint)">{{ t("right.empty_conversation") }}</span></p>
+      </template>
+      <div
+        v-for="entry in entries"
+        :key="entry.entry_id"
+        class="msg"
+        :class="{ inbound: !isSelf(entry) }"
+      >
+        <div class="who">
+          <span class="name" :class="{ self: isSelf(entry) }">{{ speakerName(entry) }}</span>
+          <span class="t">{{ displayTime(entry.timestamp) }}</span>
+        </div>
+        <p class="text">{{ entry.content }}</p>
       </div>
-      <p class="text">{{ entry.content }}</p>
     </div>
   </div>
 </template>

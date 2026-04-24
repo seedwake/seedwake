@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.deps import resolve_api_client
 from backend.routes.conversation import get_conversation_history
-from backend.routes.query import get_state, list_actions, list_stimuli
+from backend.routes.query import get_state, list_actions, list_recent_thoughts, list_stimuli
 from core.memory.short_term import REDIS_CHANNEL as THOUGHT_CHANNEL
 from core.common_types import EventEnvelope, JsonObject, JsonValue, StatusEventPayload, coerce_json_value
 
@@ -117,6 +117,7 @@ def _initial_snapshot_events(request: Request, api_client: str) -> list[tuple[st
     events: list[tuple[str, JsonValue]] = []
     snapshots = (
         ("state", lambda: get_state(request, api_client)),
+        ("thoughts", lambda: list_recent_thoughts(request, api_client, limit=60)),
         ("actions", lambda: list_actions(request, api_client, limit=100)),
         ("conversation", lambda: get_conversation_history(request, api_client, limit=100)),
         ("stimuli", lambda: list_stimuli(request, api_client, limit=20)),

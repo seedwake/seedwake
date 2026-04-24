@@ -113,7 +113,7 @@ export function useSeedwakeState() {
         ? next.filter((a) => a.action_id !== incoming.action_id || !terminal.has(a.status))
         : next;
     } else if (!terminal.has(incoming.status)) {
-      actions.value = [incoming, ...actions.value].slice(0, 20);
+      actions.value = [...actions.value, incoming].slice(-20);
     }
   }
 
@@ -146,7 +146,7 @@ export function useSeedwakeState() {
       mode.value = next;
     },
     setConversation(items: ConversationEntry[]) {
-      conversation.value = items;
+      conversation.value = items.slice(-30);
     },
     appendConversationReply(speaker_name: string, content: string, timestamp: string) {
       const entry: ConversationEntry = {
@@ -160,14 +160,16 @@ export function useSeedwakeState() {
         direction: "outbound",
         speaker_name,
       };
-      conversation.value = [...conversation.value, entry].slice(-50);
+      conversation.value = [...conversation.value, entry].slice(-30);
     },
     setStimuli(items: StimulusQueueItem[]) {
-      stimuli.value = items;
+      stimuli.value = [...items].sort(
+        (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+      );
     },
     setActions(items: ActionItem[]) {
       const pending = items.filter((a) => !["succeeded", "failed", "timeout"].includes(a.status));
-      actions.value = pending.slice(0, 20);
+      actions.value = pending.slice(-20);
     },
   };
 }
