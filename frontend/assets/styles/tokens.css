@@ -1,0 +1,58 @@
+/* Seedwake · design tokens · light palette (sutra-scroll) */
+
+:root {
+  /* paper */
+  --paper-0: oklch(0.96 0.010 78);
+  --paper-1: oklch(0.945 0.012 75);
+  --paper-2: oklch(0.93 0.014 72);
+  --paper-3: oklch(0.91 0.016 70);
+
+  /* rules */
+  --rule: oklch(0.55 0.015 60 / 0.28);
+  --rule-faint: oklch(0.55 0.015 60 / 0.14);
+
+  /* ink */
+  --ink: oklch(0.24 0.010 60);
+  --ink-soft: oklch(0.34 0.010 60 / 0.9);
+  --ink-mute: oklch(0.48 0.012 60 / 0.75);
+  --ink-faint: oklch(0.55 0.012 60 / 0.6);
+
+  /* thought-type hues */
+  --t-think:   oklch(0.36 0.045 65);
+  --t-intent:  oklch(0.42 0.08 68);
+  --t-react:   oklch(0.40 0.09 28);
+  --t-reflect: oklch(0.42 0.04 190);
+
+  /* cinnabar (attention) */
+  --ember: oklch(0.55 0.18 30);
+  --ember-deep: oklch(0.45 0.17 28);
+  --ember-soft: oklch(0.6 0.16 32 / 0.5);
+
+  /* state colors (action chips) */
+  --st-pending: oklch(0.55 0.015 60 / 0.55);
+  --st-running: var(--ember);
+  --st-ok:      oklch(0.45 0.07 150);
+  --st-fail:    oklch(0.45 0.12 28);
+
+  /* emotion dimension swatches (traditional pigments) */
+  --em-curiosity:   oklch(0.65 0.12 75);   /* 赭黄 */
+  --em-calm:        oklch(0.45 0.08 230);  /* 青黛 */
+  --em-satisfied:   oklch(0.58 0.08 160);  /* 石绿 */
+  --em-concern:     oklch(0.45 0.08 300);  /* 紫檀 */
+  --em-frustration: oklch(0.55 0.10 10);   /* 胭脂 */
+
+  /* default font stacks (Chinese primary) */
+  --serif: "Noto Serif SC", ui-serif, serif;
+  --sans:  "Noto Sans SC", ui-sans-serif, system-ui;
+  --mono:  "JetBrains Mono", ui-monospace, monospace;
+  --latin: "EB Garamond", var(--serif);
+  --seal:  "Ma Shan Zheng", var(--serif);
+}
+
+/* English locale — swap to humanist Latin type, drop CJK primaries */
+html[lang="en"] {
+  --serif: "Fraunces", "EB Garamond", ui-serif, serif;
+  --sans:  "Inter", ui-sans-serif, system-ui;
+  --latin: "EB Garamond", "Fraunces", ui-serif, serif;
+  /* keep --mono and --seal for code and seal glyph */
+}
