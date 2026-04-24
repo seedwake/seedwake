@@ -4,10 +4,9 @@
 // Also exposes `isOverflowing` so callers can conditionally style the edge fade
 // (no overflow → no mask needed; short content stays fully solid).
 //
-// Optional `idleReturnMs`: when the user has scrolled away from the bottom and
-// then disengages (mouse leaves the panel, no wheel/touch/keyboard activity)
-// for this duration, smooth-scroll back to the latest. Keeps panels tracking
-// the newest without fighting the reader while they're still focused on it.
+// Optional `idleReturnMs`: when the user stops scrolling/pointing/touching for
+// this duration, smooth-scroll back to the latest. Keeps panels tracking the
+// newest without fighting the reader while they're still actively inspecting it.
 
 import type { Ref } from "vue";
 
@@ -22,7 +21,8 @@ export function useAutoScroll(
   let initialScrollDone = false;
   let ro: ResizeObserver | null = null;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
-  let hovered = false;
+  let lastActivityAt = 0;
+  let ignoreScrollUntil = 0;
 
   function isAtBottom(node: HTMLElement): boolean {
     return node.scrollHeight - node.clientHeight - node.scrollTop <= THRESHOLD;
@@ -43,19 +43,50 @@ export function useAutoScroll(
   function scheduleIdle(): void {
     if (IDLE_MS <= 0) return;
     clearIdle();
+    const elapsed = Date.now() - lastActivityAt;
+    const delay = Math.max(IDLE_MS - elapsed, 0);
     idleTimer = setTimeout(() => {
       idleTimer = null;
       const node = elRef.value;
-      if (!node || hovered || isAtBottom(node)) return;
-      node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
-    }, IDLE_MS);
+      if (!node || isAtBottom(node)) return;
+      if (Date.now() - lastActivityAt < IDLE_MS) {
+        scheduleIdle();
+        return;
+      }
+      scrollToBottom(node);
+    }, delay);
   }
 
-  function onEnter(): void { hovered = true; clearIdle(); }
-  function onLeave(): void { hovered = false; scheduleIdle(); }
-  // Fires on any user-initiated scroll attempt; resets the idle countdown so
-  // the auto-return only triggers after real disengagement.
-  function onInteract(): void { scheduleIdle(); }
+  function scrollToBottom(node: HTMLElement): void {
+    ignoreScrollUntil = Date.now() + 1_200;
+    node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+    // Smooth scroll can begin before late layout changes settle; one frame later
+    // keeps the destination anchored to the real bottom without a visible jump.
+    requestAnimationFrame(() => {
+      if (!isAtBottom(node)) node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+    });
+  }
+
+  // Fires on any user activity; resets the idle countdown so the auto-return
+  // only triggers after real disengagement. `scroll` covers scrollbar drags and
+  // inertial scrolling that may not produce wheel/touch events.
+  function onInteract(): void {
+    if (Date.now() < ignoreScrollUntil) return;
+    lastActivityAt = Date.now();
+    scheduleIdle();
+  }
+
+  function onPointerLeave(): void {
+    scheduleIdle();
+  }
+
+  function onWindowBlur(): void {
+    scheduleIdle();
+  }
+
+  function onVisibilityChange(): void {
+    if (document.hidden) scheduleIdle();
+  }
 
   watch(getCount, async (next) => {
     const node = elRef.value;
@@ -70,7 +101,7 @@ export function useAutoScroll(
       if (firstPopulation || !opts?.smooth) {
         node.scrollTop = node.scrollHeight;
       } else {
-        node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+        scrollToBottom(node);
       }
       if (firstPopulation) {
         initialScrollDone = true;
@@ -99,12 +130,16 @@ export function useAutoScroll(
       ro.observe(node);
     }
     if (IDLE_MS > 0) {
-      node.addEventListener("mouseenter", onEnter);
-      node.addEventListener("mouseleave", onLeave);
+      lastActivityAt = Date.now();
+      node.addEventListener("scroll", onInteract, { passive: true });
       node.addEventListener("wheel", onInteract, { passive: true });
       node.addEventListener("touchstart", onInteract, { passive: true });
       node.addEventListener("touchmove", onInteract, { passive: true });
+      node.addEventListener("pointermove", onInteract, { passive: true });
+      node.addEventListener("pointerleave", onPointerLeave);
       node.addEventListener("keydown", onInteract);
+      window.addEventListener("blur", onWindowBlur);
+      document.addEventListener("visibilitychange", onVisibilityChange);
       // Start a pre-emptive timer so the return still fires if the user never
       // interacts at all — no-op when already at bottom.
       scheduleIdle();
@@ -117,12 +152,15 @@ export function useAutoScroll(
     clearIdle();
     const node = elRef.value;
     if (node && IDLE_MS > 0) {
-      node.removeEventListener("mouseenter", onEnter);
-      node.removeEventListener("mouseleave", onLeave);
+      node.removeEventListener("scroll", onInteract);
       node.removeEventListener("wheel", onInteract);
       node.removeEventListener("touchstart", onInteract);
       node.removeEventListener("touchmove", onInteract);
+      node.removeEventListener("pointermove", onInteract);
+      node.removeEventListener("pointerleave", onPointerLeave);
       node.removeEventListener("keydown", onInteract);
+      window.removeEventListener("blur", onWindowBlur);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     }
   });
 
