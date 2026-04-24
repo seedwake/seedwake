@@ -3,10 +3,10 @@
 > 一个按佛教「心相续」原则组织的、持续运行的 AI 思维流引擎。
 
 <p align="center">
-  <a href="./README.md">English</a> |
-  <a href="./docs/concepts_zh.md">项目理念</a> |
-  <a href="./docs/deployment_zh.md">部署运行</a> |
-  <a href="./ISSUE_ZH.md">已知问题</a>
+  <a href="./README.md">🌐 English</a> |
+  <a href="./docs/concepts_zh.md">📖 项目理念</a> |
+  <a href="./docs/deployment_zh.md">🚀 部署运行</a> |
+  <a href="./ISSUE_ZH.md">⚠️ 已知问题</a>
 </p>
 
 ---
