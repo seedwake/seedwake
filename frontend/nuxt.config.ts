@@ -19,8 +19,8 @@ export default defineNuxtConfig({
     strategy: "no_prefix",
     defaultLocale: "zh",
     locales: [
-      { code: "zh", name: "中文", language: "zh-Hans", file: "zh.ts" },
-      { code: "en", name: "English", language: "en", file: "en.ts" },
+      { code: "zh", name: "中文", language: "zh-Hans" },
+      { code: "en", name: "English", language: "en" },
     ],
     detectBrowserLanguage: {
       useCookie: true,

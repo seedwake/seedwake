@@ -3,7 +3,7 @@ const store = useSeedwakeState();
 const stream = useStream();
 const route = useRoute();
 const config = useRuntimeConfig();
-const { setLocale, locale } = useI18n();
+const { locale } = useI18n();
 
 // Language selection: ?lang=xx overrides; else env; else whatever the cookie set
 const queryLang = computed(() => {
@@ -15,7 +15,7 @@ const queryLang = computed(() => {
 // Resolve locale on both server and client so SSR output matches the chosen language.
 const preferred = queryLang.value || (config.public.language as string | undefined);
 if (preferred && preferred !== locale.value && (preferred === "zh" || preferred === "en")) {
-  await setLocale(preferred);
+  locale.value = preferred;
 }
 
 onMounted(() => {

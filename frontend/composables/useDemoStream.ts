@@ -1,6 +1,6 @@
 import { demoScenarioForLocale, type DemoLocale, type DemoScenario } from "~/mocks/demo";
 
-const DEMO_LOOP_MS = 22_000;
+const DEMO_LOOP_MS = 130_000;
 
 export function useDemoStream() {
   const store = useSeedwakeState();
