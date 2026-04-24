@@ -50,6 +50,9 @@ function rebuildStream(thoughts: SerializedThought[]): StreamItem[] {
     return a.index - b.index;
   });
   const attendedMap = attendedByCycle(sorted);
+  // Only the latest cycle's attended thought gets the visual ember/halo treatment.
+  // Historical cycles' attended thoughts render like normal ones.
+  const latestCycle = sorted.length > 0 ? sorted[sorted.length - 1]!.cycle_id : -1;
   const items: StreamItem[] = [];
   let lastCycle = -1;
   for (const t of sorted) {
@@ -66,7 +69,8 @@ function rebuildStream(thoughts: SerializedThought[]): StreamItem[] {
       kind: "thought",
       key: t.thought_id,
       thought: t,
-      attended: attendedMap.get(t.cycle_id) === t.thought_id,
+      attended:
+        t.cycle_id === latestCycle && attendedMap.get(t.cycle_id) === t.thought_id,
     });
   }
   return items;

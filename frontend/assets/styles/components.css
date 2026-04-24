@@ -99,8 +99,8 @@ html[lang="en"] .en { display: none; }
 .mode { display: flex; align-items: center; gap: 12px; padding-top: 2px; transition: color 600ms ease; }
 .mode .dot {
   width: 8px; height: 8px; border-radius: 50%;
-  background: var(--ember);
-  box-shadow: 0 0 0 1px var(--ember-soft), 0 0 14px 2px var(--ember-soft);
+  background: var(--pulse);
+  box-shadow: 0 0 0 1px var(--pulse-soft), 0 0 14px 2px var(--pulse-soft);
   animation: sw-breathe 5.2s ease-in-out infinite;
   transition: background 800ms ease, box-shadow 800ms ease, animation-duration 800ms ease;
 }
@@ -181,12 +181,22 @@ body.drowsy .stream-head h1 { color: var(--ink-mute); font-weight: 300; }
   -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 20%, black 100%);
 }
 .stream::-webkit-scrollbar { display: none; }
+/* drowsy: freeze scroll — the user is "整理中", not browsing */
+body.drowsy .stream { overflow: hidden; }
 
 .thoughts {
   display: flex; flex-direction: column; gap: 34px;
-  transition: opacity 800ms ease;
+  transition: opacity 800ms ease, filter 800ms ease;
 }
-body.drowsy .thoughts { opacity: 0.5; }
+/* drowsy: thoughts defocus (blur) and fade at both vertical edges into paper,
+   so the banner overlaid on top reads cleanly. Banner is a sibling of .thoughts,
+   so blur/mask here do not touch it. */
+body.drowsy .thoughts {
+  opacity: 0.45;
+  filter: blur(3px);
+  mask-image: linear-gradient(to bottom, transparent 0%, black 14%, black 68%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 14%, black 68%, transparent 100%);
+}
 
 /* thought card */
 .thought {
@@ -255,7 +265,7 @@ html[lang="en"] .thought .body { letter-spacing: 0; font-size: 18px; line-height
   font-family: var(--sans); font-size: 10px; line-height: 1; color: var(--ink);
   /* sans lowercase sits visually low in the line-box (baseline near bottom,
      glyph only fills x-height), so nudge up to match the dot's center. */
-  transform: translateY(-1px);
+  transform: translateY(-1.5px);
 }
 .action-chip .state {
   font-family: var(--mono); font-size: 10px; line-height: 1;
@@ -400,8 +410,8 @@ body.deep .stream-foot { opacity: 0; }
 .stream-foot .live { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-soft); }
 .stream-foot .live .beat {
   width: 7px; height: 7px; border-radius: 50%;
-  background: var(--ember);
-  box-shadow: 0 0 10px 2px var(--ember-soft);
+  background: var(--pulse);
+  box-shadow: 0 0 10px 2px var(--pulse-soft);
   animation: sw-beat 2s ease-in-out infinite;
   transition: animation-duration 600ms ease;
 }
@@ -413,9 +423,9 @@ body.drowsy .stream-foot .live .beat { animation-duration: 4s; }
 
 .drowsy-banner {
   position: absolute; left: 44px; right: 44px; bottom: 52px;
-  display: flex; align-items: center; gap: 14px;
-  font-family: var(--serif); font-size: 12px;
-  color: oklch(0.4 0.04 50); letter-spacing: 0.18em;
+  display: flex; align-items: center; gap: 16px;
+  font-family: var(--serif); font-size: 16px; font-weight: 600;
+  color: oklch(0.3 0.04 50); letter-spacing: 0.14em;
   z-index: 4;
   opacity: 0; transform: translateY(8px);
   transition: opacity 700ms ease 200ms, transform 700ms ease 200ms;
@@ -423,12 +433,12 @@ body.drowsy .stream-foot .live .beat { animation-duration: 4s; }
 }
 body.drowsy .drowsy-banner { opacity: 1; transform: translateY(0); }
 .drowsy-banner::before {
-  content: ""; flex: 0 0 24px; height: 1px;
+  content: ""; flex: 0 0 28px; height: 1px;
   background: oklch(0.4 0.04 50 / 0.5);
 }
 .drowsy-banner small {
-  font-family: var(--mono); font-size: 10px; color: oklch(0.45 0.03 50);
-  letter-spacing: 0.14em; margin-left: auto;
+  font-family: var(--mono); font-size: 12.5px; color: oklch(0.42 0.03 50);
+  letter-spacing: 0.12em; margin-left: auto;
 }
 
 /* deep-sleep veil — 卷轴合上 */
