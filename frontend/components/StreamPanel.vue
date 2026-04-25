@@ -75,7 +75,7 @@ function syncVisible(pruneStale: boolean): void {
     if (fresh) {
       next.push(fresh);
     } else if (!pruneStale) {
-      next.push(item);
+      next.push(item.kind === "thought" ? { ...item, activeAttended: false } : item);
     }
   }
   visibleItems.value = next;

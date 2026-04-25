@@ -72,6 +72,13 @@ function buildScenario(text: DemoTextPack, base: Date, cycleOffset: number): Dem
   const t = timelineClock(base);
   const c = (cycleId: number) => cycleId + cycleOffset;
   const boot = (cycleId: number) => 108 + (cycleId - DEMO_START_CYCLE);
+  const snapshot = (
+    mode: RuntimeMode,
+    currentCycle: number,
+    sinceBoot: number,
+    energy: number,
+    offsetSeconds = 0,
+  ) => stateSnapshot(mode, currentCycle, sinceBoot, energy, t, offsetSeconds, c(DEMO_START_CYCLE));
   const thoughtId = (cycleId: number, index: number) => `C${cycleId}-${index}`;
   const actionId = (cycleId: number, index: number) => `act_C${cycleId}-${index}`;
   const demoId = (prefix: string, cycleId: number) => `${prefix}_${cycleId}`;
@@ -86,7 +93,7 @@ function buildScenario(text: DemoTextPack, base: Date, cycleOffset: number): Dem
 
   return {
     snapshot: {
-      state: stateSnapshot("waking", c(DEMO_START_CYCLE), boot(c(DEMO_START_CYCLE)), 64.2, t),
+      state: snapshot("waking", c(DEMO_START_CYCLE), boot(c(DEMO_START_CYCLE)), 64.2),
       thoughts: [
         thought(c(1764), 1, "thinking", text.initialThoughts[0]!, 0.42, t.iso(-48)),
         thought(c(1764), 2, "reaction", text.initialThoughts[1]!, 0.64, t.iso(-42)),
@@ -108,43 +115,43 @@ function buildScenario(text: DemoTextPack, base: Date, cycleOffset: number): Dem
     events: [
       { delayMs: 1_000, kind: "status", payload: text.statusConnected },
       { delayMs: 2_000, kind: "thoughts", payload: cycle(readingCycle, text.cycle1766, [0.53, 0.61, 0.69], t, 2, "reading", "query:\"light, wall, perception essay\"") },
-      { delayMs: 3_000, kind: "state", payload: stateSnapshot("waking", readingCycle, boot(readingCycle), 64.0, t, 3) },
+      { delayMs: 3_000, kind: "state", payload: snapshot("waking", readingCycle, boot(readingCycle), 64.0, 3) },
       { delayMs: 6_000, kind: "action", payload: { ...reading, status: "pending" } },
-      { delayMs: 12_000, kind: "state", payload: stateSnapshot("waking", readingCycle, boot(readingCycle), 63.9, t, 12) },
+      { delayMs: 12_000, kind: "state", payload: snapshot("waking", readingCycle, boot(readingCycle), 63.9, 12) },
       { delayMs: 16_000, kind: "action", payload: { ...reading, status: "running" } },
-      { delayMs: 22_000, kind: "state", payload: stateSnapshot("waking", readingCycle, boot(readingCycle), 63.8, t, 22) },
+      { delayMs: 22_000, kind: "state", payload: snapshot("waking", readingCycle, boot(readingCycle), 63.8, 22) },
       { delayMs: 26_000, kind: "action", payload: { ...reading, status: "succeeded", summary: completedSummary(text.readingSummary) } },
       { delayMs: 27_000, kind: "stimulus", payload: actionEcho(demoId("stim_demo_reading", readingCycle), reading.action_id, "reading", text.readingSummary, t.iso(27)) },
       { delayMs: 28_000, kind: "conversation_entry", payload: conversation(demoId("conv_demo_3", readingCycle), "user", DEMO_CHAT_SOURCE, text.inboundShare, t.iso(28), "inbound", "Chaos", DEMO_CHAT_ID) },
       { delayMs: 31_000, kind: "thoughts", payload: cycle(weatherCycle, text.cycle1767, [0.55, 0.74, 0.63], t, 31, "weather", "location:\"Tallinn\"") },
-      { delayMs: 32_000, kind: "state", payload: stateSnapshot("waking", weatherCycle, boot(weatherCycle), 63.7, t, 32) },
+      { delayMs: 32_000, kind: "state", payload: snapshot("waking", weatherCycle, boot(weatherCycle), 63.7, 32) },
       { delayMs: 35_000, kind: "action", payload: { ...weather, status: "pending" } },
       { delayMs: 43_000, kind: "action", payload: { ...weather, status: "running" } },
-      { delayMs: 48_000, kind: "state", payload: stateSnapshot("waking", weatherCycle, boot(weatherCycle), 63.6, t, 48) },
+      { delayMs: 48_000, kind: "state", payload: snapshot("waking", weatherCycle, boot(weatherCycle), 63.6, 48) },
       { delayMs: 53_000, kind: "action", payload: { ...weather, status: "succeeded", summary: completedSummary(text.weatherSummary) } },
       { delayMs: 54_000, kind: "stimulus", payload: actionEcho(demoId("stim_demo_weather", weatherCycle), weather.action_id, "weather", text.weatherSummary, t.iso(54)) },
       { delayMs: 55_000, kind: "conversation_entry", payload: conversation(demoId("conv_demo_4", weatherCycle), "user", DEMO_CHAT_SOURCE, text.inboundWeather, t.iso(55), "inbound", "Chaos", DEMO_CHAT_ID) },
       { delayMs: 59_000, kind: "thoughts", payload: cycle(noteCycle, text.cycle1768.slice(0, 3) as [string, string, string], [0.46, 0.7, 0.59], t, 59, "note_rewrite", "content:\"demo: light / wall / weather / sharing\"") },
-      { delayMs: 60_000, kind: "state", payload: stateSnapshot("waking", noteCycle, boot(noteCycle), 63.5, t, 60) },
+      { delayMs: 60_000, kind: "state", payload: snapshot("waking", noteCycle, boot(noteCycle), 63.5, 60) },
       { delayMs: 63_000, kind: "action", payload: { ...note, status: "pending" } },
       { delayMs: 70_000, kind: "action", payload: { ...note, status: "running" } },
-      { delayMs: 74_000, kind: "state", payload: stateSnapshot("waking", noteCycle, boot(noteCycle), 63.4, t, 74) },
+      { delayMs: 74_000, kind: "state", payload: snapshot("waking", noteCycle, boot(noteCycle), 63.4, 74) },
       { delayMs: 78_000, kind: "action", payload: { ...note, status: "succeeded", summary: completedSummary(text.noteSummary) } },
       { delayMs: 79_000, kind: "stimulus", payload: actionEcho(demoId("stim_demo_note", noteCycle), note.action_id, "note_rewrite", text.noteSummary, t.iso(79)) },
       { delayMs: 80_000, kind: "conversation_entry", payload: conversation(demoId("conv_demo_5", noteCycle), "user", DEMO_CHAT_SOURCE, text.inboundNote, t.iso(80), "inbound", "Chaos", DEMO_CHAT_ID) },
       { delayMs: 84_000, kind: "thoughts", payload: cycle(sendCycle, text.cycle1769, [0.5, 0.66, 0.77], t, 84, "send_message", "message:\"demo share\"") },
-      { delayMs: 85_000, kind: "state", payload: stateSnapshot("waking", sendCycle, boot(sendCycle), 63.3, t, 85) },
+      { delayMs: 85_000, kind: "state", payload: snapshot("waking", sendCycle, boot(sendCycle), 63.3, 85) },
       { delayMs: 88_000, kind: "action", payload: { ...send, status: "pending" } },
       { delayMs: 92_000, kind: "mode", payload: "light_sleep" },
-      { delayMs: 93_000, kind: "state", payload: stateSnapshot("light_sleep", sendCycle, boot(sendCycle), 63.2, t, 93) },
+      { delayMs: 93_000, kind: "state", payload: snapshot("light_sleep", sendCycle, boot(sendCycle), 63.2, 93) },
       { delayMs: 97_000, kind: "action", payload: { ...send, status: "running" } },
       { delayMs: 103_000, kind: "action", payload: { ...send, status: "succeeded", summary: completedSummary(text.sendSummary) } },
       { delayMs: 104_000, kind: "conversation_entry", payload: conversation(demoId("conv_demo_6", sendCycle), "assistant", DEMO_CHAT_SOURCE, text.sendMessage, t.iso(104), "outbound", "Seedwake", DEMO_CHAT_ID) },
       { delayMs: 105_000, kind: "stimulus", payload: actionEcho(demoId("stim_demo_send", sendCycle), send.action_id, "send_message", text.sendSummary, t.iso(105)) },
-      { delayMs: 108_000, kind: "state", payload: stateSnapshot("waking", sendCycle, boot(sendCycle), 63.1, t, 108) },
+      { delayMs: 108_000, kind: "state", payload: snapshot("waking", sendCycle, boot(sendCycle), 63.1, 108) },
       { delayMs: 112_000, kind: "thoughts", payload: cycle(c(1770), text.cycle1770, [0.44, 0.68, 0.52], t, 112) },
-      { delayMs: 113_000, kind: "state", payload: stateSnapshot("waking", c(1770), boot(c(1770)), 63.0, t, 113) },
-      { delayMs: 122_000, kind: "state", payload: stateSnapshot("waking", c(1770), boot(c(1770)), 62.9, t, 122) },
+      { delayMs: 113_000, kind: "state", payload: snapshot("waking", c(1770), boot(c(1770)), 63.0, 113) },
+      { delayMs: 122_000, kind: "state", payload: snapshot("waking", c(1770), boot(c(1770)), 62.9, 122) },
     ],
   };
 }
@@ -211,8 +218,9 @@ function stateSnapshot(
   energy: number,
   t: TimelineClock,
   offsetSeconds = 0,
+  progressBaseCycle = DEMO_START_CYCLE,
 ): StateEventPayload {
-  const progress = Math.max(0, currentCycle - DEMO_START_CYCLE);
+  const progress = Math.max(0, currentCycle - progressBaseCycle);
   const drift = offsetSeconds / 120;
   return {
     mode,
