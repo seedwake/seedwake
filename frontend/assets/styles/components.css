@@ -726,25 +726,36 @@ body.deep main, body.deep aside { pointer-events: none; }
   .col + .col { border-left: none; border-top: 1px solid var(--rule-faint); }
   .col.left { overflow-y: visible; }
 
-  /* Phone layout drops fixed-viewport scrolling and lets the page scroll. */
+  /* Stream keeps internal scroll + mask on mobile, capped to ~70vh so the
+     document doesn't grow unbounded as thoughts pile up. useAutoScroll's
+     auto-follow-bottom continues to work inside this capped viewport. Outer
+     page still scrolls between the left state column, stream, and right
+     panels. Nested scroll is accepted as the tradeoff — the stream is the
+     one region where finger-scrolling is rarely needed (it auto-tracks). */
   .stream {
-    overflow-y: visible;
+    overflow-y: auto;
     height: auto;
-    mask-image: none;
-    -webkit-mask-image: none;
+    max-height: min(70vh, 640px);
     padding: 24px 22px 16px;
+    /* mask-image stays as declared on the base .stream rule; no override here. */
   }
   .stream-head { padding: 22px 22px 12px; }
   .stream-head h1 { font-size: 18px; letter-spacing: 0.32em; }
   html[lang="en"] .stream-head h1 { font-size: 19px; letter-spacing: 0.04em; }
   .stream-foot { margin: 32px 0 0; }
 
-  /* Right-column lists: page scroll instead of panel scroll. */
+  /* Right-column panels: opt out of the desktop flex-distribution sizing
+     (flex: 1 1 0 collapses to 0 when the parent has height: auto). Use an
+     explicit height per panel so each has a real scroll viewport — long
+     conversation / action / stimulus histories scroll inside, and the page
+     doesn't stretch. */
+  .col.right .panel {
+    flex: 0 0 auto;
+  }
   .col.right .panel .scroll {
-    overflow-y: visible;
-    max-height: none;
-    mask-image: none;
-    -webkit-mask-image: none;
+    flex: 0 0 auto;
+    height: min(28vh, 240px);
+    overflow-y: auto;
   }
 
   /* Drowsy banner: anchor to bottom of stream column, narrower margins. */

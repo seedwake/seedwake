@@ -21,13 +21,22 @@ const visibleItems = ref<StreamItem[]>([]);
 const THOUGHT_INTERVAL_MS = 3000;
 const ATTENDED_SETTLE_MS = 1250;
 const PRUNE_DELAY_MS = 600;
+const PHONE_VIEWPORT_QUERY = "(max-width: 768px)";
 
 const streamRef = ref<HTMLElement | null>(null);
+const forceFollowOnPhone = ref(false);
+let phoneViewportMedia: MediaQueryList | null = null;
+
+function updatePhoneViewport(event?: MediaQueryListEvent): void {
+  forceFollowOnPhone.value = event?.matches ?? phoneViewportMedia?.matches ?? false;
+}
+
 // smooth:true so each release glides the viewport to the new bottom rather than
 // jump-cutting. First population still uses instant scroll inside useAutoScroll.
 useAutoScroll(streamRef, () => visibleItems.value.length, {
   smooth: true,
   idleReturnMs: 12000,
+  forceOnChange: () => forceFollowOnPhone.value,
 });
 
 let releaseTimer: ReturnType<typeof setTimeout> | null = null;
@@ -134,7 +143,15 @@ watch(rawItems, () => {
   releaseTimer = setTimeout(releaseOne, delay);
 }, { immediate: true });
 
+onMounted(() => {
+  phoneViewportMedia = window.matchMedia(PHONE_VIEWPORT_QUERY);
+  updatePhoneViewport();
+  phoneViewportMedia.addEventListener("change", updatePhoneViewport);
+});
+
 onBeforeUnmount(() => {
+  phoneViewportMedia?.removeEventListener("change", updatePhoneViewport);
+  phoneViewportMedia = null;
   if (releaseTimer !== null) clearTimeout(releaseTimer);
   clearPruneTimer();
 });

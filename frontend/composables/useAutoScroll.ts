@@ -1,6 +1,7 @@
 // Auto-scroll a list container to its bottom when its item count changes,
 // but only if the user is already at (or very near) the bottom. If the user
-// has scrolled up to read history, their position is left alone.
+// has scrolled up to read history, their position is left alone unless
+// forceOnChange is enabled.
 // Also exposes `isOverflowing` so callers can conditionally style the edge fade
 // (no overflow → no mask needed; short content stays fully solid).
 //
@@ -13,9 +14,9 @@ import type { Ref } from "vue";
 export function useAutoScroll(
   elRef: Ref<HTMLElement | null>,
   getCount: () => number,
-  opts?: { smooth?: boolean; idleReturnMs?: number },
+  opts?: { smooth?: boolean; idleReturnMs?: number; forceOnChange?: boolean | (() => boolean) },
 ): { isOverflowing: Ref<boolean> } {
-  const THRESHOLD = 48;
+  const THRESHOLD = 96;
   const IDLE_MS = opts?.idleReturnMs ?? 0;
   const isOverflowing = ref(false);
   let initialScrollDone = false;
@@ -26,6 +27,11 @@ export function useAutoScroll(
 
   function isAtBottom(node: HTMLElement): boolean {
     return node.scrollHeight - node.clientHeight - node.scrollTop <= THRESHOLD;
+  }
+
+  function shouldForceOnChange(): boolean {
+    const force = opts?.forceOnChange;
+    return typeof force === "function" ? force() : force === true;
   }
 
   function updateOverflow(): void {
@@ -92,7 +98,7 @@ export function useAutoScroll(
     const node = elRef.value;
     if (!node) return;
     const firstPopulation = !initialScrollDone && next > 0;
-    const stick = isAtBottom(node);
+    const stick = shouldForceOnChange() || isAtBottom(node);
     await nextTick();
     if (firstPopulation || stick) {
       // First population uses instant jump so a freshly loaded page lands at the
