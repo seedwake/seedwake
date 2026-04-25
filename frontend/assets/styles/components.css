@@ -301,9 +301,10 @@ html[lang="en"] .thought .body { letter-spacing: 0; font-size: 18px; line-height
    visually higher inside the line-box than sans lowercase glyphs (x-height) —
    aligning box centers alone would leave the state label looking too high. */
 .thought .action-chip {
+  --chip-line: 12px;
   margin-top: 12px; display: inline-flex; align-items: center; gap: 8px;
   padding: 6px 10px 5px 9px; border: 1px solid var(--rule); border-radius: 2px;
-  font-size: 10px; line-height: 1; color: var(--ink-soft);
+  font-size: 10px; line-height: var(--chip-line); color: var(--ink-soft);
   letter-spacing: 0.08em; background: oklch(0.97 0.01 75 / 0.6);
   white-space: nowrap;
 }
@@ -315,24 +316,15 @@ html[lang="en"] .thought .body { letter-spacing: 0; font-size: 18px; line-height
 .action-chip[data-state="succeeded"] .state-dot { background: var(--st-ok); }
 .action-chip[data-state="failed"]    .state-dot { background: var(--st-fail); }
 .action-chip .kind {
-  font-family: var(--sans); font-size: 10px; line-height: 1; color: var(--ink);
-  /* sans lowercase sits visually low in the line-box (baseline near bottom,
-     glyph only fills x-height), so nudge up to match the dot's center. */
-  transform: translateY(-1.5px);
+  display: inline-flex; align-items: center; height: var(--chip-line);
+  font-family: var(--sans); font-size: 10px; line-height: var(--chip-line); color: var(--ink);
 }
-/* Inter (EN sans) has slightly higher x-height than Noto Sans SC, so the same
-   -1.5px nudge over-corrects upward — drop half a pixel back. */
-html[lang="en"] .action-chip .kind { transform: translateY(-1px); }
 .action-chip .state {
-  font-family: var(--mono); font-size: 10px; line-height: 1;
+  display: inline-flex; align-items: center; height: var(--chip-line);
+  font-family: var(--mono); font-size: 10px; line-height: var(--chip-line);
   letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint);
-  /* mono uppercase sits visually high (cap-height extends above x-height),
-     nudge down by the same amount — symmetric with .kind so dot/kind/state
-     all meet at the same horizontal centerline. */
-  transform: translateY(1px);
+  transform: translateY(0.5px);
 }
-/* EN baseline metrics differ from CN, so the symmetric pair is 0.5px tighter. */
-html[lang="en"] .action-chip .state { transform: translateY(0.5px); }
 @keyframes sw-pulse { 0%,100% { opacity: 0.45; } 50% { opacity: 1; } }
 
 /* All thoughts render at full opacity; the stream's viewport-level mask (see .stream)
