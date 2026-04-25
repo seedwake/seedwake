@@ -295,11 +295,8 @@ html[lang="en"] .thought .body { letter-spacing: 0; font-size: 18px; line-height
   color: var(--ink-faint); letter-spacing: 0.05em;
 }
 .thought .trigger .arrow { color: var(--ink-mute); margin-right: 5px; }
-/* Flex row, vertically center-aligned: dot, sans lowercase `kind`, mono
-   uppercase `state` all sit on one horizontal line. The state gets a 1px
-   translateY nudge downward because mono uppercase glyphs (cap-height) sit
-   visually higher inside the line-box than sans lowercase glyphs (x-height) —
-   aligning box centers alone would leave the state label looking too high. */
+/* Keep the chip labels in one font metric. Mixing sans lowercase and mono
+   uppercase looks vertically misaligned even when flex centers their line boxes. */
 .thought .action-chip {
   --chip-line: 12px;
   margin-top: 12px; display: inline-flex; align-items: center; gap: 8px;
@@ -317,13 +314,12 @@ html[lang="en"] .thought .body { letter-spacing: 0; font-size: 18px; line-height
 .action-chip[data-state="failed"]    .state-dot { background: var(--st-fail); }
 .action-chip .kind {
   display: inline-flex; align-items: center; height: var(--chip-line);
-  font-family: var(--sans); font-size: 10px; line-height: var(--chip-line); color: var(--ink);
+  font-family: var(--mono); font-size: 10px; line-height: var(--chip-line); color: var(--ink);
 }
 .action-chip .state {
   display: inline-flex; align-items: center; height: var(--chip-line);
   font-family: var(--mono); font-size: 10px; line-height: var(--chip-line);
   letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint);
-  transform: translateY(0.5px);
 }
 @keyframes sw-pulse { 0%,100% { opacity: 0.45; } 50% { opacity: 1; } }
 
