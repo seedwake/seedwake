@@ -9,7 +9,11 @@
   <a href="./ISSUE_ZH.md">⚠️ 已知问题</a>
 </p>
 
+实际演示效果如下方视频所示。
+
 https://github.com/user-attachments/assets/2605127c-27d0-4eb6-959c-cf36fd49a7d7
+
+静态演示网站：https://static-demo-zh.seedwake.ai
 
 ---
 

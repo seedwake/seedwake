@@ -9,7 +9,11 @@
   <a href="./ISSUE.md">⚠️ Open Issues</a>
 </p>
 
+Actual live demo behavior is shown in the video below.
+
 https://github.com/user-attachments/assets/2605127c-27d0-4eb6-959c-cf36fd49a7d7
+
+Static demo site: https://static-demo-en.seedwake.ai
 
 ---
 
