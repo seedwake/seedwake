@@ -19,6 +19,7 @@ const demoFlag = computed(() => {
 const rawItems = computed<StreamItem[]>(() => store.streamItems.value);
 const visibleItems = ref<StreamItem[]>([]);
 const THOUGHT_INTERVAL_MS = 3000;
+const ATTENDED_SETTLE_MS = 1250;
 const PRUNE_DELAY_MS = 600;
 
 const streamRef = ref<HTMLElement | null>(null);
@@ -38,11 +39,21 @@ function pendingFromRaw(): StreamItem[] {
   return rawItems.value.filter((v) => !have.has(v.key));
 }
 
+function willDemoteVisibleAttended(): boolean {
+  const rawByKey = new Map<string, StreamItem>();
+  for (const item of rawItems.value) rawByKey.set(item.key, item);
+  return visibleItems.value.some((item) => {
+    if (item.kind !== "thought" || !item.activeAttended) return false;
+    const fresh = rawByKey.get(item.key);
+    return fresh?.kind === "thought" && !fresh.activeAttended;
+  });
+}
+
 function syncVisible(pruneStale: boolean): void {
   // Refresh surviving items to the freshest ref from rawItems. The second step
-  // matters because `attended` flips false for historical cycles once a new
+  // matters because `activeAttended` flips false for historical cycles once a new
   // cycle becomes latest — without rewriting the ref, Vue keeps rendering the
-  // thought with its stale attended class.
+  // thought with its stale active attended class.
   //
   // Stale visible items are pruned only after the drip queue finishes. Removing
   // an old cycle before the new one has been released collapses scrollHeight and
@@ -105,6 +116,7 @@ function releaseOne(): void {
 
 watch(rawItems, () => {
   clearPruneTimer();
+  const shouldWaitForAttendedSettle = willDemoteVisibleAttended();
   syncVisible(false);
   if (pendingFromRaw().length === 0) {
     if (releaseTimer === null) syncVisible(true);
@@ -118,7 +130,8 @@ watch(rawItems, () => {
     return;
   }
   if (releaseTimer !== null) return; // drip loop already running
-  releaseOne();
+  const delay = shouldWaitForAttendedSettle ? ATTENDED_SETTLE_MS : 0;
+  releaseTimer = setTimeout(releaseOne, delay);
 }, { immediate: true });
 
 onBeforeUnmount(() => {
@@ -162,7 +175,7 @@ const counter = computed(() => {
   const items = visibleItems.value;
   for (let i = items.length - 1; i >= 0; i -= 1) {
     const it = items[i];
-    if (it && it.kind === "thought" && it.attended && it.thought) {
+    if (it && it.kind === "thought" && it.activeAttended && it.thought) {
       return t("stream_foot.counter_attended", {
         thought_id: `C${it.thought.cycle_id}-${it.thought.index}`,
       });
@@ -212,6 +225,7 @@ const resumeHint = computed(() => {
             v-else-if="item.thought"
             :thought="item.thought"
             :attended="!!item.attended"
+            :active-attended="!!item.activeAttended"
             :visual-index="viForItem(i)"
             :action-status="actionForThought(store.actions.value, item.thought.thought_id)"
           />

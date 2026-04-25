@@ -220,14 +220,13 @@ body.drowsy .thoughts {
   gap: 20px; align-items: baseline;
   position: relative;
 }
-@keyframes sw-enter {
-  from { opacity: 0; transform: translateY(30px); }
-  to   { opacity: var(--op, 1); transform: translateY(0); }
-}
-.thought.exiting { opacity: 0 !important; transform: translateY(-10px); }
 
 .thought .gutter { text-align: right; position: relative; }
-.thought .cid { font-family: var(--mono); font-size: 10px; color: var(--ink-faint); letter-spacing: 0.06em; line-height: 1.4; }
+.thought .cid {
+  font-family: var(--mono); font-size: 10px; color: var(--ink-faint);
+  letter-spacing: 0.06em; line-height: 1.4;
+  transition: color 800ms ease, font-weight 800ms ease;
+}
 .thought .tag {
   display: inline-block; font-family: var(--sans); font-size: 9.5px;
   letter-spacing: 0.3em; text-transform: uppercase;
@@ -293,17 +292,33 @@ html[lang="en"] .thought .body { letter-spacing: 0; font-size: 18px; line-height
    a clear reading zone at the bottom of the viewport. */
 .thought { --op: 1; }
 
-/* attended — cinnabar ember (vertical bar removed, ember dot + body halo remain) */
+/* attended — cinnabar ember. Pseudo-elements (ember dot, halo) are rendered on
+   ALL thoughts but kept invisible/zero-extent when not attended, so toggling
+   the class transitions smoothly instead of snapping. The body's font-size
+   transition is already declared above; cid color transition is inline on it.
+   When attended, sw-ember / sw-halo animations override the static base state;
+   when removed, animations are dropped and the transitions interpolate the
+   pseudo back to the invisible base. */
 .thought.attended .body { font-size: 22px; font-weight: 500; }
 html[lang="en"] .thought.attended .body { font-size: 20px; }
-.thought.attended .body::before {
-  content: ""; display: inline-block; width: 6px; height: 6px;
+
+.thought .body::before {
+  content: ""; display: inline-block;
+  width: 0; height: 6px;
   border-radius: 50%; background: var(--ember);
-  margin-right: 14px; transform: translateY(-5px);
+  margin-right: 0; transform: translateY(-5px);
+  opacity: 0;
   box-shadow:
     0 0 0 2px oklch(0.6 0.18 30 / 0.18),
     0 0 24px 6px oklch(0.58 0.18 30 / 0.32),
     0 0 48px 14px oklch(0.58 0.18 30 / 0.12);
+  transition:
+    width 800ms cubic-bezier(.3,.02,.2,1),
+    margin-right 800ms cubic-bezier(.3,.02,.2,1),
+    opacity 800ms ease;
+}
+.thought.attended .body::before {
+  width: 6px; margin-right: 14px; opacity: 1;
   animation: sw-ember 4s ease-in-out infinite;
 }
 @keyframes sw-ember {
@@ -324,21 +339,28 @@ html[lang="en"] .thought.attended .body { font-size: 20px; }
     opacity: 1;
   }
 }
-/* Background halo behind attended thoughts. The box extends past the thought's
-   own left edge so the radial gradient has room to fade to transparent before
-   hitting any container boundary — otherwise the gradient cuts off vertically
-   at the box's left edge and reads as a sharp ink line. */
-.thought.attended::before {
+
+/* Background halo. The box extends past the thought's own left edge so the
+   radial gradient has room to fade to transparent before hitting any container
+   boundary — otherwise the gradient cuts off vertically at the box's left edge
+   and reads as a sharp ink line. */
+.thought::before {
   content: ""; position: absolute; left: -30px; right: -20px; top: 50%;
   transform: translateY(-50%); height: 260px;
   background: radial-gradient(ellipse 58% 55% at 34% 50%, oklch(0.85 0.14 40 / 0.14) 0%, transparent 72%);
   z-index: -1; pointer-events: none;
+  opacity: 0;
+  transition: opacity 800ms ease;
+}
+.thought.attended::before {
+  opacity: 0.55;
   animation: sw-halo 4s ease-in-out infinite;
 }
 @keyframes sw-halo {
   0%,100% { opacity: 0.55; }
   50%     { opacity: 0.9; }
 }
+
 .thought.attended .cid { color: var(--ember-deep); font-weight: 500; }
 
 .thought[data-type="thinking"]   { --tag: var(--t-think); }
@@ -351,7 +373,6 @@ html[lang="en"] .thought.attended .body { font-size: 20px; }
   font-family: var(--mono); font-size: 9.5px; color: var(--ink-faint);
   letter-spacing: 0.2em; text-transform: uppercase; opacity: 0.6;
 }
-.cycle-sep.exiting { opacity: 0 !important; transform: translateY(-10px); }
 .cycle-sep .line { height: 1px; background: var(--rule-faint); }
 .cycle-sep .id { text-align: right; }
 

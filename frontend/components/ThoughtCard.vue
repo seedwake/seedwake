@@ -4,6 +4,7 @@ import type { SerializedThought, ThoughtType } from "~/types/api";
 const props = defineProps<{
   thought: SerializedThought;
   attended: boolean;
+  activeAttended: boolean;
   visualIndex: number;
   actionStatus?: { state: string; summary: string };
 }>();
@@ -69,7 +70,7 @@ const displayContent = computed(() => {
 <template>
   <article
     class="thought"
-    :class="{ attended }"
+    :class="{ attended: activeAttended }"
     :data-type="canonicalType"
     :data-vi="vi"
   >

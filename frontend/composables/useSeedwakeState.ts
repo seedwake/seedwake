@@ -20,6 +20,7 @@ export interface StreamItem {
   // thought fields (when kind === "thought")
   thought?: SerializedThought;
   attended?: boolean;
+  activeAttended?: boolean;
   // separator fields (when kind === "separator")
   cycle_id?: number;
   timestamp?: string;
@@ -57,8 +58,8 @@ function rebuildStream(thoughts: SerializedThought[]): StreamItem[] {
     return a.index - b.index;
   });
   const attendedMap = attendedByCycle(sorted);
-  // Only the latest cycle's attended thought gets the visual ember/halo treatment.
-  // Historical cycles' attended thoughts render like normal ones.
+  // Every cycle has one semantically attended thought. Only the latest cycle's
+  // attended thought gets the visual ember/halo treatment.
   const latestCycle = sorted.length > 0 ? sorted[sorted.length - 1]!.cycle_id : -1;
   const items: StreamItem[] = [];
   let lastCycle = -1;
@@ -72,12 +73,13 @@ function rebuildStream(thoughts: SerializedThought[]): StreamItem[] {
       });
       lastCycle = t.cycle_id;
     }
+    const attended = attendedMap.get(t.cycle_id) === t.thought_id;
     items.push({
       kind: "thought",
       key: t.thought_id,
       thought: t,
-      attended:
-        t.cycle_id === latestCycle && attendedMap.get(t.cycle_id) === t.thought_id,
+      attended,
+      activeAttended: t.cycle_id === latestCycle && attended,
     });
   }
   return items;

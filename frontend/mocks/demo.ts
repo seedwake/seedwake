@@ -67,7 +67,7 @@ export function demoScenarioForLocale(locale: DemoLocale, base = new Date()): De
 function buildScenario(text: DemoTextPack, base: Date): DemoScenario {
   const t = timelineClock(base);
   const reading = actionItem("act_C1766-3", "reading", "openclaw", "C1766-3", t.iso(6), text.readingTask, text.readingSummary);
-  const weather = actionItem("act_C1767-2", "weather", "native", "C1767-2", t.iso(35), text.weatherTask, text.weatherSummary);
+  const weather = actionItem("act_C1767-3", "weather", "native", "C1767-3", t.iso(35), text.weatherTask, text.weatherSummary);
   const note = actionItem("act_C1768-3", "note_rewrite", "native", "C1768-3", t.iso(63), text.noteTask, text.noteSummary);
   const send = actionItem("act_C1769-3", "send_message", "native", "C1769-3", t.iso(88), text.sendTask, text.sendSummary);
 
