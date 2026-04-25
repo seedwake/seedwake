@@ -1,0 +1,14 @@
+{
+  "name": "Seedwake",
+  "short_name": "Seedwake",
+  "description": "A continuously running AI thought-stream engine organized around the Buddhist concept of santāna.",
+  "start_url": "/",
+  "display": "browser",
+  "background_color": "#FAF8F3",
+  "theme_color": "#FAF8F3",
+  "icons": [
+    { "src": "/icon-96x96.png", "type": "image/png", "sizes": "96x96" },
+    { "src": "/icon-192.png", "type": "image/png", "sizes": "192x192" },
+    { "src": "/icon-512.png", "type": "image/png", "sizes": "512x512" }
+  ]
+}
