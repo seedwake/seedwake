@@ -231,19 +231,19 @@ const resumeHint = computed(() => {
           />
         </template>
       </div>
+      <div class="stream-foot">
+        <span class="live">
+          <span class="beat" />
+          <span>{{ streamLabel }}</span>
+        </span>
+        <span>{{ streamTypesLabel }}</span>
+      </div>
     </div>
     <!-- Banner lives outside the scroll container so it stays pinned to the
          column bottom regardless of scrollTop. -->
     <div v-if="drowsyBanner" class="drowsy-banner">
       <span>{{ drowsyBanner }}</span>
       <small>{{ resumeHint }}</small>
-    </div>
-    <div class="stream-foot">
-      <span class="live">
-        <span class="beat" />
-        <span>{{ streamLabel }}</span>
-      </span>
-      <span>{{ streamTypesLabel }}</span>
     </div>
   </section>
 </template>

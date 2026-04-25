@@ -35,6 +35,7 @@ export default defineNuxtConfig({
   app: {
     head: {
       title: "Seedwake · 心相续",
+      viewport: "width=device-width, initial-scale=1, viewport-fit=cover",
       link: [
         // Modern browsers prefer SVG (crisp at any DPI). Fallback chain below
         // covers older Safari, Windows pinned tiles, iOS home screen, and PWA

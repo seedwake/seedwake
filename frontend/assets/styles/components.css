@@ -52,7 +52,11 @@ body.drowsy .mode-bloom {
 
 .app {
   position: relative; z-index: 2;
-  display: grid; grid-template-columns: minmax(300px, 360px) 1fr minmax(320px, 420px);
+  display: grid;
+  /* Middle column needs a minimum reading width — without it, wide side
+     columns at their max track can crush the stream into a narrow strip
+     where CJK body lines break character-by-character. */
+  grid-template-columns: minmax(300px, 360px) minmax(560px, 1fr) minmax(320px, 420px);
   width: 100vw; height: 100vh;
   transition: opacity 800ms ease, filter 800ms ease;
 }
@@ -283,7 +287,7 @@ html[lang="en"] .thought .tag::before { display: none; }
   font-family: var(--serif); font-weight: 400; font-size: 19px;
   line-height: 1.85; color: var(--ink); letter-spacing: 0.03em;
   text-wrap: pretty; margin: 0;
-  transition: font-size 1.2s cubic-bezier(.3,.02,.2,1), font-weight 1.2s ease;
+  transition: font-size 1s cubic-bezier(.3,.02,.2,1), font-weight 1s ease;
 }
 html[lang="en"] .thought .body { letter-spacing: 0; font-size: 18px; line-height: 1.7; }
 .thought .trigger {
@@ -477,12 +481,16 @@ html[lang="en"] .msg .text { letter-spacing: 0; font-size: 13px; }
 .action-row[data-state="done"]      .sd { background: var(--ink-faint); opacity: 0.55; }
 .action-row .detail { grid-column: 1 / -1; font-family: var(--mono); font-size: 9.5px; color: var(--ink-faint); letter-spacing: 0.02em; line-height: 1.7; }
 
-.footmark { position: absolute; left: 28px; bottom: 18px; font-family: var(--mono); font-size: 9px; letter-spacing: 0.26em; color: var(--ink-faint); text-transform: uppercase; }
+.footmark {
+  margin-top: auto; padding-top: 24px;
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.26em;
+  color: var(--ink-faint); text-transform: uppercase;
+}
 
 .stream-foot {
-  flex: 0 0 auto;
-  margin: 0 44px 22px;
+  margin: 40px 0 0;
   display: flex; justify-content: space-between; align-items: baseline;
+  flex-wrap: wrap; gap: 6px 16px;
   font-family: var(--mono); font-size: 9.5px;
   color: var(--ink-faint); letter-spacing: 0.14em;
   transition: opacity 600ms ease;
@@ -618,3 +626,164 @@ html[lang="en"] .deep-label { letter-spacing: 0.14em; }
 }
 
 body.deep main, body.deep aside { pointer-events: none; }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Responsive — compact viewport (769px - 1359px)
+
+   Tablet / narrow-to-mid desktop keeps a fixed-height two-column workspace.
+   Three columns need ≥ 1360px to not crush the middle reading column; any
+   narrower and we collapse side columns into a single stacked "state" column
+   on the left + stream/panels work area on the right.
+
+   Only the phone breakpoint falls back to document scroll — otherwise demo
+   drip-feed would keep changing the whole page height as thoughts arrive.
+   ─────────────────────────────────────────────────────────────────────── */
+@media (max-width: 1359px) and (min-width: 769px) {
+  html, body { overflow: hidden; height: 100%; }
+
+  .app {
+    display: grid;
+    grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(240px, 34vh);
+    width: 100vw; height: 100vh;
+  }
+
+  .col {
+    padding: 22px 20px 20px;
+    min-height: 0;
+  }
+  .col.left {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    overflow-y: auto;
+  }
+  .col.stream-col {
+    grid-column: 2;
+    grid-row: 1;
+    padding: 0;
+    border-left: 1px solid var(--rule-faint);
+  }
+  .col.right {
+    grid-column: 2;
+    grid-row: 2;
+    border-left: 1px solid var(--rule-faint);
+    border-top: 1px solid var(--rule-faint);
+    padding: 18px 20px;
+    /* Three panels side-by-side in compact mode, so each uses the full 34vh
+       bottom-section height instead of splitting it three-ways (which truncated
+       each panel to ~80px of readable content). */
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 10px 18px;
+  }
+  .col.right > .section-title { grid-column: 1 / -1; }
+  /* Horizontal dividers between stacked panels become redundant in a
+     side-by-side grid — the grid gap + column border provides the separation. */
+  .col.right > .section-divider { display: none; }
+  .col.right .panel { flex: 1 1 auto; min-width: 0; min-height: 0; }
+  .col.right .panel .scroll {
+    overflow-y: auto;
+    max-height: none;
+  }
+
+  .stream { padding: 24px 22px 16px; }
+  .stream-head { padding: 22px 22px 12px; }
+  .stream-head h1 { font-size: 18px; letter-spacing: 0.32em; }
+  html[lang="en"] .stream-head h1 { font-size: 19px; letter-spacing: 0.04em; }
+  .stream-foot { margin: 32px 0 0; }
+
+  .drowsy-banner {
+    left: 22px; right: 22px; bottom: 56px;
+    font-size: 14px;
+  }
+  .drowsy-banner small { font-size: 11.5px; }
+
+  .app > .col.left,
+  .app > .col.stream-col,
+  .app > .col.right { animation-delay: 0ms; }
+
+  .demo-banner { font-size: 10.5px; padding: 7px 9px; }
+  .emotion { max-width: 200px; }
+  .devbar { right: 12px; bottom: 12px; }
+  .devbar .dev-label { padding: 7px 10px; font-size: 8.5px; letter-spacing: 0.18em; }
+  .devbar button { padding: 7px 12px; font-size: 11px; letter-spacing: 0.2em; }
+}
+
+@media (max-width: 768px) {
+  html, body { overflow: auto; height: auto; }
+
+  .app {
+    display: flex; flex-direction: column;
+    width: 100%; height: auto; min-height: 100vh;
+  }
+
+  .col {
+    padding: 22px 20px 20px;
+    overflow: visible;
+    height: auto;
+  }
+  .col + .col { border-left: none; border-top: 1px solid var(--rule-faint); }
+  .col.left { overflow-y: visible; }
+
+  /* Phone layout drops fixed-viewport scrolling and lets the page scroll. */
+  .stream {
+    overflow-y: visible;
+    height: auto;
+    mask-image: none;
+    -webkit-mask-image: none;
+    padding: 24px 22px 16px;
+  }
+  .stream-head { padding: 22px 22px 12px; }
+  .stream-head h1 { font-size: 18px; letter-spacing: 0.32em; }
+  html[lang="en"] .stream-head h1 { font-size: 19px; letter-spacing: 0.04em; }
+  .stream-foot { margin: 32px 0 0; }
+
+  /* Right-column lists: page scroll instead of panel scroll. */
+  .col.right .panel .scroll {
+    overflow-y: visible;
+    max-height: none;
+    mask-image: none;
+    -webkit-mask-image: none;
+  }
+
+  /* Drowsy banner: anchor to bottom of stream column, narrower margins. */
+  .drowsy-banner {
+    left: 22px; right: 22px; bottom: 56px;
+    font-size: 14px;
+  }
+  .drowsy-banner small { font-size: 11.5px; }
+
+  /* The masthead's brand mark is large enough on its own — no need for the
+     intro stagger animation to feel orchestrated on a tall scroll. Collapse
+     all delays to 0 so the whole page resolves uniformly. */
+  .app > .col.left,
+  .app > .col.stream-col,
+  .app > .col.right { animation-delay: 0ms; }
+
+  /* Demo banner: slightly smaller on narrow screens. */
+  .demo-banner { font-size: 10.5px; padding: 7px 9px; }
+
+  /* Emotion halo: cap size so it doesn't dominate the first viewport. */
+  .emotion { max-width: 200px; }
+
+  /* Dev toggle: shrink to fit narrow screens. */
+  .devbar { right: 12px; bottom: 12px; }
+  .devbar .dev-label { padding: 7px 10px; font-size: 8.5px; letter-spacing: 0.18em; }
+  .devbar button { padding: 7px 12px; font-size: 11px; letter-spacing: 0.2em; }
+}
+
+/* Phone-narrow refinements (< 480px). */
+@media (max-width: 480px) {
+  .col { padding: 18px 16px 16px; }
+  .stream-head { padding: 18px 16px 10px; }
+  .stream { padding: 18px 16px 12px; }
+  .stream-foot { margin: 28px 0 0; font-size: 9px; }
+  .stream-head h1 { font-size: 17px; }
+  .thought { gap: 12px; grid-template-columns: 48px 1fr; }
+  .thought .body { font-size: 17px; line-height: 1.78; }
+  html[lang="en"] .thought .body { font-size: 16px; line-height: 1.65; }
+  .thought.attended .body { font-size: 19px; }
+  html[lang="en"] .thought.attended .body { font-size: 18px; }
+  .cycle-sep { grid-template-columns: 48px 1fr auto; gap: 12px; }
+}
