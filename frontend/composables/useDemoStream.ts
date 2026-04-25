@@ -1,7 +1,7 @@
 import { demoScenarioForLocale, type DemoLocale, type DemoScenario } from "~/mocks/demo";
 
 const DEMO_LOOP_MS = 130_000;
-const DEMO_CYCLE_STEP = 10;
+const DEMO_CYCLE_STEP = 5;
 
 export function useDemoStream() {
   const store = useSeedwakeState();
@@ -24,9 +24,14 @@ export function useDemoStream() {
 
   function startScenario() {
     clearTimers();
+    const firstLoop = loopIndex === 0;
     const scenario = demoScenarioForLocale(currentLocale(), new Date(), loopIndex * DEMO_CYCLE_STEP);
     loopIndex += 1;
-    loadSnapshot(scenario);
+    if (firstLoop) {
+      loadSnapshot(scenario);
+    } else {
+      store.connected.value = true;
+    }
     for (const event of scenario.events) {
       schedule(event.delayMs, () => {
         if (!store.connected.value) return;
