@@ -350,8 +350,6 @@ html[lang="en"] .thought.attended .body { font-size: 20px; }
   display: grid; grid-template-columns: 64px 1fr auto; gap: 20px; align-items: center;
   font-family: var(--mono); font-size: 9.5px; color: var(--ink-faint);
   letter-spacing: 0.2em; text-transform: uppercase; opacity: 0.6;
-  animation: sw-enter 0.8s ease-out both;
-  transition: opacity 900ms ease, transform 900ms cubic-bezier(.3,.02,.2,1);
 }
 .cycle-sep.exiting { opacity: 0 !important; transform: translateY(-10px); }
 .cycle-sep .line { height: 1px; background: var(--rule-faint); }
