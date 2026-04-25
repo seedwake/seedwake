@@ -3,6 +3,11 @@ import { EMOTION_DIMENSIONS } from "~/types/api";
 
 const { t } = useI18n();
 const store = useSeedwakeState();
+const config = useRuntimeConfig();
+const isDemo = computed(() => {
+  const value = config.public.demo as boolean | string | undefined;
+  return value === true || value === "true";
+});
 
 const emotions = computed(() => store.state.value?.emotions || null);
 const cycle = computed(() => store.state.value?.cycle.current ?? 0);
@@ -54,6 +59,9 @@ const energyFillPercent = computed(() => {
       <span class="mark">Seed<i>wake</i></span>
       <span class="zh">{{ t("brand.zh_name") }}</span>
     </header>
+    <p v-if="isDemo" class="demo-banner">
+      {{ t("demo.banner") }}
+    </p>
 
     <div class="section-title">
       <span class="zh-big">{{ t("section.present") }}</span>

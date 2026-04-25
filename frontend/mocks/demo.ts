@@ -59,29 +59,41 @@ const DEMO_START_CYCLE = 1765;
 const DEMO_CHAT_ID = "100200300";
 const DEMO_CHAT_SOURCE = `telegram:${DEMO_CHAT_ID}`;
 
-export function demoScenarioForLocale(locale: DemoLocale, base = new Date()): DemoScenario {
+export function demoScenarioForLocale(
+  locale: DemoLocale,
+  base = new Date(),
+  cycleOffset = 0,
+): DemoScenario {
   const text = locale === "en" ? EN_TEXT : ZH_TEXT;
-  return buildScenario(text, base);
+  return buildScenario(text, base, cycleOffset);
 }
 
-function buildScenario(text: DemoTextPack, base: Date): DemoScenario {
+function buildScenario(text: DemoTextPack, base: Date, cycleOffset: number): DemoScenario {
   const t = timelineClock(base);
-  const reading = actionItem("act_C1766-3", "reading", "openclaw", "C1766-3", t.iso(6), text.readingTask, text.readingSummary);
-  const weather = actionItem("act_C1767-3", "weather", "native", "C1767-3", t.iso(35), text.weatherTask, text.weatherSummary);
-  const note = actionItem("act_C1768-3", "note_rewrite", "native", "C1768-3", t.iso(63), text.noteTask, text.noteSummary);
-  const send = actionItem("act_C1769-3", "send_message", "native", "C1769-3", t.iso(88), text.sendTask, text.sendSummary);
+  const c = (cycleId: number) => cycleId + cycleOffset;
+  const boot = (cycleId: number) => 108 + (cycleId - DEMO_START_CYCLE);
+  const thoughtId = (cycleId: number, index: number) => `C${cycleId}-${index}`;
+  const actionId = (cycleId: number, index: number) => `act_C${cycleId}-${index}`;
+  const readingCycle = c(1766);
+  const weatherCycle = c(1767);
+  const noteCycle = c(1768);
+  const sendCycle = c(1769);
+  const reading = actionItem(actionId(readingCycle, 3), "reading", "openclaw", thoughtId(readingCycle, 3), t.iso(6), text.readingTask, text.readingSummary);
+  const weather = actionItem(actionId(weatherCycle, 3), "weather", "native", thoughtId(weatherCycle, 3), t.iso(35), text.weatherTask, text.weatherSummary);
+  const note = actionItem(actionId(noteCycle, 3), "note_rewrite", "native", thoughtId(noteCycle, 3), t.iso(63), text.noteTask, text.noteSummary);
+  const send = actionItem(actionId(sendCycle, 3), "send_message", "native", thoughtId(sendCycle, 3), t.iso(88), text.sendTask, text.sendSummary);
 
   return {
     snapshot: {
-      state: stateSnapshot("waking", DEMO_START_CYCLE, 108, 64.2, t),
+      state: stateSnapshot("waking", c(DEMO_START_CYCLE), boot(c(DEMO_START_CYCLE)), 64.2, t),
       thoughts: [
-        thought(1764, 1, "thinking", text.initialThoughts[0]!, 0.42, t.iso(-48)),
-        thought(1764, 2, "reaction", text.initialThoughts[1]!, 0.64, t.iso(-42)),
-        thought(1764, 3, "intention", text.initialThoughts[2]!, 0.51, t.iso(-36)),
-        thought(1765, 1, "thinking", text.initialThoughts[3]!, 0.48, t.iso(-24)),
-        thought(1765, 2, "intention", text.initialThoughts[4]!, 0.58, t.iso(-18)),
-        thought(1765, 3, "reaction", text.initialThoughts[5]!, 0.72, t.iso(-12)),
-        thought(1765, 4, "reflection", text.initialThoughts[6]!, 0, t.iso(-6)),
+        thought(c(1764), 1, "thinking", text.initialThoughts[0]!, 0.42, t.iso(-48)),
+        thought(c(1764), 2, "reaction", text.initialThoughts[1]!, 0.64, t.iso(-42)),
+        thought(c(1764), 3, "intention", text.initialThoughts[2]!, 0.51, t.iso(-36)),
+        thought(c(1765), 1, "thinking", text.initialThoughts[3]!, 0.48, t.iso(-24)),
+        thought(c(1765), 2, "intention", text.initialThoughts[4]!, 0.58, t.iso(-18)),
+        thought(c(1765), 3, "reaction", text.initialThoughts[5]!, 0.72, t.iso(-12)),
+        thought(c(1765), 4, "reflection", text.initialThoughts[6]!, 0, t.iso(-6)),
       ],
       actions: [],
       conversation: [
@@ -94,44 +106,44 @@ function buildScenario(text: DemoTextPack, base: Date): DemoScenario {
     },
     events: [
       { delayMs: 1_000, kind: "status", payload: text.statusConnected },
-      { delayMs: 2_000, kind: "thoughts", payload: cycle(1766, text.cycle1766, [0.53, 0.61, 0.69], t, 2, "reading", "query:\"light, wall, perception essay\"") },
-      { delayMs: 3_000, kind: "state", payload: stateSnapshot("waking", 1766, 109, 64.0, t, 3) },
+      { delayMs: 2_000, kind: "thoughts", payload: cycle(readingCycle, text.cycle1766, [0.53, 0.61, 0.69], t, 2, "reading", "query:\"light, wall, perception essay\"") },
+      { delayMs: 3_000, kind: "state", payload: stateSnapshot("waking", readingCycle, boot(readingCycle), 64.0, t, 3) },
       { delayMs: 6_000, kind: "action", payload: { ...reading, status: "pending" } },
-      { delayMs: 12_000, kind: "state", payload: stateSnapshot("waking", 1766, 109, 63.9, t, 12) },
+      { delayMs: 12_000, kind: "state", payload: stateSnapshot("waking", readingCycle, boot(readingCycle), 63.9, t, 12) },
       { delayMs: 16_000, kind: "action", payload: { ...reading, status: "running" } },
-      { delayMs: 22_000, kind: "state", payload: stateSnapshot("waking", 1766, 109, 63.8, t, 22) },
+      { delayMs: 22_000, kind: "state", payload: stateSnapshot("waking", readingCycle, boot(readingCycle), 63.8, t, 22) },
       { delayMs: 26_000, kind: "action", payload: { ...reading, status: "succeeded", summary: completedSummary(text.readingSummary) } },
       { delayMs: 27_000, kind: "stimulus", payload: actionEcho("stim_demo_reading", reading.action_id, "reading", text.readingSummary, t.iso(27)) },
       { delayMs: 28_000, kind: "conversation_entry", payload: conversation("conv_demo_3", "user", DEMO_CHAT_SOURCE, text.inboundShare, t.iso(28), "inbound", "Chaos", DEMO_CHAT_ID) },
-      { delayMs: 31_000, kind: "thoughts", payload: cycle(1767, text.cycle1767, [0.55, 0.74, 0.63], t, 31, "weather", "location:\"Tallinn\"") },
-      { delayMs: 32_000, kind: "state", payload: stateSnapshot("waking", 1767, 110, 63.7, t, 32) },
+      { delayMs: 31_000, kind: "thoughts", payload: cycle(weatherCycle, text.cycle1767, [0.55, 0.74, 0.63], t, 31, "weather", "location:\"Tallinn\"") },
+      { delayMs: 32_000, kind: "state", payload: stateSnapshot("waking", weatherCycle, boot(weatherCycle), 63.7, t, 32) },
       { delayMs: 35_000, kind: "action", payload: { ...weather, status: "pending" } },
       { delayMs: 43_000, kind: "action", payload: { ...weather, status: "running" } },
-      { delayMs: 48_000, kind: "state", payload: stateSnapshot("waking", 1767, 110, 63.6, t, 48) },
+      { delayMs: 48_000, kind: "state", payload: stateSnapshot("waking", weatherCycle, boot(weatherCycle), 63.6, t, 48) },
       { delayMs: 53_000, kind: "action", payload: { ...weather, status: "succeeded", summary: completedSummary(text.weatherSummary) } },
       { delayMs: 54_000, kind: "stimulus", payload: actionEcho("stim_demo_weather", weather.action_id, "weather", text.weatherSummary, t.iso(54)) },
       { delayMs: 55_000, kind: "conversation_entry", payload: conversation("conv_demo_4", "user", DEMO_CHAT_SOURCE, text.inboundWeather, t.iso(55), "inbound", "Chaos", DEMO_CHAT_ID) },
-      { delayMs: 59_000, kind: "thoughts", payload: cycle(1768, text.cycle1768.slice(0, 3) as [string, string, string], [0.46, 0.7, 0.59], t, 59, "note_rewrite", "content:\"demo: light / wall / weather / sharing\"") },
-      { delayMs: 60_000, kind: "state", payload: stateSnapshot("waking", 1768, 111, 63.5, t, 60) },
+      { delayMs: 59_000, kind: "thoughts", payload: cycle(noteCycle, text.cycle1768.slice(0, 3) as [string, string, string], [0.46, 0.7, 0.59], t, 59, "note_rewrite", "content:\"demo: light / wall / weather / sharing\"") },
+      { delayMs: 60_000, kind: "state", payload: stateSnapshot("waking", noteCycle, boot(noteCycle), 63.5, t, 60) },
       { delayMs: 63_000, kind: "action", payload: { ...note, status: "pending" } },
       { delayMs: 70_000, kind: "action", payload: { ...note, status: "running" } },
-      { delayMs: 74_000, kind: "state", payload: stateSnapshot("waking", 1768, 111, 63.4, t, 74) },
+      { delayMs: 74_000, kind: "state", payload: stateSnapshot("waking", noteCycle, boot(noteCycle), 63.4, t, 74) },
       { delayMs: 78_000, kind: "action", payload: { ...note, status: "succeeded", summary: completedSummary(text.noteSummary) } },
       { delayMs: 79_000, kind: "stimulus", payload: actionEcho("stim_demo_note", note.action_id, "note_rewrite", text.noteSummary, t.iso(79)) },
       { delayMs: 80_000, kind: "conversation_entry", payload: conversation("conv_demo_5", "user", DEMO_CHAT_SOURCE, text.inboundNote, t.iso(80), "inbound", "Chaos", DEMO_CHAT_ID) },
-      { delayMs: 84_000, kind: "thoughts", payload: cycle(1769, text.cycle1769, [0.5, 0.66, 0.77], t, 84, "send_message", "message:\"demo share\"") },
-      { delayMs: 85_000, kind: "state", payload: stateSnapshot("waking", 1769, 112, 63.3, t, 85) },
+      { delayMs: 84_000, kind: "thoughts", payload: cycle(sendCycle, text.cycle1769, [0.5, 0.66, 0.77], t, 84, "send_message", "message:\"demo share\"") },
+      { delayMs: 85_000, kind: "state", payload: stateSnapshot("waking", sendCycle, boot(sendCycle), 63.3, t, 85) },
       { delayMs: 88_000, kind: "action", payload: { ...send, status: "pending" } },
       { delayMs: 92_000, kind: "mode", payload: "light_sleep" },
-      { delayMs: 93_000, kind: "state", payload: stateSnapshot("light_sleep", 1769, 112, 63.2, t, 93) },
+      { delayMs: 93_000, kind: "state", payload: stateSnapshot("light_sleep", sendCycle, boot(sendCycle), 63.2, t, 93) },
       { delayMs: 97_000, kind: "action", payload: { ...send, status: "running" } },
       { delayMs: 103_000, kind: "action", payload: { ...send, status: "succeeded", summary: completedSummary(text.sendSummary) } },
       { delayMs: 104_000, kind: "conversation_entry", payload: conversation("conv_demo_6", "assistant", DEMO_CHAT_SOURCE, text.sendMessage, t.iso(104), "outbound", "Seedwake", DEMO_CHAT_ID) },
       { delayMs: 105_000, kind: "stimulus", payload: actionEcho("stim_demo_send", send.action_id, "send_message", text.sendSummary, t.iso(105)) },
-      { delayMs: 108_000, kind: "state", payload: stateSnapshot("waking", 1769, 112, 63.1, t, 108) },
-      { delayMs: 112_000, kind: "thoughts", payload: cycle(1770, text.cycle1770, [0.44, 0.68, 0.52], t, 112) },
-      { delayMs: 113_000, kind: "state", payload: stateSnapshot("waking", 1770, 113, 63.0, t, 113) },
-      { delayMs: 122_000, kind: "state", payload: stateSnapshot("waking", 1770, 113, 62.9, t, 122) },
+      { delayMs: 108_000, kind: "state", payload: stateSnapshot("waking", sendCycle, boot(sendCycle), 63.1, t, 108) },
+      { delayMs: 112_000, kind: "thoughts", payload: cycle(c(1770), text.cycle1770, [0.44, 0.68, 0.52], t, 112) },
+      { delayMs: 113_000, kind: "state", payload: stateSnapshot("waking", c(1770), boot(c(1770)), 63.0, t, 113) },
+      { delayMs: 122_000, kind: "state", payload: stateSnapshot("waking", c(1770), boot(c(1770)), 62.9, t, 122) },
     ],
   };
 }
@@ -205,13 +217,13 @@ function stateSnapshot(
     mode,
     energy,
     energy_per_cycle: 0.2,
-    next_drowsy_cycle: 1935,
+    next_drowsy_cycle: currentCycle + (1935 - DEMO_START_CYCLE),
     emotions: {
-      curiosity: rounded(0.55 + progress * 0.025 + drift * 0.04),
-      calm: rounded(mode === "light_sleep" ? 0.74 : 0.66 - progress * 0.01 + drift * 0.01),
-      satisfied: rounded(0.4 + progress * 0.02 + drift * 0.03),
-      concern: rounded(Math.max(0.03, 0.09 - progress * 0.008 - drift * 0.02)),
-      frustration: rounded(Math.max(0.01, 0.025 - progress * 0.002 - drift * 0.005)),
+      curiosity: emotion(0.55 + progress * 0.025 + drift * 0.04),
+      calm: emotion(mode === "light_sleep" ? 0.74 : 0.66 - progress * 0.01 + drift * 0.01),
+      satisfied: emotion(0.4 + progress * 0.02 + drift * 0.03),
+      concern: emotion(Math.max(0.03, 0.09 - progress * 0.008 - drift * 0.02)),
+      frustration: emotion(Math.max(0.01, 0.025 - progress * 0.002 - drift * 0.005)),
     },
     cycle: {
       current: currentCycle,
@@ -227,6 +239,10 @@ function stateSnapshot(
 
 function rounded(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function emotion(value: number): number {
+  return Math.min(1, Math.max(0, rounded(value)));
 }
 
 function thought(

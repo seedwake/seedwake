@@ -99,6 +99,14 @@ body.deep .app > .col.stream-col { opacity: 0; transition: opacity 500ms ease; }
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
 .masthead { display: flex; align-items: baseline; gap: 12px; }
+.demo-banner {
+  font-family: var(--serif); font-size: 11px; line-height: 1.55;
+  color: var(--ink-mute); letter-spacing: 0.04em;
+  padding: 8px 10px; margin-top: 4px;
+  border-left: 2px solid var(--ember-soft);
+  background: oklch(0.96 0.015 78 / 0.5);
+}
+html[lang="en"] .demo-banner { font-family: var(--latin); font-size: 11.5px; letter-spacing: 0; font-style: italic; }
 .mark { font-family: var(--latin); font-size: 20px; color: var(--ink); }
 .mark i { font-style: italic; color: var(--ink-soft); }
 .masthead .zh { font-family: var(--serif); font-size: 12.5px; color: var(--ink-mute); letter-spacing: 0.3em; padding-left: 12px; border-left: 1px solid var(--rule-faint); }

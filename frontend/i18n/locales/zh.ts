@@ -6,6 +6,10 @@ export default {
     zh_name: "心相续",
   },
 
+  demo: {
+    banner: "这是一段静态演示时间线 · 念头 / 行动 / 对话均为预先编排，并非实时生成",
+  },
+
   section: {
     present: "此刻",
     present_en: "the present",

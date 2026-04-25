@@ -6,6 +6,10 @@ export default {
     zh_name: "心相续",
   },
 
+  demo: {
+    banner: "This is a static demo timeline · thoughts / actions / conversation are pre-scripted, not generated live",
+  },
+
   section: {
     present: "The Present",
     present_en: "the present",

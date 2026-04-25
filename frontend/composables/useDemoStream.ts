@@ -1,15 +1,18 @@
 import { demoScenarioForLocale, type DemoLocale, type DemoScenario } from "~/mocks/demo";
 
 const DEMO_LOOP_MS = 130_000;
+const DEMO_CYCLE_STEP = 10;
 
 export function useDemoStream() {
   const store = useSeedwakeState();
   const source = ref<EventSource | null>(null);
   const { locale } = useI18n();
   let timers: ReturnType<typeof setTimeout>[] = [];
+  let loopIndex = 0;
 
   function connect() {
     if (import.meta.server) return;
+    loopIndex = 0;
     startScenario();
   }
 
@@ -21,7 +24,8 @@ export function useDemoStream() {
 
   function startScenario() {
     clearTimers();
-    const scenario = demoScenarioForLocale(currentLocale());
+    const scenario = demoScenarioForLocale(currentLocale(), new Date(), loopIndex * DEMO_CYCLE_STEP);
+    loopIndex += 1;
     loadSnapshot(scenario);
     for (const event of scenario.events) {
       schedule(event.delayMs, () => {
