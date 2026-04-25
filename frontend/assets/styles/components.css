@@ -788,5 +788,11 @@ body.deep main, body.deep aside { pointer-events: none; }
   html[lang="en"] .thought .body { font-size: 16px; line-height: 1.65; }
   .thought.attended .body { font-size: 19px; }
   html[lang="en"] .thought.attended .body { font-size: 18px; }
+  /* Body font shrinks on phone-narrow (22→19px ZH, 20→18px EN); the desktop
+     translateY values (-5 / -3.5) were tuned to the larger cap-heights and
+     now sit a bit too high above the smaller mobile caps. Nudge each down ~1px
+     so the dot still visually centers on the first line. */
+  .thought { --attended-dot-y: -4px; }
+  html[lang="en"] .thought { --attended-dot-y: -2.5px; }
   .cycle-sep { grid-template-columns: 48px 1fr auto; gap: 12px; }
 }
