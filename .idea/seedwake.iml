@@ -8,6 +8,8 @@
       <excludeFolder url="file://$MODULE_DIR$/.idea/dataSources" />
       <excludeFolder url="file://$MODULE_DIR$/inspections" />
       <excludeFolder url="file://$MODULE_DIR$/.codex" />
+      <excludeFolder url="file://$MODULE_DIR$/frontend/.output" />
+      <excludeFolder url="file://$MODULE_DIR$/frontend/.output-demo-en" />
     </content>
     <orderEntry type="jdk" jdkName="uv (seedwake)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />

@@ -95,6 +95,11 @@ body.deep .app > .col.stream-col { opacity: 0; transition: opacity 500ms ease; }
 /* typography primitives */
 .eyebrow { font-family: var(--sans); font-size: 10px; letter-spacing: 0.26em; text-transform: uppercase; color: var(--ink-faint); }
 .eyebrow .zh { font-family: var(--serif); letter-spacing: 0.38em; margin-right: 8px; color: var(--ink-soft); font-size: 11.5px; }
+/* In English mode the bilingual eyebrow becomes "CONVERSATION TELEGRAM" /
+   "IN FLIGHT IN FLIGHT" — the .zh half is no longer a different script, just
+   a duplicate of the EN subtitle. Hide it, matching how .masthead .zh /
+   .meter .head .zh are already hidden. */
+html[lang="en"] .eyebrow .zh { display: none; }
 .rule-h { height: 1px; background: var(--rule-faint); }
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
@@ -178,6 +183,9 @@ html[lang="en"] .legend-val {
 
 /* meters */
 .meters { display: flex; flex-direction: column; gap: 12px; }
+/* English meter heads collapse to a single line (the .zh half is hidden),
+   making the 12px CN-tuned gap feel cramped between groups. Loosen to 22px. */
+html[lang="en"] .meters { gap: 22px; }
 .meter .head {
   display: flex; justify-content: space-between; align-items: baseline;
   font-family: var(--sans); font-size: 10px; letter-spacing: 0.2em;
@@ -206,7 +214,7 @@ html[lang="en"] .meter .head .zh { display: none; }
   letter-spacing: 0.44em; color: var(--ink); margin: 0;
   transition: color 600ms ease, opacity 600ms ease;
 }
-html[lang="en"] .stream-head h1 { letter-spacing: 0.18em; font-size: 20px; font-weight: 500; }
+html[lang="en"] .stream-head h1 { letter-spacing: 0.04em; font-size: 22px; font-weight: 500; }
 body.drowsy .stream-head h1 { color: var(--ink-mute); font-weight: 300; }
 .stream-head .counter {
   font-family: var(--mono); font-size: 10.5px;
@@ -267,6 +275,10 @@ body.drowsy .thoughts {
 }
 .thought .tag .zh { font-family: var(--serif); letter-spacing: 0.3em; margin-right: 6px; color: var(--tag, var(--ink-soft)); opacity: 0.85; }
 html[lang="en"] .thought .tag .zh { display: none; }
+/* In EN mode the leading dash is a CN-flavored decoration that doesn't fit
+   the calmer Garamond tag layout — drop both it and its padding. */
+html[lang="en"] .thought .tag { padding-left: 0; }
+html[lang="en"] .thought .tag::before { display: none; }
 .thought .body {
   font-family: var(--serif); font-weight: 400; font-size: 19px;
   line-height: 1.85; color: var(--ink); letter-spacing: 0.03em;
@@ -304,6 +316,9 @@ html[lang="en"] .thought .body { letter-spacing: 0; font-size: 18px; line-height
      glyph only fills x-height), so nudge up to match the dot's center. */
   transform: translateY(-1.5px);
 }
+/* Inter (EN sans) has slightly higher x-height than Noto Sans SC, so the same
+   -1.5px nudge over-corrects upward — drop half a pixel back. */
+html[lang="en"] .action-chip .kind { transform: translateY(-1px); }
 .action-chip .state {
   font-family: var(--mono); font-size: 10px; line-height: 1;
   letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint);
@@ -312,13 +327,22 @@ html[lang="en"] .thought .body { letter-spacing: 0; font-size: 18px; line-height
      all meet at the same horizontal centerline. */
   transform: translateY(1px);
 }
+/* EN baseline metrics differ from CN, so the symmetric pair is 0.5px tighter. */
+html[lang="en"] .action-chip .state { transform: translateY(0.5px); }
 @keyframes sw-pulse { 0%,100% { opacity: 0.45; } 50% { opacity: 1; } }
 
 /* All thoughts render at full opacity; the stream's viewport-level mask (see .stream)
    is what produces the "older content drifts up and fades" effect. Making the fade
    track the scroll window rather than item age means scrolling up brings history into
    a clear reading zone at the bottom of the viewport. */
-.thought { --op: 1; }
+.thought {
+  --op: 1;
+  /* Vertical centering offset for the inline ember dot (.body::before). Tuned
+     to the body font's cap-height; EB Garamond in EN sits a touch lower than
+     Noto Serif SC at the same line, so EN locale nudges the dot up further. */
+  --attended-dot-y: -5px;
+}
+html[lang="en"] .thought { --attended-dot-y: -3.5px; }
 
 /* attended — cinnabar ember. Pseudo-elements (ember dot, halo) are rendered on
    ALL thoughts but kept invisible/zero-extent when not attended, so toggling
@@ -334,7 +358,7 @@ html[lang="en"] .thought.attended .body { font-size: 20px; }
   content: ""; display: inline-block;
   width: 0; height: 6px;
   border-radius: 50%; background: var(--ember);
-  margin-right: 0; transform: translateY(-5px);
+  margin-right: 0; transform: translateY(var(--attended-dot-y));
   opacity: 0;
   box-shadow:
     0 0 0 2px oklch(0.6 0.18 30 / 0.18),
@@ -351,7 +375,7 @@ html[lang="en"] .thought.attended .body { font-size: 20px; }
 }
 @keyframes sw-ember {
   0%,100% {
-    transform: translateY(-5px) scale(1);
+    transform: translateY(var(--attended-dot-y)) scale(1);
     box-shadow:
       0 0 0 2px oklch(0.6 0.18 30 / 0.18),
       0 0 22px 5px oklch(0.58 0.18 30 / 0.30),
@@ -359,7 +383,7 @@ html[lang="en"] .thought.attended .body { font-size: 20px; }
     opacity: 0.85;
   }
   50% {
-    transform: translateY(-5px) scale(1.15);
+    transform: translateY(var(--attended-dot-y)) scale(1.15);
     box-shadow:
       0 0 0 3px oklch(0.6 0.18 30 / 0.28),
       0 0 32px 8px oklch(0.58 0.18 30 / 0.48),

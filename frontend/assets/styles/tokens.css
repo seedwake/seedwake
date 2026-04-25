@@ -53,10 +53,12 @@
   --seal:  "Ma Shan Zheng", var(--serif);
 }
 
-/* English locale — swap to humanist Latin type, drop CJK primaries */
+/* English locale — humanist Latin serif paired with Inter for sans. EB Garamond
+   is the calm body workhorse (peer to Noto Serif SC's even strokes); Fraunces
+   stays loaded as a display-only fallback but is no longer the primary serif. */
 html[lang="en"] {
-  --serif: "Fraunces", "EB Garamond", ui-serif, serif;
+  --serif: "EB Garamond", ui-serif, serif;
   --sans:  "Inter", ui-sans-serif, system-ui;
-  --latin: "EB Garamond", "Fraunces", ui-serif, serif;
+  --latin: "EB Garamond", ui-serif, serif;
   /* keep --mono and --seal for code and seal glyph */
 }

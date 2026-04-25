@@ -79,8 +79,10 @@ const displayContent = computed(() => {
     </div>
     <div>
       <div class="tag">
-        <span class="zh">{{ zhLabel }}</span>
-        <span>· {{ enLabel }}</span>
+        <!-- Bilingual separator dot lives inside the .zh span so EN mode (where
+             .zh is hidden) drops both the CN label and the leading dot together. -->
+        <span class="zh">{{ zhLabel }} · </span>
+        <span>{{ enLabel }}</span>
         <span v-if="attended"> · {{ t("attention.attended") }}</span>
       </div>
       <p class="body">{{ displayContent }}</p>

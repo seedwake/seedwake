@@ -4,6 +4,7 @@ inspections/
 
 # Data
 data/
+.output-demo-en/
 
 # Codex
 .codex/
