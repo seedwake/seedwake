@@ -106,7 +106,11 @@ body.deep .app > .col.stream-col { opacity: 0; transition: opacity 500ms ease; }
   border-left: 2px solid var(--ember-soft);
   background: oklch(0.96 0.015 78 / 0.5);
 }
-html[lang="en"] .demo-banner { font-family: var(--latin); font-size: 11.5px; letter-spacing: 0; font-style: italic; }
+html[lang="en"] .demo-banner {
+  font-family: var(--serif); font-size: 11px; line-height: 1.6;
+  color: var(--ink-soft); letter-spacing: 0.01em;
+  background: oklch(0.97 0.012 78 / 0.78);
+}
 .mark { font-family: var(--latin); font-size: 20px; color: var(--ink); }
 .mark i { font-style: italic; color: var(--ink-soft); }
 .masthead .zh { font-family: var(--serif); font-size: 12.5px; color: var(--ink-mute); letter-spacing: 0.3em; padding-left: 12px; border-left: 1px solid var(--rule-faint); }
@@ -155,6 +159,22 @@ body.drowsy .mode .dot {
 }
 .legend-val { color: var(--ink); font-family: var(--mono); font-size: 10.5px; }
 .legend-name .tiny { font-family: var(--mono); font-size: 9px; letter-spacing: 0.14em; color: var(--ink-faint); }
+html[lang="en"] .emotion-legend {
+  grid-template-columns: minmax(128px, 1fr) 44px;
+  column-gap: 14px;
+}
+html[lang="en"] .legend-name {
+  display: grid;
+  grid-template-columns: 8px minmax(72px, 1fr) auto;
+  gap: 8px;
+}
+html[lang="en"] .legend-name::before {
+  align-self: center;
+}
+html[lang="en"] .legend-val {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 
 /* meters */
 .meters { display: flex; flex-direction: column; gap: 12px; }
